@@ -133,6 +133,35 @@ def sync_courses(contents, assignments, token, course_path):
                                                     f.write(part)
 
 
+def print_courses(courses):
+    print("\nYour Moodle courses:")
+    for i, c in enumerate(courses, 1):
+        fullname = c.get("fullname") or c.get("shortname")
+        print(f"{i:>2}. [{c.get('id')}] {fullname}")
+
+
+def choose_course(courses):
+    while True:
+        s = input("\nSelect course number: ").strip()
+        if not s.isdigit():
+            print("Enter a number from the list.")
+            continue
+        idx = int(s)
+        if 1 <= idx <= len(courses):
+            return courses[idx - 1]
+        print("Out of range.")
+
+
+def get_course_contents(token, course_id):
+    # options: includestealthmodules true helps show hidden-but-available items
+    return call_ws(
+        token,
+        "core_course_get_contents",
+        courseid=f"{course_id}",
+        # options=[{"name": "includestealthmodules", "value": "1"}],
+    )
+
+
 def list_my_courses(token):
     try:
         return call_ws(
@@ -145,3 +174,33 @@ def list_my_courses(token):
     except Exception as e:
         print("[!] Could not list courses via core_enrol_get_users_courses.")
         raise e
+
+
+def main():
+    print("== Moodle Course Contents Viewer ==")
+    token = get_token()
+    courses = list_my_courses(token)
+    if not courses:
+        print("No courses found for this user.")
+        return
+    print_courses(courses)
+    chosen = choose_course(courses)
+    cid = chosen.get("id")
+    print(
+        f"\nFetching contents for: {chosen.get('fullname') or chosen.get('shortname')} (id={cid}) ..."
+    )
+    contents = get_course_contents(token, cid)
+    sync_courses(contents, None, token, ROOT_FOLDER)
+    if isinstance(contents, dict) and contents.get("exception"):
+        print("[!] Error:", contents)
+        return
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nAborted by user.")
+    except Exception as e:
+        print(f"\n[!] Error: {e}")
+        sys.exit(1)
