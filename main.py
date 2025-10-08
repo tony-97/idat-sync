@@ -1,6 +1,8 @@
+from pathlib import Path
 import unicodedata
 import re
 import requests
+import os
 import sys
 
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
@@ -84,6 +86,51 @@ def call_ws(token, function, **kwargs):
     if isinstance(j, dict) and j.get("exception"):
         raise RuntimeError(f"{j.get('errorcode')}: {j.get('message')}")
     return j
+
+
+def sync_courses(contents, assignments, token, course_path):
+    for content in contents:
+        if content_name := safe_filename(content.get("name", "")):
+            content_path = os.path.join(course_path, content_name)
+            Path(content_path).mkdir(parents=True, exist_ok=True)
+            for module in content.get("modules", []):
+                if module_name := safe_filename(module.get("name", "")):
+                    module_path = os.path.join(content_path, module_name)
+                    Path(module_path).mkdir(parents=True, exist_ok=True)
+                    if module.get("modname") == "label":
+                        ...
+                    elif module.get("modname") == "assign":
+                        # print(call_ws(token, "mod_assign_get_assignments"))
+                        ...
+                    else:
+                        for module_content in module.get("contents", []):
+                            if (type := module_content.get("type")) == "url" or (
+                                type == "file"
+                            ):
+                                if (file_url := module_content.get("fileurl")) and (
+                                    file_name := module_content.get("filename")
+                                ):
+                                    with requests.get(
+                                        file_url,
+                                        params={"wstoken": token, "token": token},
+                                        stream=True,
+                                        allow_redirects=True,
+                                        timeout=60,
+                                        headers=RQ_HEADER,
+                                    ) as r:
+                                        if r.status_code == 403:
+                                            raise RuntimeError(
+                                                "403 Forbidden: your session cookie is missing/expired."
+                                            )
+                                        r.raise_for_status()
+                                        with open(
+                                            os.path.join(module_path, file_name), "wb"
+                                        ) as f:
+                                            for part in r.iter_content(
+                                                chunk_size=1024 * 256
+                                            ):
+                                                if part:
+                                                    f.write(part)
 
 
 def list_my_courses(token):
