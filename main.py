@@ -84,3 +84,17 @@ def call_ws(token, function, **kwargs):
     if isinstance(j, dict) and j.get("exception"):
         raise RuntimeError(f"{j.get('errorcode')}: {j.get('message')}")
     return j
+
+
+def list_my_courses(token):
+    try:
+        return call_ws(
+            token,
+            "core_course_get_enrolled_courses_by_timeline_classification",
+            classification="all",
+            limit=100,
+            offset=0,
+        ).get("courses", [])
+    except Exception as e:
+        print("[!] Could not list courses via core_enrol_get_users_courses.")
+        raise e
