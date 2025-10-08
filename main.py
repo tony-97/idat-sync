@@ -68,3 +68,19 @@ def get_token():
         )
         sys.exit(1)
     return token
+
+
+def call_ws(token, function, **kwargs):
+    url = f"{MOODLE_IDAT}/webservice/rest/server.php"
+    payload = {
+        "wstoken": token,
+        "wsfunction": function,
+        "moodlewsrestformat": "json",
+        **kwargs,
+    }
+    response = requests.post(url, data=payload, timeout=45)
+    response.raise_for_status()
+    j = response.json()
+    if isinstance(j, dict) and j.get("exception"):
+        raise RuntimeError(f"{j.get('errorcode')}: {j.get('message')}")
+    return j
