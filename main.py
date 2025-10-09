@@ -93,6 +93,13 @@ def sync_courses(contents, assignments, token, course_path):
         if content_name := safe_filename(content.get("name", "")):
             content_path = os.path.join(course_path, content_name)
             Path(content_path).mkdir(parents=True, exist_ok=True)
+            summary_name = f"{content_name}-[{content.get("id", "")}]-resumen.html"
+            summary_path = Path(os.path.join(content_path, summary_name))
+            if not summary_path.exists() and (
+                summary := content.get("summary", "").stripe()
+            ):
+                with open(summary_path, "w") as f:
+                    f.write(summary)
             for module in content.get("modules", []):
                 if module_name := safe_filename(module.get("name", "")):
                     module_path = os.path.join(content_path, module_name)
@@ -153,12 +160,10 @@ def choose_course(courses):
 
 
 def get_course_contents(token, course_id):
-    # options: includestealthmodules true helps show hidden-but-available items
     return call_ws(
         token,
         "core_course_get_contents",
         courseid=f"{course_id}",
-        # options=[{"name": "includestealthmodules", "value": "1"}],
     )
 
 
