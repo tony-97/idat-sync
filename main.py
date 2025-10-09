@@ -105,7 +105,7 @@ def sync_courses(contents, assignments, token, course_path):
             save_content(summary_path, content.get("summary", ""))
             for module in content.get("modules", []):
                 if module_name := safe_filename(module.get("name", "")):
-                    module_path = os.path.join(content_path, module_name)
+                    module_path: str = os.path.join(content_path, module_name)
                     modname = module.get("modname")
                     module_contents = module.get("contents", [])
                     if modname == "label" and (
@@ -115,8 +115,24 @@ def sync_courses(contents, assignments, token, course_path):
                     elif modname == "url" and (len(module_contents) == 1):
                         ...
                     elif modname == "assign":
-                        # print(call_ws(token, "mod_assign_get_assignments"))
-                        ...
+                        Path(module_path).mkdir(parents=True, exist_ok=True)
+                        cmid = module.get("id", None)
+                        assignment = next(
+                            (
+                                assign
+                                for assign in assignments
+                                if assign.get("cmid", None) == cmid
+                            ),
+                            None,
+                        )
+                        if assignment:
+                            assignment_intro_name = f"{assignment.get("name", "")}-[{assignment.get("id", "")}]-intro.html"
+                            assignment_intro_path = os.path.join(
+                                module_path, assignment_intro_name
+                            )
+                            save_content(
+                                assignment_intro_path, assignment.get("intro", "")
+                            )
                     else:
                         Path(module_path).mkdir(parents=True, exist_ok=True)
                         for module_content in module_contents:
@@ -204,7 +220,16 @@ def main():
         f"\nFetching contents for: {chosen.get('fullname') or chosen.get('shortname')} (id={cid}) ..."
     )
     contents = get_course_contents(token, cid)
-    sync_courses(contents, None, token, ROOT_FOLDER)
+    assignments_courses = call_ws(token, "mod_assign_get_assignments").get(
+        "courses", []
+    )
+    assignments = (
+        next(
+            (course for course in assignments_courses if course.get("id") == cid), None
+        )
+        or {}
+    ).get("assignments", [])
+    sync_courses(contents, assignments, token, ROOT_FOLDER)
     if isinstance(contents, dict) and contents.get("exception"):
         print("[!] Error:", contents)
         return
