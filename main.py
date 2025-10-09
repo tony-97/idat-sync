@@ -47,6 +47,13 @@ def safe_filename(s: str, replacement: str = " ", max_len: int = 100) -> str:
     return s
 
 
+def save_content(path: str, content: str):
+    content = content.strip()
+    if not Path(path).exists() and content:
+        with open(path, "w") as f:
+            f.write(content)
+
+
 def get_token():
     response = requests.get(
         f"{MOODLE_IDAT}/login/token.php",
@@ -94,23 +101,25 @@ def sync_courses(contents, assignments, token, course_path):
             content_path = os.path.join(course_path, content_name)
             Path(content_path).mkdir(parents=True, exist_ok=True)
             summary_name = f"{content_name}-[{content.get("id", "")}]-resumen.html"
-            summary_path = Path(os.path.join(content_path, summary_name))
-            if not summary_path.exists() and (
-                summary := content.get("summary", "").stripe()
-            ):
-                with open(summary_path, "w") as f:
-                    f.write(summary)
+            summary_path = os.path.join(content_path, summary_name)
+            save_content(summary_path, content.get("summary", ""))
             for module in content.get("modules", []):
                 if module_name := safe_filename(module.get("name", "")):
                     module_path = os.path.join(content_path, module_name)
-                    Path(module_path).mkdir(parents=True, exist_ok=True)
-                    if module.get("modname") == "label":
+                    modname = module.get("modname")
+                    module_contents = module.get("contents", [])
+                    if modname == "label" and (
+                        description := module.get("description", ""),
+                    ):
+                        save_content(f"{module_path}.html", description)
+                    elif modname == "url" and (len(module_contents) == 1):
                         ...
-                    elif module.get("modname") == "assign":
+                    elif modname == "assign":
                         # print(call_ws(token, "mod_assign_get_assignments"))
                         ...
                     else:
-                        for module_content in module.get("contents", []):
+                        for module_content in module_contents:
+                            Path(module_path).mkdir(parents=True, exist_ok=True)
                             if (type := module_content.get("type")) == "url" or (
                                 type == "file"
                             ):
