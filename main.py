@@ -13,7 +13,7 @@ RQ_HEADER = {
     ),
     "Content-Type": "application/x-www-form-urlencoded",
 }
-ROOT_FOLDER = "C:\\Users\\User\\Desktop\\src\\idat-sync\\syc_folder"
+ROOT_FOLDER = "C:\\Users\\User\\Desktop\\src\\idat-sync\\sync_folder"
 
 
 WINDOWS_RESERVED = {
