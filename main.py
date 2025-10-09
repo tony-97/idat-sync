@@ -50,7 +50,7 @@ def safe_filename(s: str, replacement: str = " ", max_len: int = 100) -> str:
 def save_content(path: str, content: str):
     content = content.strip()
     if not Path(path).exists() and content:
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(content)
 
 
