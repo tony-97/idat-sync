@@ -118,8 +118,8 @@ def sync_courses(contents, assignments, token, course_path):
                         # print(call_ws(token, "mod_assign_get_assignments"))
                         ...
                     else:
+                        Path(module_path).mkdir(parents=True, exist_ok=True)
                         for module_content in module_contents:
-                            Path(module_path).mkdir(parents=True, exist_ok=True)
                             if (type := module_content.get("type")) == "url" or (
                                 type == "file"
                             ):
