@@ -1,3 +1,10 @@
+import time
+from urllib.parse import urlparse
+from playwright._impl._api_structures import StorageState
+from playwright.sync_api import sync_playwright
+
+from office365.sharepoint.client_context import ClientContext
+
 from pathlib import Path
 import unicodedata
 import re
@@ -54,30 +61,42 @@ def save_content(path: str, content: str):
             f.write(content)
 
 
-def download_contents(contents, token, folder):
-    for content in contents:
-        if (file_url := content.get("fileurl")) and (
-            file_name := content.get("filename")
-        ):
-            if (file_path := Path(os.path.join(folder, file_name))).exists():
-                continue
-            with requests.get(
-                file_url,
-                params={"wstoken": token, "token": token},
-                stream=True,
-                allow_redirects=True,
-                timeout=60,
-                headers=RQ_HEADER,
-            ) as r:
-                if r.status_code == 403:
-                    raise RuntimeError(
-                        "403 Forbidden: your session cookie is missing/expired."
-                    )
-                r.raise_for_status()
-                with open(file_path, "wb") as f:
-                    for part in r.iter_content(chunk_size=1024 * 256):
-                        if part:
-                            f.write(part)
+def get_sharepoint_cookies():
+    site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, channel="msedge")
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(site_url)
+        # Wait for network to be idle; login flow may redirect to Microsoft login pages
+        page.wait_for_load_state("networkidle")
+        page.wait_for_url(
+            "https://login.microsoftonline.com/**",
+            timeout=60000 * 3,
+        )
+        page.wait_for_load_state("networkidle")
+        page.wait_for_url(
+            "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
+            timeout=60000 * 3,
+        )
+        page.wait_for_load_state("networkidle")
+
+        # Persist cookies and related state
+        storage_state = context.storage_state()
+
+        context.close()
+        browser.close()
+
+        return storage_state
+
+
+def load_cookies_from_storage_state(storage_state: StorageState):
+    cookies = {}
+    for cookie in storage_state.get("cookies", []):
+        if (name := cookie.get("name")) and (name in {"FedAuth", "rtFa", "SPOIDCRL"}):
+            cookies[name] = cookie.get("value", "")
+    return cookies
 
 
 def get_token():
@@ -105,7 +124,7 @@ def get_token():
     return token
 
 
-def call_ws(token, function, **kwargs):
+def call_ws(token, function: str, **kwargs):
     url = f"{MOODLE_IDAT}/webservice/rest/server.php"
     payload = {
         "wstoken": token,
@@ -119,54 +138,6 @@ def call_ws(token, function, **kwargs):
     if isinstance(j, dict) and j.get("exception"):
         raise RuntimeError(f"{j.get('errorcode')}: {j.get('message')}")
     return j
-
-
-def sync_courses(contents, assignments, token, course_path):
-    for content in contents:
-        if content_name := safe_filename(content.get("name", "")):
-            content_path = os.path.join(course_path, content_name)
-            Path(content_path).mkdir(parents=True, exist_ok=True)
-            summary_name = f"{content_name}-[{content.get("id", "")}]-resumen.html"
-            summary_path = os.path.join(content_path, summary_name)
-            save_content(summary_path, content.get("summary", ""))
-            for module in content.get("modules", []):
-                if module_name := safe_filename(module.get("name", "")):
-                    module_path: str = os.path.join(content_path, module_name)
-                    modname = module.get("modname")
-                    module_contents = module.get("contents", [])
-                    if modname == "label" and (
-                        description := module.get("description", ""),
-                    ):
-                        save_content(f"{module_path}.html", description)
-                    elif modname == "url" and (len(module_contents) == 1):
-                        ...
-                    elif modname == "assign":
-                        Path(module_path).mkdir(parents=True, exist_ok=True)
-                        cmid = module.get("id", None)
-                        assignment = next(
-                            (
-                                assign
-                                for assign in assignments
-                                if assign.get("cmid", None) == cmid
-                            ),
-                            None,
-                        )
-                        if assignment:
-                            assignment_intro_name = f"{assignment.get("name", "")}-[{assignment.get("id", "")}]-intro.html"
-                            assignment_intro_path = os.path.join(
-                                module_path, assignment_intro_name
-                            )
-                            save_content(
-                                assignment_intro_path, assignment.get("intro", "")
-                            )
-                            download_contents(
-                                assignment.get("introattachments", []),
-                                token,
-                                module_path,
-                            )
-                    else:
-                        Path(module_path).mkdir(parents=True, exist_ok=True)
-                        download_contents(module_contents, token, module_path)
 
 
 def print_courses(courses):
@@ -196,24 +167,137 @@ def get_course_contents(token, course_id):
     )
 
 
-def list_my_courses(token):
-    try:
-        return call_ws(
-            token,
-            "core_course_get_enrolled_courses_by_timeline_classification",
-            classification="all",
-            limit=100,
-            offset=0,
-        ).get("courses", [])
-    except Exception as e:
-        print("[!] Could not list courses via core_enrol_get_users_courses.")
-        raise e
+class IDATSync:
+    def __init__(self) -> None:
+        sharepoint_storage_state = get_sharepoint_cookies()
+        self.sharepoint_cookies = load_cookies_from_storage_state(
+            sharepoint_storage_state
+        )
+        site_url = "https://idat628.sharepoint.com/sites/MATERIALESTED-ACADEMICOIDAT"
+        self.client = ClientContext(site_url).with_cookies(
+            lambda: self.sharepoint_cookies
+        )
+
+        self.token = get_token()
+
+    def download_moodle_link(self, file_url: str, file_path: str):
+        with requests.get(
+            file_url,
+            params={"wstoken": self.token, "token": self.token},
+            stream=True,
+            allow_redirects=True,
+            timeout=60,
+            headers=RQ_HEADER,
+        ) as r:
+            if r.status_code == 403:
+                raise RuntimeError(
+                    "403 Forbidden: your session cookie is missing/expired."
+                )
+            r.raise_for_status()
+            with open(file_path, "wb") as f:
+                for part in r.iter_content(chunk_size=1024 * 256):
+                    if part:
+                        f.write(part)
+            time.sleep(1)
+
+    def download_sharepoint_link(
+        self,
+        share_url: str,
+        name: str,
+        download_path: str,
+    ):
+        share_url = re.sub(
+            r"^(https://idat628\.sharepoint\.com/):\w:(?=/)", r"\1:b:", share_url
+        )
+        file = self.client.web.get_file_by_guest_url(share_url)
+
+        self.client.load(file, ["Name"])
+        self.client.execute_query()
+        time.sleep(1)
+        file_name = file.name or name
+
+        with open(os.path.join(download_path, file_name), "wb") as local_file:
+            file.download(local_file).execute_query()
+        time.sleep(0.5)
+
+    def download_contents(self, contents, folder: str):
+        for content in contents:
+            if (file_url := content.get("fileurl")) and (
+                file_name := content.get("filename")
+            ):
+                if (file_path := Path(os.path.join(folder, file_name))).exists():
+                    continue
+                netloc = urlparse(file_url).netloc
+
+                if "aulavirtual" in netloc:
+                    self.download_moodle_link(file_url, str(file_path))
+                elif "idat628.sharepoint" in netloc:
+                    self.download_sharepoint_link(file_url, file_name, folder)
+
+    def sync_courses(self, contents, assignments, course_path: str):
+        for content in contents:
+            if content_name := safe_filename(content.get("name", "")):
+                content_path = os.path.join(course_path, content_name)
+                Path(content_path).mkdir(parents=True, exist_ok=True)
+                summary_name = f"{content_name}-[{content.get("id", "")}]-resumen.html"
+                summary_path = os.path.join(content_path, summary_name)
+                save_content(summary_path, content.get("summary", ""))
+                for module in content.get("modules", []):
+                    if module_name := safe_filename(module.get("name", "")):
+                        module_path: str = os.path.join(content_path, module_name)
+                        modname = module.get("modname")
+                        module_contents = module.get("contents", [])
+                        if modname == "label" and (
+                            description := module.get("description", ""),
+                        ):
+                            save_content(f"{module_path}.html", description)
+                        elif modname == "url" and (len(module_contents) == 1):
+                            self.download_contents(module_contents, content_path)
+                        elif modname == "assign":
+                            Path(module_path).mkdir(parents=True, exist_ok=True)
+                            cmid = module.get("id", None)
+                            assignment = next(
+                                (
+                                    assign
+                                    for assign in assignments
+                                    if assign.get("cmid", None) == cmid
+                                ),
+                                None,
+                            )
+                            if assignment:
+                                assignment_intro_name = f"{assignment.get("name", "")}-[{assignment.get("id", "")}]-intro.html"
+                                assignment_intro_path = os.path.join(
+                                    module_path, assignment_intro_name
+                                )
+                                save_content(
+                                    assignment_intro_path, assignment.get("intro", "")
+                                )
+                                self.download_contents(
+                                    assignment.get("introattachments", []),
+                                    module_path,
+                                )
+                        else:
+                            Path(module_path).mkdir(parents=True, exist_ok=True)
+                            self.download_contents(module_contents, module_path)
+
+    def list_my_courses(self):
+        try:
+            return call_ws(
+                self.token,
+                "core_course_get_enrolled_courses_by_timeline_classification",
+                classification="all",
+                limit=100,
+                offset=0,
+            ).get("courses", [])
+        except Exception as e:
+            print("[!] Could not list courses via core_enrol_get_users_courses.")
+            raise e
 
 
 def main():
     print("== Moodle Course Contents Viewer ==")
-    token = get_token()
-    courses = list_my_courses(token)
+    idat_sync = IDATSync()
+    courses = idat_sync.list_my_courses()
     if not courses:
         print("No courses found for this user.")
         return
@@ -223,8 +307,8 @@ def main():
     print(
         f"\nFetching contents for: {chosen.get('fullname') or chosen.get('shortname')} (id={cid}) ..."
     )
-    contents = get_course_contents(token, cid)
-    assignments_courses = call_ws(token, "mod_assign_get_assignments").get(
+    contents = get_course_contents(idat_sync.token, cid)
+    assignments_courses = call_ws(idat_sync.token, "mod_assign_get_assignments").get(
         "courses", []
     )
     assignments = (
@@ -233,17 +317,19 @@ def main():
         )
         or {}
     ).get("assignments", [])
-    sync_courses(contents, assignments, token, ROOT_FOLDER)
+
+    idat_sync.sync_courses(contents, assignments, ROOT_FOLDER)
     if isinstance(contents, dict) and contents.get("exception"):
         print("[!] Error:", contents)
         return
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nAborted by user.")
-    except Exception as e:
-        print(f"\n[!] Error: {e}")
-        sys.exit(1)
+    main()
+    # try:
+    #    main()
+    # except KeyboardInterrupt:
+    #    print("\nAborted by user.")
+    # except Exception as e:
+    #    print(f"\n[!] Error: {e}")
+    #    sys.exit(1)
