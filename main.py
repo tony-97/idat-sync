@@ -177,8 +177,23 @@ class IDATSync:
         self.client = ClientContext(site_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
-
+        search_site_url = "https://idat628.sharepoint.com"
+        self.search_client = ClientContext(search_site_url).with_cookies(
+            lambda: self.sharepoint_cookies
+        )
         self.token = get_token()
+
+    def find_recordings_folder(self, course_name: str):
+        result = self.search_client.search.query(
+            course_name,
+            row_limit=5,
+            source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
+        ).execute_query()
+        for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
+            title = (row.Cells or {}).get("Title")
+            parent_link: str = (row.Cells or {}).get("ParentLink", "")
+            if title == course_name and parent_link.lower().endswith("grabaciones"):
+                return parent_link
 
     def download_moodle_link(self, file_url: str, file_path: str):
         with requests.get(
