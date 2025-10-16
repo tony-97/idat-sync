@@ -80,8 +80,12 @@ def get_sharepoint_cookies():
             "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
             timeout=60000 * 3,
         )
-        page.wait_for_load_state("networkidle")
-
+        page.wait_for_load_state("load", timeout=60000 * 3)
+        page.goto(
+            "https://idat628-my.sharepoint.com/shared",
+        )
+        page.wait_for_load_state("load", timeout=60000 * 3)
+        time.sleep(3)
         # Persist cookies and related state
         storage_state = context.storage_state()
 
