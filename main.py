@@ -95,6 +95,53 @@ def get_sharepoint_cookies():
         return storage_state
 
 
+def netscape_cookies_format(storage_state: StorageState):
+    lines = []
+    lines.append("# Netscape HTTP Cookie File")
+
+    for c in storage_state.get("cookies", []):
+        to_bool_str = lambda value: "TRUE" if value else "FALSE"
+        # Required fields with sane defaults
+        name = c.get("name", "")
+        value = c.get("value", "")
+        domain = c.get("domain", "")
+        path = c.get("path", "/")
+        secure = bool(c.get("secure", False))
+        expires = c.get("expires", 0)  # Playwright uses Unix seconds, 0/-1 for session
+        try:
+            expires_int = int(expires if expires and expires > 0 else 0)
+        except Exception:
+            expires_int = 0
+
+        if not domain or not name:
+            # Skip malformed cookies
+            continue
+
+        # include_subdomains flag:
+        # TRUE if domain starts with a dot (host-only cookies typically won’t)
+        include_subdomains = domain.startswith(".")
+
+        # Netscape format columns:
+        # domain, include_subdomains(TRUE|FALSE), path, secure(TRUE|FALSE),
+        # expiration (Unix epoch), name, value
+        line = "\t".join(
+            [
+                domain,
+                to_bool_str(include_subdomains),
+                path,
+                to_bool_str(secure),
+                str(expires_int),
+                name,
+                value,
+            ]
+        )
+        lines.append(line)
+    cookies_stream = io.StringIO()
+    cookies_stream.write("\n".join(lines))
+    cookies_stream.seek(0)
+    return cookies_stream
+
+
 def load_cookies_from_storage_state(storage_state: StorageState):
     cookies = {}
     for cookie in storage_state.get("cookies", []):
