@@ -247,9 +247,9 @@ class IDATSync:
             source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
         ).execute_query()
         for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
-            title: str = (row.Cells or {}).get("Title", "")
-            parent_link: str = (row.Cells or {}).get("ParentLink", "")
-            site_name: str = (row.Cells or {}).get("SiteName", "")
+            title: str = (row.Cells or {}).get("Title", "") or ""
+            parent_link: str = (row.Cells or {}).get("ParentLink", "") or ""
+            site_name: str = (row.Cells or {}).get("SiteName", "") or ""
             if (
                 title.startswith(course_name)
                 and parent_link.lower().endswith("grabaciones")
