@@ -224,6 +224,7 @@ class IDATSync:
         self.sharepoint_cookies = load_cookies_from_storage_state(
             sharepoint_storage_state
         )
+        self.netscape_cookies_format = netscape_cookies_format(sharepoint_storage_state)
         site_url = "https://idat628.sharepoint.com/sites/MATERIALESTED-ACADEMICOIDAT"
         self.client = ClientContext(site_url).with_cookies(
             lambda: self.sharepoint_cookies
