@@ -235,7 +235,7 @@ class IDATSync:
         )
         self.token = get_token()
 
-    def find_recordings_folder(self, course_name: str):
+    def find_recordings_site(self, course_name: str):
         result = self.search_client.search.query(
             course_name,
             row_limit=5,
@@ -244,8 +244,13 @@ class IDATSync:
         for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
             title = (row.Cells or {}).get("Title")
             parent_link: str = (row.Cells or {}).get("ParentLink", "")
-            if title == course_name and parent_link.lower().endswith("grabaciones"):
-                return parent_link
+            site_name: str = (row.Cells or {}).get("SiteName", "")
+            if (
+                title == course_name
+                and parent_link.lower().endswith("grabaciones")
+                and site_name
+            ):
+                return site_name
 
     def download_moodle_link(self, file_url: str, file_path: str):
         with requests.get(
@@ -277,7 +282,6 @@ class IDATSync:
             r"^(https://idat628\.sharepoint\.com/):\w:(?=/)", r"\1:b:", share_url
         )
         file = self.client.web.get_file_by_guest_url(share_url)
-
         self.client.load(file, ["Name"])
         self.client.execute_query()
         time.sleep(1)
