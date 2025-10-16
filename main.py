@@ -247,7 +247,7 @@ class IDATSync:
             source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
         ).execute_query()
         for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
-            title = (row.Cells or {}).get("Title")
+            title: str = (row.Cells or {}).get("Title", "")
             parent_link: str = (row.Cells or {}).get("ParentLink", "")
             site_name: str = (row.Cells or {}).get("SiteName", "")
             if (
