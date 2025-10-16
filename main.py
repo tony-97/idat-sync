@@ -1,16 +1,21 @@
+import re
+import os
+import io
+import sys
 import time
+import requests
+import unicodedata
+from pathlib import Path
+from collections import defaultdict
 from urllib.parse import urlparse
+from urllib.parse import quote
+
 from playwright._impl._api_structures import StorageState
 from playwright.sync_api import sync_playwright
 
 from office365.sharepoint.client_context import ClientContext
 
-from pathlib import Path
-import unicodedata
-import re
-import requests
-import os
-import sys
+import yt_dlp
 
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
@@ -305,7 +310,44 @@ class IDATSync:
                 elif "idat628.sharepoint" in netloc:
                     self.download_sharepoint_link(file_url, file_name, folder)
 
-    def sync_courses(self, contents, assignments, course_path: str):
+    def download_recordings(self, course_name: str, recordings_folder: str):
+        recording_site = self.find_recordings_site(course_name)
+        if recording_site:
+            client = ClientContext(recording_site).with_cookies(
+                lambda: self.sharepoint_cookies
+            )
+            doc_lib = client.web.default_document_library()
+            items = (
+                doc_lib.items.select(["FileSystemObjectType"])
+                .expand(["File", "Folder"])
+                .get_all()
+                .execute_query()
+            )
+            dates = [item.file.time_created.date() for item in items]
+            start = min(dates)
+            # Compute week index: 1 + floor(days_since_start / 7)
+            week_index = [1 + (d - start).days // 7 for d in dates]
+            # Group
+            groups = defaultdict(list)
+            for item, week in zip(items, week_index):
+                groups[week].append(item.file)
+            print(self.netscape_cookies_format.read())
+            self.netscape_cookies_format.seek(0)
+            for week, files in groups.items():
+                week_path = os.path.join(recordings_folder, f"Semana {week}")
+                os.makedirs(week_path, exist_ok=True)
+                for file in files:
+                    share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
+                    print(f"downloading share url: {share_url}")
+                    ydl_opts = {"cookiefile": self.netscape_cookies_format}
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
+                        ydl.download([share_url])
+
+    def sync_courses(self, contents, assignments, course_name: str, course_path: str):
+        recordings_folder = os.path.join(course_path, "Grabaciones")
+        os.makedirs(course_path, exist_ok=True)
+        os.makedirs(recordings_folder, exist_ok=True)
+        self.download_recordings(course_name, recordings_folder)
         for content in contents:
             if content_name := safe_filename(content.get("name", "")):
                 content_path = os.path.join(course_path, content_name)
@@ -395,10 +437,7 @@ def main():
         ).get("assignments", [])
         course_folder = os.path.join(ROOT_FOLDER, safe_filename(course_name))
 
-    idat_sync.sync_courses(contents, assignments, ROOT_FOLDER)
-    if isinstance(contents, dict) and contents.get("exception"):
-        print("[!] Error:", contents)
-        return
+        idat_sync.sync_courses(contents, assignments, course_name, course_folder)
 
 
 if __name__ == "__main__":
