@@ -339,7 +339,10 @@ class IDATSync:
                 for file in files:
                     share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
                     print(f"downloading share url: {share_url}")
-                    ydl_opts = {"cookiefile": self.netscape_cookies_format}
+                    ydl_opts = {
+                        "cookiefile": self.netscape_cookies_format,
+                        "paths": {"home": week_path},
+                    }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
                         ydl.download([share_url])
 
