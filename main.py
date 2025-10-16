@@ -118,7 +118,7 @@ def netscape_cookies_format(storage_state: StorageState):
         except Exception:
             expires_int = 0
 
-        if not domain or not name:
+        if not domain or not name or not value:
             # Skip malformed cookies
             continue
 
@@ -331,8 +331,6 @@ class IDATSync:
             groups = defaultdict(list)
             for item, week in zip(items, week_index):
                 groups[week].append(item.file)
-            print(self.netscape_cookies_format.read())
-            self.netscape_cookies_format.seek(0)
             for week, files in groups.items():
                 week_path = os.path.join(recordings_folder, f"Semana {week}")
                 os.makedirs(week_path, exist_ok=True)
