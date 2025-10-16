@@ -374,20 +374,26 @@ def main():
         return
     print_courses(courses)
     chosen = choose_course(courses)
-    cid = chosen.get("id")
-    print(
-        f"\nFetching contents for: {chosen.get('fullname') or chosen.get('shortname')} (id={cid}) ..."
-    )
-    contents = get_course_contents(idat_sync.token, cid)
-    assignments_courses = call_ws(idat_sync.token, "mod_assign_get_assignments").get(
-        "courses", []
-    )
-    assignments = (
-        next(
-            (course for course in assignments_courses if course.get("id") == cid), None
+
+    if (cid := chosen.get("id")) and (course_name := chosen.get("fullname")):
+        print(
+            f"\nFetching contents for: {chosen.get('fullname') or chosen.get('shortname')} (id={cid}) ..."
         )
-        or {}
-    ).get("assignments", [])
+        contents = get_course_contents(idat_sync.token, cid)
+        if isinstance(contents, dict) and contents.get("exception"):
+            print("[!] Error:", contents)
+            return
+        assignments_courses = call_ws(
+            idat_sync.token, "mod_assign_get_assignments"
+        ).get("courses", [])
+        assignments = (
+            next(
+                (course for course in assignments_courses if course.get("id") == cid),
+                None,
+            )
+            or {}
+        ).get("assignments", [])
+        course_folder = os.path.join(ROOT_FOLDER, safe_filename(course_name))
 
     idat_sync.sync_courses(contents, assignments, ROOT_FOLDER)
     if isinstance(contents, dict) and contents.get("exception"):
