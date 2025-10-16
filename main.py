@@ -251,7 +251,7 @@ class IDATSync:
             parent_link: str = (row.Cells or {}).get("ParentLink", "")
             site_name: str = (row.Cells or {}).get("SiteName", "")
             if (
-                title == course_name
+                title.startswith(course_name)
                 and parent_link.lower().endswith("grabaciones")
                 and site_name
             ):
