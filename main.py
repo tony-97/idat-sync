@@ -148,10 +148,18 @@ def netscape_cookies_format(storage_state: StorageState):
     return cookies_stream
 
 
-def load_cookies_from_storage_state(storage_state: StorageState):
+def load_cookies_from_storage_state(
+    storage_state: StorageState, domain: str, subdomain: str = ""
+):
     cookies = {}
     for cookie in storage_state.get("cookies", []):
-        if (name := cookie.get("name")) and (name in {"FedAuth", "rtFa", "SPOIDCRL"}):
+        name = cookie.get("name")
+        cookie_domain = cookie.get("domain", "")
+        if (
+            name in {"FedAuth", "rtFa", "SPOIDCRL"}
+            and domain == cookie_domain
+            or (subdomain in cookie_domain)
+        ):
             cookies[name] = cookie.get("value", "")
     return cookies
 
@@ -233,7 +241,10 @@ class IDATSync:
         else:
             sharepoint_storage_state = get_sharepoint_cookies()
         self.sharepoint_cookies = load_cookies_from_storage_state(
-            sharepoint_storage_state
+            sharepoint_storage_state, "idat628.sharepoint.com", ".sharepoint.com"
+        )
+        self.onedrive_cookies = load_cookies_from_storage_state(
+            sharepoint_storage_state, "idat628-my.sharepoint.com", ".sharepoint.com"
         )
         self.netscape_cookies_format = netscape_cookies_format(sharepoint_storage_state)
         site_url = "https://idat628.sharepoint.com/sites/MATERIALESTED-ACADEMICOIDAT"
@@ -320,7 +331,7 @@ class IDATSync:
         recording_site = self.find_recordings_site(course_name)
         if recording_site:
             client = ClientContext(recording_site).with_cookies(
-                lambda: self.sharepoint_cookies
+                lambda: self.onedrive_cookies
             )
             doc_lib = client.web.default_document_library()
             items = (
