@@ -142,10 +142,7 @@ def netscape_cookies_format(storage_state: StorageState):
             ]
         )
         lines.append(line)
-    cookies_stream = io.StringIO()
-    cookies_stream.write("\n".join(lines))
-    cookies_stream.seek(0)
-    return cookies_stream
+    return "\n".join(lines)
 
 
 def load_cookies_from_storage_state(
@@ -351,14 +348,15 @@ class IDATSync:
             for week, files in groups.items():
                 week_path = os.path.join(recordings_folder, f"Semana {week}")
                 os.makedirs(week_path, exist_ok=True)
-                for file in files:
-                    share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
-                    print(f"downloading share url: {share_url}")
-                    ydl_opts = {
-                        "cookiefile": self.netscape_cookies_format,
-                        "paths": {"home": week_path},
-                    }
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
+                output_path_template = os.path.join(week_path, "%(title)s.%(ext)s")
+                ydl_opts = {
+                    "cookiefile": io.StringIO(self.netscape_cookies_format),
+                    "outtmpl": output_path_template,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
+                    for file in files:
+                        share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
+                        print(f"downloading share url: {share_url}")
                         ydl.download([share_url])
 
     def sync_courses(self, contents, assignments, course_name: str, course_path: str):
