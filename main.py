@@ -27,7 +27,7 @@ RQ_HEADER = {
     "Content-Type": "application/x-www-form-urlencoded",
 }
 ROOT_FOLDER = "C:\\Users\\User\\Desktop\\src\\idat-sync\\sync_folder"
-
+cookies_path = "./storage_state.json"
 
 WINDOWS_RESERVED = {
     "CON",
@@ -91,9 +91,8 @@ def get_sharepoint_cookies():
             "https://idat628-my.sharepoint.com/shared",
         )
         page.wait_for_load_state("load", timeout=60000 * 3)
-        time.sleep(3)
         # Persist cookies and related state
-        storage_state = context.storage_state()
+        storage_state = context.storage_state(path=cookies_path)
 
         context.close()
         browser.close()
@@ -231,7 +230,6 @@ def get_course_contents(token, course_id):
 
 class IDATSync:
     def __init__(self) -> None:
-        cookies_path = "./storage_state.json"
         if os.path.exists(cookies_path):
             with open(cookies_path, "r", encoding="utf-8") as f:
                 sharepoint_storage_state = json.load(f)
