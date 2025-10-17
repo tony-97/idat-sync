@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright
 from office365.sharepoint.client_context import ClientContext
 
 import yt_dlp
+import json
 
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
@@ -225,7 +226,12 @@ def get_course_contents(token, course_id):
 
 class IDATSync:
     def __init__(self) -> None:
-        sharepoint_storage_state = get_sharepoint_cookies()
+        cookies_path = "./storage_state.json"
+        if os.path.exists(cookies_path):
+            with open(cookies_path, "r", encoding="utf-8") as f:
+                sharepoint_storage_state = json.load(f)
+        else:
+            sharepoint_storage_state = get_sharepoint_cookies()
         self.sharepoint_cookies = load_cookies_from_storage_state(
             sharepoint_storage_state
         )
