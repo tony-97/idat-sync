@@ -29,6 +29,8 @@ RQ_HEADER = {
 ROOT_FOLDER = "C:\\Users\\User\\Desktop\\src\\idat-sync\\sync_folder"
 cookies_path = "./storage_state.json"
 
+REQUEST_DELAY = 15
+
 WINDOWS_RESERVED = {
     "CON",
     "PRN",
@@ -198,6 +200,7 @@ def call_ws(token, function: str, **kwargs):
     j = response.json()
     if isinstance(j, dict) and j.get("exception"):
         raise RuntimeError(f"{j.get('errorcode')}: {j.get('message')}")
+    time.sleep(REQUEST_DELAY)
     return j
 
 
@@ -246,6 +249,7 @@ class IDATSync:
         self.client = ClientContext(site_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
+        time.sleep(REQUEST_DELAY)
         search_site_url = "https://idat628.sharepoint.com"
         self.search_client = ClientContext(search_site_url).with_cookies(
             lambda: self.sharepoint_cookies
@@ -257,7 +261,8 @@ class IDATSync:
             course_name,
             row_limit=5,
             source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
-        ).execute_query()
+        ).execute_query_retry()
+        time.sleep(REQUEST_DELAY)
         for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
             title: str = (row.Cells or {}).get("Title", "") or ""
             parent_link: str = (row.Cells or {}).get("ParentLink", "") or ""
@@ -287,7 +292,7 @@ class IDATSync:
                 for part in r.iter_content(chunk_size=1024 * 256):
                     if part:
                         f.write(part)
-            time.sleep(1)
+            time.sleep(REQUEST_DELAY)
 
     def download_sharepoint_link(
         self,
@@ -329,12 +334,14 @@ class IDATSync:
                 lambda: self.onedrive_cookies
             )
             doc_lib = client.web.default_document_library()
+            time.sleep(REQUEST_DELAY)
             items = (
                 doc_lib.items.select(["FileSystemObjectType"])
                 .expand(["File", "Folder"])
                 .get_all()
-                .execute_query()
+                .execute_query_retry()
             )
+            time.sleep(REQUEST_DELAY)
             dates = [item.file.time_created.date() for item in items]
             start = min(dates)
             # Compute week index: 1 + floor(days_since_start / 7)
