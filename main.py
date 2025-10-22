@@ -153,10 +153,8 @@ def load_cookies_from_storage_state(
     for cookie in storage_state.get("cookies", []):
         name = cookie.get("name")
         cookie_domain = cookie.get("domain", "")
-        if (
-            name in {"FedAuth", "rtFa", "SPOIDCRL"}
-            and domain == cookie_domain
-            or (subdomain in cookie_domain)
+        if (name in {"FedAuth", "rtFa", "SPOIDCRL"}) and (
+            domain == cookie_domain or (subdomain in cookie_domain)
         ):
             cookies[name] = cookie.get("value", "")
     return cookies
