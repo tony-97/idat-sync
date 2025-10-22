@@ -78,21 +78,21 @@ def get_sharepoint_cookies():
         page = context.new_page()
         page.goto(site_url)
         # Wait for network to be idle; login flow may redirect to Microsoft login pages
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("networkidle", timeout=timeout)
         page.wait_for_url(
             "https://login.microsoftonline.com/**",
-            timeout=60000 * 3,
+            timeout=timeout,
         )
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("networkidle", timeout=timeout)
         page.wait_for_url(
             "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
-            timeout=60000 * 3,
+            timeout=timeout,
         )
-        page.wait_for_load_state("load", timeout=60000 * 3)
+        page.wait_for_load_state("networkidle", timeout=timeout)
         page.goto(
             "https://idat628-my.sharepoint.com/shared",
         )
-        page.wait_for_load_state("load", timeout=60000 * 3)
+        page.wait_for_load_state("networkidle", timeout=timeout)
         # Persist cookies and related state
         storage_state = context.storage_state(path=cookies_path)
 
