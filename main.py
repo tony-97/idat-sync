@@ -261,7 +261,7 @@ class IDATSync:
     def find_recordings_site(self, course_name: str):
         result = self.search_client.search.query(
             course_name,
-            row_limit=5,
+            row_limit=15,
             source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
         ).execute_query_retry()
         time.sleep(REQUEST_DELAY)
