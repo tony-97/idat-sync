@@ -40,6 +40,8 @@ WINDOWS_RESERVED = {
     *(f"LPT{i}" for i in range(1, 10)),
 }
 
+SHARE_URL = re.compile(r"^(https://idat628\.sharepoint\.com/)(:\w:)(?=/)")
+
 
 def safe_filename(s: str, replacement: str = " ", max_len: int = 100) -> str:
     # Normalize (so accents become plain letters when possible)
