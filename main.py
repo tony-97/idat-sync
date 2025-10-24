@@ -296,24 +296,56 @@ class IDATSync:
                         f.write(part)
             time.sleep(REQUEST_DELAY)
 
+    def download_sharepoint_file(self, file: File, download_path: str, name: str):
+        file_name = file.name or name
+        file_path = os.path.join(download_path, file_name)
+        if Path(file_path).exists():
+            return
+        with open(file_path, "wb") as local_file:
+            file.download(local_file).execute_query_with_incremental_retry()
+            time.sleep(REQUEST_DELAY)
+
+    def download_sharepoint_folder(self, folder: Folder, download_path: str):
+        get_name = lambda f: f.name or safe_filename(folder.serverRelativeUrl or "")
+        files = folder.files.get_all().execute_query_retry()
+        time.sleep(REQUEST_DELAY)
+        folders = folder.folders.get_all().execute_query_retry()
+        time.sleep(REQUEST_DELAY)
+        for file in files:
+            self.download_sharepoint_file(file, download_path, get_name(file))
+        for folder in folders:
+            if save_name := get_name(folder):
+                sub_folder_path = os.path.join(download_path, save_name)
+                if Path(sub_folder_path).exists:
+                    continue
+                else:
+                    os.makedirs(sub_folder_path, exist_ok=True)
+                    self.download_sharepoint_folder(folder, sub_folder_path)
+
     def download_sharepoint_link(
         self,
         share_url: str,
         name: str,
         download_path: str,
     ):
-        share_url = re.sub(
-            r"^(https://idat628\.sharepoint\.com/):\w:(?=/)", r"\1:b:", share_url
-        )
-        file = self.client.web.get_file_by_guest_url(share_url)
-        self.client.load(file, ["Name"])
-        self.client.execute_query()
-        time.sleep(1)
-        file_name = file.name or name
+        print(f"downloading share url1: {share_url}")
+        from office365.sharepoint.sharing.links.kind import SharingLinkKind
 
-        with open(os.path.join(download_path, file_name), "wb") as local_file:
-            file.download(local_file).execute_query()
-        time.sleep(0.5)
+        if match := SHARE_URL.search(share_url):
+            if match.group(2) == ":f:":
+                print(f"Skipping url: {share_url}")
+                folder = self.client.web.get_folder_by_guest_url(
+                    share_url
+                ).execute_query_with_incremental_retry()
+                time.sleep(REQUEST_DELAY)
+                self.download_sharepoint_folder(folder, download_path)
+        else:
+            print(f"downloading share url2: {share_url}")
+            file = self.client.web.get_file_by_guest_url(share_url)
+            self.client.load(file, ["Name"])
+            self.client.execute_query_with_incremental_retry()
+            time.sleep(REQUEST_DELAY)
+            self.download_sharepoint_file(file, download_path, name)
 
     def download_contents(self, contents, folder: str):
         for content in contents:
@@ -327,6 +359,8 @@ class IDATSync:
                 if "aulavirtual" in netloc:
                     self.download_moodle_link(file_url, str(file_path))
                 elif "idat628.sharepoint" in netloc:
+                    print(f"downloading file url: {file_url}")
+                    print(f"downloading file name: {file_name}")
                     self.download_sharepoint_link(file_url, file_name, folder)
 
     def download_recordings(self, course_name: str, recordings_folder: str):
