@@ -378,14 +378,22 @@ class IDATSync:
                 .execute_query_retry()
             )
             time.sleep(REQUEST_DELAY)
-            dates = [item.file.time_created.date() for item in items]
+
+            def is_recording(item: ListItem):
+                return (
+                    Path(urlparse(item.file.serverRelativeUrl).path).parent.name.lower()
+                    == "grabaciones"
+                )
+
+            recordings = [item.file for item in filter(is_recording, items)]
+            dates = [file.time_created.date() for file in recordings]
             start = min(dates)
             # Compute week index: 1 + floor(days_since_start / 7)
             week_index = [1 + (d - start).days // 7 for d in dates]
             # Group
             groups = defaultdict(list)
-            for item, week in zip(items, week_index):
-                groups[week].append(item.file)
+            for file, week in zip(recordings, week_index):
+                groups[week].append(file)
             for week, files in groups.items():
                 week_path = os.path.join(recordings_folder, f"Semana {week}")
                 os.makedirs(week_path, exist_ok=True)
