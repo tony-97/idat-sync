@@ -14,6 +14,7 @@ from playwright._impl._api_structures import StorageState
 from playwright.sync_api import sync_playwright
 
 from office365.sharepoint.client_context import ClientContext
+from office365.sharepoint.listitems.collection import ListItem
 
 import yt_dlp
 
@@ -141,10 +142,7 @@ def netscape_cookies_format(storage_state: StorageState):
             ]
         )
         lines.append(line)
-    cookies_stream = io.StringIO()
-    cookies_stream.write("\n".join(lines))
-    cookies_stream.seek(0)
-    return cookies_stream
+    return "\n".join(lines)
 
 
 def load_cookies_from_storage_state(storage_state: StorageState):
@@ -243,15 +241,15 @@ class IDATSync:
     def find_recordings_site(self, course_name: str):
         result = self.search_client.search.query(
             course_name,
-            row_limit=5,
+            row_limit=20,
             source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
         ).execute_query()
         for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
-            title = (row.Cells or {}).get("Title")
-            parent_link: str = (row.Cells or {}).get("ParentLink", "")
-            site_name: str = (row.Cells or {}).get("SiteName", "")
+            title: str = (row.Cells or {}).get("Title") or ""
+            parent_link: str = (row.Cells or {}).get("ParentLink") or ""
+            site_name: str = (row.Cells or {}).get("SiteName") or ""
             if (
-                title == course_name
+                course_name in title
                 and parent_link.lower().endswith("grabaciones")
                 and site_name
             ):
@@ -323,23 +321,35 @@ class IDATSync:
                 .get_all()
                 .execute_query()
             )
-            dates = [item.file.time_created.date() for item in items]
+
+            def is_recording(item: ListItem):
+                return (
+                    Path(urlparse(item.file.serverRelativeUrl).path).parent.name.lower()
+                    == "grabaciones"
+                )
+
+            recordings = [item.file for item in filter(is_recording, items)]
+            dates = [file.time_created.date() for file in recordings]
             start = min(dates)
             # Compute week index: 1 + floor(days_since_start / 7)
             week_index = [1 + (d - start).days // 7 for d in dates]
             # Group
             groups = defaultdict(list)
-            for item, week in zip(items, week_index):
-                groups[week].append(item.file)
-            print(self.netscape_cookies_format.read())
-            self.netscape_cookies_format.seek(0)
+            for file, week in zip(recordings, week_index):
+                groups[week].append(file)
             for week, files in groups.items():
                 week_path = os.path.join(recordings_folder, f"Semana {week}")
                 os.makedirs(week_path, exist_ok=True)
                 for file in files:
                     share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
-                    print(f"downloading share url: {share_url}")
-                    ydl_opts = {"cookiefile": self.netscape_cookies_format}
+                    print(
+                        f"downloading share url: {share_url}",
+                    )
+                    ydl_opts = {
+                        "cookiefile": io.StringIO(self.netscape_cookies_format),
+                        "format_sort": ["proto:dash"],
+                        "postprocessors": [{"key": "FFmpegMetadata"}],
+                    }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
                         ydl.download([share_url])
 
