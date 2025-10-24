@@ -14,6 +14,7 @@ from playwright._impl._api_structures import StorageState
 from playwright.sync_api import sync_playwright
 
 from office365.sharepoint.client_context import ClientContext
+from office365.sharepoint.files.file import File, Folder
 
 import yt_dlp
 import json
