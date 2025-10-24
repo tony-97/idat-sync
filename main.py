@@ -124,7 +124,7 @@ def netscape_cookies_format(storage_state: StorageState):
         except Exception:
             expires_int = 0
 
-        if not domain or not name or not value:
+        if not domain or not name:
             # Skip malformed cookies
             continue
 
