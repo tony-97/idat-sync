@@ -241,7 +241,7 @@ class IDATSync:
         else:
             sharepoint_storage_state = get_sharepoint_cookies()
         self.sharepoint_cookies = load_cookies_from_storage_state(
-            sharepoint_storage_state, "idat628.sharepoint.com", ".sharepoint.com"
+            sharepoint_storage_state, "idat628-my.sharepoint.com", ".sharepoint.com"
         )
         self.onedrive_cookies = load_cookies_from_storage_state(
             sharepoint_storage_state, "idat628-my.sharepoint.com", ".sharepoint.com"
