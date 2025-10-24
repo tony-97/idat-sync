@@ -75,6 +75,7 @@ def get_sharepoint_cookies():
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
 
     with sync_playwright() as p:
+        timeout = 60000 * 3
         browser = p.chromium.launch(headless=False, channel="msedge")
         context = browser.new_context()
         page = context.new_page()
