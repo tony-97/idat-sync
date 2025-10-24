@@ -403,12 +403,14 @@ class IDATSync:
                     print(
                         f"downloading share url: {share_url}",
                     )
-                    output_path_template = os.path.join(week_path, "%(title)s.%(ext)s")
+                    output_path_template = os.path.join(
+                        f"\\\\?\\{week_path}", "%(title)s.%(ext)s"
+                    )
                     ydl_opts = {
                         "cookiefile": io.StringIO(self.netscape_cookies_format),
                         "format_sort": ["proto:dash"],
                         "postprocessors": [{"key": "FFmpegMetadata"}],
-                        # "outtmpl": output_path_template,
+                        "outtmpl": output_path_template,
                     }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
                         ydl.download([share_url])
