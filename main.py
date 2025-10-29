@@ -165,12 +165,12 @@ def load_cookies_from_storage_state(
     return cookies
 
 
-def get_token():
+def get_token(user, password):
     response = requests.get(
         f"{MOODLE_IDAT}/login/token.php",
         params={
-            "username": "iv71430260",
-            "password": "-TS7dp^$9G>BR82",
+            "username": user,
+            "password": password,
             "service": "moodle_mobile_app",
         },
         timeout=60,
@@ -235,7 +235,7 @@ def get_course_contents(token, course_id):
 
 
 class IDATSync:
-    def __init__(self) -> None:
+    def __init__(self, user, password) -> None:
         if os.path.exists(cookies_path):
             with open(cookies_path, "r", encoding="utf-8") as f:
                 sharepoint_storage_state = json.load(f)
@@ -257,7 +257,7 @@ class IDATSync:
         self.search_client = ClientContext(search_site_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
-        self.token = get_token()
+        self.token = get_token(user, password)
 
     def find_recordings_site(self, course_name: str):
         result = self.search_client.search.query(
@@ -517,10 +517,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # try:
-    #    main()
-    # except KeyboardInterrupt:
-    #    print("\nAborted by user.")
-    # except Exception as e:
-    #    print(f"\n[!] Error: {e}")
-    #    sys.exit(1)
