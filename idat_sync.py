@@ -465,6 +465,34 @@ class IDATSync:
                             Path(module_path).mkdir(parents=True, exist_ok=True)
                             self.download_contents(module_contents, module_path)
 
+    def sync_courses(self, root_folder: str):
+        courses = self.list_my_courses()
+        assignments_courses = call_ws(self.token, "mod_assign_get_assignments").get(
+            "courses", []
+        )
+        for course in courses:
+            if (cid := course.get("id")) and (course_name := course.get("fullname")):
+                print(
+                    f"\nFetching contents for: {course.get('fullname') or course.get('shortname')} (id={cid}) ..."
+                )
+                contents = get_course_contents(self.token, cid)
+                if isinstance(contents, dict) and contents.get("exception"):
+                    print("[!] Error:", contents)
+                    return
+                assignments = (
+                    next(
+                        (
+                            course_assignment
+                            for course_assignment in assignments_courses
+                            if course_assignment.get("id") == cid
+                        ),
+                        None,
+                    )
+                    or {}
+                ).get("assignments", [])
+                course_folder = os.path.join(root_folder, safe_filename(course_name))
+                self.sync_course(contents, assignments, course_name, course_folder)
+
     def list_my_courses(self):
         try:
             return call_ws(
