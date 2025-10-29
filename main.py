@@ -1,10 +1,27 @@
+import sys
 from typing import cast
+from contextlib import redirect_stdout
+from collections.abc import Callable
+import threading
 
 import tkinter as tk
 from tkinter import filedialog
 
 from idat_sync import IDATSync
 from auth import AuthProvider
+
+
+class ProgressInterceptor:
+    def __init__(self, log_func: Callable[[str], None]) -> None:
+        self.original_stdout = sys.stdout
+        self.log_func = log_func
+
+    def write(self, text: str):
+        self.original_stdout.write(text)
+        self.log_func(text)
+
+    def flush(self):
+        self.original_stdout.flush()
 
 
 class MainApp(tk.Tk):
@@ -77,11 +94,12 @@ class LoginFrame(tk.Frame):
 class SyncFrame(tk.Frame):
     def __init__(self, master: MainApp, idat_sync: IDATSync, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
-        self.idat_sync = idat_sync
         window_width = 700
         window_height = 500
         master.center_window(window_width, window_height)
         master.title("IDAT Sync")
+
+        self.idat_sync = idat_sync
 
         # Frame for folder selection
         folder_frame = tk.Frame(self, padx=10, pady=10)
@@ -116,7 +134,33 @@ class SyncFrame(tk.Frame):
             text="Logout",
             command=lambda: cast(MainApp, self.master).switch_to_login(),
         ).pack(side=tk.LEFT)
-        tk.Button(button_frame, text="Sync").pack(side=tk.RIGHT)
+        self.sync_button = tk.Button(button_frame, text="Sync", command=self.do_sync)
+        self.sync_button.pack(side=tk.RIGHT)
+
+        self.progress_interceptor = ProgressInterceptor(
+            lambda text: self.update_progress(text)
+        )
+
+    def update_progress(self, text):
+        self.output_text.config(state="normal")
+        self.output_text.insert(tk.END, text)
+        self.output_text.see(tk.END)
+        self.output_text.config(state="disabled")
+        self.update_idletasks()
+
+    def do_sync(self):
+        if path := self.folder_path.get():
+            self.sync_button.config(state="disabled")
+            self.output_text.config(state="normal")
+            self.output_text.delete("1.0", tk.END)
+            self.output_text.config(state="disabled")
+
+            def sync_task():
+                with redirect_stdout(self.progress_interceptor):  # type: ignore
+                    self.idat_sync.sync_courses(path)
+                self.sync_button.config(state="normal")
+
+            threading.Thread(target=sync_task, daemon=True).start()
 
     def browse_folder(self):
         folder_selected = filedialog.askdirectory()
