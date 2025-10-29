@@ -1,3 +1,4 @@
+import os
 import sys
 from typing import cast
 from contextlib import redirect_stdout
@@ -163,7 +164,11 @@ class SyncFrame(tk.Frame):
             threading.Thread(target=sync_task, daemon=True).start()
 
     def browse_folder(self):
-        folder_selected = filedialog.askdirectory()
+        folder_selected = filedialog.askdirectory(
+            initialdir=os.path.expanduser("~"),
+            parent=self.master,
+            title="Select Sync Folder",
+        )
         if folder_selected:
             self.folder_path.set(folder_selected)
 
