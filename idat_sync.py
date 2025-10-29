@@ -1,4 +1,3 @@
-import re
 import os
 import io
 import re
@@ -16,6 +15,8 @@ from utils import (
     RQ_HEADER,
 )
 
+from auth import Credentials
+
 from pathlib import Path
 from collections import defaultdict
 from urllib.parse import urlparse
@@ -31,12 +32,10 @@ SHARE_URL = re.compile(r"^(https://idat628\.sharepoint\.com/)(:\w:)(?=/)")
 
 
 class IDATSync:
-    def __init__(self, user: str, password: str) -> None:
-        if os.path.exists(cookies_path):
-            with open(cookies_path, "r", encoding="utf-8") as f:
-                sharepoint_storage_state = json.load(f)
-        else:
-            sharepoint_storage_state = get_sharepoint_cookies()
+    def __init__(self, credentials: Credentials) -> None:
+        self.token = credentials.get("token")
+        sharepoint_storage_state = credentials.get("sharepoint_storage_state")
+
         self.sharepoint_cookies = load_cookies_from_storage_state(
             sharepoint_storage_state, "idat628-my.sharepoint.com", ".sharepoint.com"
         )
@@ -53,7 +52,6 @@ class IDATSync:
         self.search_client = ClientContext(search_site_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
-        self.token = get_token(user, password)
 
     def find_recordings_site(self, course_name: str):
         result = self.search_client.search.query(

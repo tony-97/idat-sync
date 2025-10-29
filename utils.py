@@ -57,7 +57,7 @@ def save_content(path: str, content: str):
             f.write(content)
 
 
-def get_sharepoint_cookies():
+def get_sharepoint_cookies(username: str, password: str):
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
 
     with sync_playwright() as p:
@@ -73,6 +73,26 @@ def get_sharepoint_cookies():
             timeout=timeout,
         )
         page.wait_for_load_state("networkidle", timeout=timeout)
+        # --- Fill login form ---
+        # Fill username
+        page.fill("#i0116", f"{username}@idat.pe")
+        page.click("#idSIButton9")  # Click Next
+
+        # Fill password
+        page.fill("#i0118", password)
+        page.click("#idSIButton9")  # Click Sign in
+        # Wait MFA
+        page.wait_for_url(
+            "https://login.microsoftonline.com/*/login",
+            timeout=timeout,
+        )
+        page.wait_for_url(
+            "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+            timeout=timeout,
+        )
+        page.click("#KmsiCheckboxField")  # Keep Signed in
+        page.click("#idSIButton9")  # Click Sign in
+        # Wait for redirection back to SharePoint after successful login
         page.wait_for_url(
             "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
             timeout=timeout,
@@ -149,7 +169,8 @@ def load_cookies_from_storage_state(
     return cookies
 
 
-def get_token(user: str, password: str):
+# TODO: raise exceptions
+def get_token(user: str, password: str) -> str:
     response = requests.get(
         f"{MOODLE_IDAT}/login/token.php",
         params={
@@ -164,13 +185,11 @@ def get_token(user: str, password: str):
     login = response.json()
     if "error" in login:
         print(f"[!] Token error: {login.get('error')}")
-        sys.exit(1)
     token = login.get("token")
     if not token:
         print(
             "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
         )
-        sys.exit(1)
     return token
 
 

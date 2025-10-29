@@ -1,16 +1,21 @@
+from typing import cast
+
 import tkinter as tk
 from tkinter import filedialog
 
 from idat_sync import IDATSync
-
-from typing import cast
+from auth import AuthProvider
 
 
 class MainApp(tk.Tk):
     def __init__(self):
         tk.Tk.__init__(self)
-        self.frame = LoginFrame(self)
-        self.frame.pack()
+        self.auth = AuthProvider()
+        self.__frame = None
+        if self.auth.is_authenticated():
+            self.switch_to_sync()
+        else:
+            self.switch_to_login()
 
     def center_window(self, window_width, window_height):
         screen_width = self.winfo_screenwidth()
@@ -19,16 +24,26 @@ class MainApp(tk.Tk):
         center_y = int(screen_height / 2 - window_height / 2)
         self.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
 
-    def change(self, frame):
-        self.frame.pack_forget()  # delete currrent frame
-        self.frame = frame(self)
-        self.frame.pack()  # make new frame
+    def __change(self, frame: type[tk.Frame], **kwargs):
+        if self.__frame:
+            self.__frame.pack_forget()  # delete currrent frame
+        self.__frame = frame(self, **kwargs)
+        self.__frame.pack()  # make new frame
+
+    def switch_to_sync(self):
+        if credentials := self.auth.get_credentials():
+            idat_sync = IDATSync(credentials)
+            self.__change(SyncFrame, idat_sync=idat_sync)
+
+    def switch_to_login(self):
+        self.__change(LoginFrame, auth=self.auth)
 
 
 class LoginFrame(tk.Frame):
-    def __init__(self, master: MainApp, **kwargs):
+    def __init__(self, master: MainApp, auth: AuthProvider, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
-
+        self.auth = auth
+        self.auth.logout()
         # Center the window
         window_width = 300
         window_height = 150
@@ -51,8 +66,8 @@ class LoginFrame(tk.Frame):
     def do_login(self, event=None):
         if (user := self.user_entry.get()) and (password := self.pass_entry.get()):
             try:
-                # idat_sync = IDATSync(user, password)
-                cast(MainApp, self.master).change(SyncFrame)
+                if self.auth.login(user, password):
+                    cast(MainApp, self.master).switch_to_sync()
             except:
                 ...
         else:
@@ -60,8 +75,9 @@ class LoginFrame(tk.Frame):
 
 
 class SyncFrame(tk.Frame):
-    def __init__(self, master: MainApp, **kwargs):
+    def __init__(self, master: MainApp, idat_sync: IDATSync, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
+        self.idat_sync = idat_sync
         window_width = 700
         window_height = 500
         master.center_window(window_width, window_height)
@@ -95,7 +111,11 @@ class SyncFrame(tk.Frame):
         # Frame for action buttons
         button_frame = tk.Frame(self, padx=10, pady=10)
         button_frame.pack(fill=tk.X)
-        tk.Button(button_frame, text="Logout").pack(side=tk.LEFT)
+        tk.Button(
+            button_frame,
+            text="Logout",
+            command=lambda: cast(MainApp, self.master).switch_to_login(),
+        ).pack(side=tk.LEFT)
         tk.Button(button_frame, text="Sync").pack(side=tk.RIGHT)
 
     def browse_folder(self):
