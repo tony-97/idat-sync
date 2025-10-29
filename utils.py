@@ -191,25 +191,6 @@ def call_ws(token, function: str, **kwargs):
     return j
 
 
-def print_courses(courses):
-    print("\nYour Moodle courses:")
-    for i, c in enumerate(courses, 1):
-        fullname = c.get("fullname") or c.get("shortname")
-        print(f"{i:>2}. [{c.get('id')}] {fullname}")
-
-
-def choose_course(courses):
-    while True:
-        s = input("\nSelect course number: ").strip()
-        if not s.isdigit():
-            print("Enter a number from the list.")
-            continue
-        idx = int(s)
-        if 1 <= idx <= len(courses):
-            return courses[idx - 1]
-        print("Out of range.")
-
-
 def get_course_contents(token, course_id):
     return call_ws(
         token,
