@@ -3,6 +3,8 @@ from tkinter import filedialog
 
 from idat_sync import IDATSync
 
+from typing import cast
+
 
 class MainApp(tk.Tk):
     def __init__(self):
@@ -24,7 +26,7 @@ class MainApp(tk.Tk):
 
 
 class LoginFrame(tk.Frame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master: MainApp, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
 
         # Center the window
@@ -50,7 +52,7 @@ class LoginFrame(tk.Frame):
         if (user := self.user_entry.get()) and (password := self.pass_entry.get()):
             try:
                 # idat_sync = IDATSync(user, password)
-                self.master.change(SyncFrame)
+                cast(MainApp, self.master).change(SyncFrame)
             except:
                 ...
         else:
@@ -58,7 +60,7 @@ class LoginFrame(tk.Frame):
 
 
 class SyncFrame(tk.Frame):
-    def __init__(self, master, **kwargs):
+    def __init__(self, master: MainApp, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
         window_width = 700
         window_height = 500
