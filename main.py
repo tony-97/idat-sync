@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import filedialog
 
 from idat_sync import IDATSync
 
@@ -74,7 +75,9 @@ class SyncFrame(tk.Frame):
             folder_frame, textvariable=self.folder_path, state="readonly"
         )
         folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        browse_button = tk.Button(folder_frame, text="Browse...")
+        browse_button = tk.Button(
+            folder_frame, text="Browse...", command=self.browse_folder
+        )
         browse_button.pack(side=tk.LEFT, padx=(5, 0))
 
         # Frame for progress output
@@ -92,6 +95,11 @@ class SyncFrame(tk.Frame):
         button_frame.pack(fill=tk.X)
         tk.Button(button_frame, text="Logout").pack(side=tk.LEFT)
         tk.Button(button_frame, text="Sync").pack(side=tk.RIGHT)
+
+    def browse_folder(self):
+        folder_selected = filedialog.askdirectory()
+        if folder_selected:
+            self.folder_path.set(folder_selected)
 
 
 if __name__ == "__main__":
