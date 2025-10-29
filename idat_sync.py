@@ -415,7 +415,7 @@ class IDATSync:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
                         ydl.download([share_url])
 
-    def sync_courses(self, contents, assignments, course_name: str, course_path: str):
+    def sync_course(self, contents, assignments, course_name: str, course_path: str):
         recordings_folder = os.path.join(course_path, "Grabaciones")
         os.makedirs(course_path, exist_ok=True)
         os.makedirs(recordings_folder, exist_ok=True)
