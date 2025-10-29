@@ -48,7 +48,7 @@ class LoginFrame(tk.Frame):
     def do_login(self, event=None):
         if (user := self.user_entry.get()) and (password := self.pass_entry.get()):
             try:
-                idat_sync = IDATSync(user, password)
+                # idat_sync = IDATSync(user, password)
                 self.master.change(SyncFrame)
             except:
                 ...
@@ -59,13 +59,39 @@ class LoginFrame(tk.Frame):
 class SyncFrame(tk.Frame):
     def __init__(self, master, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
-        window_width = 600
-        window_height = 400
+        window_width = 700
+        window_height = 500
         master.center_window(window_width, window_height)
         master.title("IDAT Sync")
 
-        lbl = tk.Label(self, text="You made it to the main application")
-        lbl.pack()
+        # Frame for folder selection
+        folder_frame = tk.Frame(self, padx=10, pady=10)
+        folder_frame.pack(fill=tk.X)
+
+        tk.Label(folder_frame, text="Sync Folder:").pack(side=tk.LEFT, padx=(0, 5))
+        self.folder_path = tk.StringVar()
+        folder_entry = tk.Entry(
+            folder_frame, textvariable=self.folder_path, state="readonly"
+        )
+        folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        browse_button = tk.Button(folder_frame, text="Browse...")
+        browse_button.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Frame for progress output
+        output_frame = tk.Frame(self, padx=10)
+        output_frame.pack(fill=tk.BOTH, expand=True)
+        tk.Label(output_frame, text="Progress:").pack(anchor="w")
+        self.output_text = tk.Text(output_frame, state="disabled", wrap="word")
+        scrollbar = tk.Scrollbar(output_frame, command=self.output_text.yview)
+        self.output_text.config(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.output_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Frame for action buttons
+        button_frame = tk.Frame(self, padx=10, pady=10)
+        button_frame.pack(fill=tk.X)
+        tk.Button(button_frame, text="Logout").pack(side=tk.LEFT)
+        tk.Button(button_frame, text="Sync").pack(side=tk.RIGHT)
 
 
 if __name__ == "__main__":
