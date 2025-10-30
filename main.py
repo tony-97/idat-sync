@@ -112,10 +112,10 @@ class SyncFrame(tk.Frame):
             folder_frame, textvariable=self.folder_path, state="readonly"
         )
         folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        browse_button = tk.Button(
+        self.browse_button = tk.Button(
             folder_frame, text="Browse...", command=self.browse_folder
         )
-        browse_button.pack(side=tk.LEFT, padx=(5, 0))
+        self.browse_button.pack(side=tk.LEFT, padx=(5, 0))
 
         # Frame for progress output
         output_frame = tk.Frame(self, padx=10)
@@ -130,17 +130,36 @@ class SyncFrame(tk.Frame):
         # Frame for action buttons
         button_frame = tk.Frame(self, padx=10, pady=10)
         button_frame.pack(fill=tk.X)
-        tk.Button(
+        self.logout_button = tk.Button(
             button_frame,
             text="Logout",
             command=lambda: cast(MainApp, self.master).switch_to_login(),
-        ).pack(side=tk.LEFT)
-        self.sync_button = tk.Button(button_frame, text="Sync", command=self.do_sync)
+        )
+        self.logout_button.pack(side=tk.LEFT)
+        self.sync_button = tk.Button(
+            button_frame, text="Sync", command=self.do_sync, state="disabled"
+        )
         self.sync_button.pack(side=tk.RIGHT)
+        self.is_syncing = tk.BooleanVar(value=False)
+        self.is_syncing.trace("w", self.validate_buttons)
+        self.folder_path.trace("w", self.validate_buttons)
 
         self.progress_interceptor = ProgressInterceptor(
             lambda text: self.update_progress(text)
         )
+
+    def validate_buttons(self, *args):
+        if not self.is_syncing.get():
+            self.browse_button.config(state="active")
+            self.logout_button.config(state="active")
+            if self.folder_path.get().strip():
+                self.sync_button.config(state="active")
+            else:
+                self.sync_button.config(state="disabled")
+        else:
+            self.sync_button.config(state="disabled")
+            self.browse_button.config(state="disabled")
+            self.logout_button.config(state="disabled")
 
     def update_progress(self, text):
         self.output_text.config(state="normal")
@@ -151,7 +170,7 @@ class SyncFrame(tk.Frame):
 
     def do_sync(self):
         if path := self.folder_path.get():
-            self.sync_button.config(state="disabled")
+            self.is_syncing.set(True)
             self.output_text.config(state="normal")
             self.output_text.delete("1.0", tk.END)
             self.output_text.config(state="disabled")
@@ -159,7 +178,7 @@ class SyncFrame(tk.Frame):
             def sync_task():
                 with redirect_stdout(self.progress_interceptor):  # type: ignore
                     self.idat_sync.sync_courses(path)
-                self.sync_button.config(state="normal")
+                self.is_syncing.set(False)
 
             threading.Thread(target=sync_task, daemon=True).start()
 
