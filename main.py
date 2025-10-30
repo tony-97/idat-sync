@@ -149,17 +149,16 @@ class SyncFrame(tk.Frame):
         )
 
     def validate_buttons(self, *args):
-        if not self.is_syncing.get():
-            self.browse_button.config(state="active")
-            self.logout_button.config(state="active")
-            if self.folder_path.get().strip():
-                self.sync_button.config(state="active")
-            else:
-                self.sync_button.config(state="disabled")
-        else:
-            self.sync_button.config(state="disabled")
-            self.browse_button.config(state="disabled")
-            self.logout_button.config(state="disabled")
+        is_syncing = self.is_syncing.get()
+        folder_is_selected = bool(self.folder_path.get().strip())
+
+        # Determine the state for each button based on the current app state
+        action_state = "disabled" if is_syncing else "normal"
+        sync_state = "normal" if not is_syncing and folder_is_selected else "disabled"
+
+        self.browse_button.config(state=action_state)
+        self.logout_button.config(state=action_state)
+        self.sync_button.config(state=sync_state)
 
     def update_progress(self, text):
         self.output_text.config(state="normal")
