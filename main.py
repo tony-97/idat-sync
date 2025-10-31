@@ -78,14 +78,25 @@ class LoginFrame(tk.Frame):
         self.pass_entry.pack()
         self.pass_entry.bind("<Return>", self.do_login)
 
-        login_button = tk.Button(self, text="Login", command=self.do_login)
+        login_button = tk.Button(
+            self, text="Login", command=async_handler(self.do_login)
+        )
+        self.is_login = tk.BooleanVar(value=False)
+        self.is_login.trace(
+            "w",
+            lambda *args: login_button.config(
+                state="disabled" if self.is_login.get() else "normal"
+            ),
+        )
         login_button.pack(pady=10)
 
-    def do_login(self, event=None):
+    async def do_login(self, event=None):
+        self.is_login.set(True)
         if (user := self.user_entry.get()) and (password := self.pass_entry.get()):
             try:
                 if self.auth.login(user, password):
                     cast(MainApp, self.master).switch_to_sync()
+                    self.is_login.set(False)
             except:
                 ...
         else:
