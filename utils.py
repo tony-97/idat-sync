@@ -61,56 +61,59 @@ async def get_sharepoint_cookies(
     username: str, password: str, login_flow_ended: asyncio.Event
 ):
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
-
+    storage_state = None
     async with async_playwright() as p:
-        timeout = 60000 * 3
         browser = await p.chromium.launch(headless=False, channel="msedge")
         context = await browser.new_context()
-        page = await context.new_page()
-        await page.goto(site_url)
-        # Wait for network to be idle; login flow may redirect to Microsoft login pages
-        await page.wait_for_load_state("networkidle", timeout=timeout)
-        await page.wait_for_url(
-            "https://login.microsoftonline.com/**",
-            timeout=timeout,
-        )
-        await page.wait_for_load_state("networkidle", timeout=timeout)
-        # --- Fill login form ---
-        # Fill username
-        await page.fill("#i0116", f"{username}@idat.pe")
-        await page.click("#idSIButton9")  # Click Next
+        try:
+            timeout = 60000 * 3
+            page = await context.new_page()
+            await page.goto(site_url)
+            # Wait for network to be idle; login flow may redirect to Microsoft login pages
+            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.wait_for_url(
+                "https://login.microsoftonline.com/**",
+                timeout=timeout,
+            )
+            await page.wait_for_load_state("networkidle", timeout=timeout)
+            # --- Fill login form ---
+            # Fill username
+            await page.fill("#i0116", f"{username}@idat.pe")
+            await page.click("#idSIButton9")  # Click Next
 
-        # Fill password
-        await page.fill("#i0118", password)
-        await page.click("#idSIButton9")  # Click Sign in
-        # Wait MFA
-        await page.wait_for_url(
-            "https://login.microsoftonline.com/*/login",
-            timeout=timeout,
-        )
-        await page.wait_for_url(
-            "https://login.microsoftonline.com/common/SAS/ProcessAuth",
-            timeout=timeout,
-        )
-        await page.click("#KmsiCheckboxField")  # Keep Signed in
-        await page.click("#idSIButton9")  # Click Sign in
-        login_flow_ended.set()
-        # Wait for redirection back to SharePoint after successful login
-        await page.wait_for_url(
-            "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
-            timeout=timeout,
-        )
-        await page.wait_for_load_state("networkidle", timeout=timeout)
-        await page.goto(
-            "https://idat628-my.sharepoint.com/shared",
-        )
-        await page.wait_for_load_state("networkidle", timeout=timeout)
-        # Persist cookies and related state
-        storage_state = await context.storage_state()
+            # Fill password
+            await page.fill("#i0118", password)
+            await page.click("#idSIButton9")  # Click Sign in
+            # Wait MFA
+            await page.wait_for_url(
+                "https://login.microsoftonline.com/*/login",
+                timeout=timeout,
+            )
+            await page.wait_for_url(
+                "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+                timeout=timeout,
+            )
+            await page.click("#KmsiCheckboxField")  # Keep Signed in
+            await page.click("#idSIButton9")  # Click Sign in
+            login_flow_ended.set()
+            # Wait for redirection back to SharePoint after successful login
+            await page.wait_for_url(
+                "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
+                timeout=timeout,
+            )
+            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.goto(
+                "https://idat628-my.sharepoint.com/shared",
+            )
+            await page.wait_for_load_state("networkidle", timeout=timeout)
+            # Persist cookies and related state
+            storage_state = await context.storage_state()
 
-        await context.close()
-        await browser.close()
-
+        except:
+            login_flow_ended.set()
+        finally:
+            await context.close()
+            await browser.close()
         return storage_state
 
 
