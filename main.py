@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 from typing import cast
 from contextlib import redirect_stdout
 from collections.abc import Callable
@@ -7,9 +8,11 @@ import threading
 
 import tkinter as tk
 from tkinter import filedialog
+from async_tkinter_loop import async_handler, async_mainloop
 
 from idat_sync import IDATSync
 from auth import AuthProvider
+from dialogs import LoadingDialog
 
 
 class ProgressInterceptor:
@@ -94,7 +97,16 @@ class LoginFrame(tk.Frame):
         self.is_login.set(True)
         if (user := self.user_entry.get()) and (password := self.pass_entry.get()):
             try:
-                if self.auth.login(user, password):
+                login_flow_ended = asyncio.Event()
+                login_task = asyncio.create_task(
+                    self.auth.login(user, password, login_flow_ended)
+                )
+                await login_flow_ended.wait()
+                loading_dialog = LoadingDialog(self.master)
+                if await login_task:
+                    loading_dialog.progress.stop()
+                    loading_dialog.grab_release()
+                    loading_dialog.destroy()
                     cast(MainApp, self.master).switch_to_sync()
                     self.is_login.set(False)
             except:
@@ -204,4 +216,4 @@ class SyncFrame(tk.Frame):
 
 if __name__ == "__main__":
     app = MainApp()
-    app.mainloop()
+    async_mainloop(app)

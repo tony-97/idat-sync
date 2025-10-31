@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 
@@ -18,15 +19,21 @@ class AuthProvider:
         self.session_file = session_file
 
     # TODO: Handle exceptions from sharepoint and moodle
-    def login(self, username: str, password: str):
-        sharepoint_storage_state = get_sharepoint_cookies(username, password)
-        token = get_token(username, password)
-        credentials = Credentials(
-            sharepoint_storage_state=sharepoint_storage_state, token=token
+    async def login(
+        self, username: str, password: str, login_flow_ended: asyncio.Event
+    ):
+        sharepoint_storage_state = await get_sharepoint_cookies(
+            username, password, login_flow_ended
         )
+        token = get_token(username, password)
+        if sharepoint_storage_state == None:
+            return False
         # --- Success ---
         # Create the session file to mark the user as authenticated
         try:
+            credentials = Credentials(
+                sharepoint_storage_state=sharepoint_storage_state, token=token
+            )
             with open(self.session_file, "w", encoding="utf-8") as f:
                 json.dump(credentials, f)
             print(f"Success: User '{username}' is now logged in.")
