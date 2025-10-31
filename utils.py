@@ -1,12 +1,12 @@
 import re
-import sys
+import asyncio
 import unicodedata
 import time
 import requests
 from pathlib import Path
 
 from playwright._impl._api_structures import StorageState
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
@@ -57,56 +57,59 @@ def save_content(path: str, content: str):
             f.write(content)
 
 
-def get_sharepoint_cookies(username: str, password: str):
+async def get_sharepoint_cookies(
+    username: str, password: str, login_flow_ended: asyncio.Event
+):
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
 
-    with sync_playwright() as p:
+    async with async_playwright() as p:
         timeout = 60000 * 3
-        browser = p.chromium.launch(headless=False, channel="msedge")
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto(site_url)
+        browser = await p.chromium.launch(headless=False, channel="msedge")
+        context = await browser.new_context()
+        page = await context.new_page()
+        await page.goto(site_url)
         # Wait for network to be idle; login flow may redirect to Microsoft login pages
-        page.wait_for_load_state("networkidle", timeout=timeout)
-        page.wait_for_url(
+        await page.wait_for_load_state("networkidle", timeout=timeout)
+        await page.wait_for_url(
             "https://login.microsoftonline.com/**",
             timeout=timeout,
         )
-        page.wait_for_load_state("networkidle", timeout=timeout)
+        await page.wait_for_load_state("networkidle", timeout=timeout)
         # --- Fill login form ---
         # Fill username
-        page.fill("#i0116", f"{username}@idat.pe")
-        page.click("#idSIButton9")  # Click Next
+        await page.fill("#i0116", f"{username}@idat.pe")
+        await page.click("#idSIButton9")  # Click Next
 
         # Fill password
-        page.fill("#i0118", password)
-        page.click("#idSIButton9")  # Click Sign in
+        await page.fill("#i0118", password)
+        await page.click("#idSIButton9")  # Click Sign in
         # Wait MFA
-        page.wait_for_url(
+        await page.wait_for_url(
             "https://login.microsoftonline.com/*/login",
             timeout=timeout,
         )
-        page.wait_for_url(
+        await page.wait_for_url(
             "https://login.microsoftonline.com/common/SAS/ProcessAuth",
             timeout=timeout,
         )
-        page.click("#KmsiCheckboxField")  # Keep Signed in
-        page.click("#idSIButton9")  # Click Sign in
+        await page.click("#KmsiCheckboxField")  # Keep Signed in
+        await page.click("#idSIButton9")  # Click Sign in
+        login_flow_ended.set()
         # Wait for redirection back to SharePoint after successful login
-        page.wait_for_url(
+        await page.wait_for_url(
             "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
             timeout=timeout,
         )
-        page.wait_for_load_state("networkidle", timeout=timeout)
-        page.goto(
+        await page.wait_for_load_state("networkidle", timeout=timeout)
+        await page.goto(
             "https://idat628-my.sharepoint.com/shared",
         )
-        page.wait_for_load_state("networkidle", timeout=timeout)
+        await page.wait_for_load_state("networkidle", timeout=timeout)
         # Persist cookies and related state
-        storage_state = context.storage_state()
+        storage_state = await context.storage_state()
 
-        context.close()
-        browser.close()
+        await context.close()
+        await browser.close()
 
         return storage_state
 
