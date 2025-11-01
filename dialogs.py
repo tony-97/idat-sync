@@ -9,6 +9,7 @@ class LoadingDialog(tk.Toplevel):
         self.geometry("250x100")
         self.lift()
         self.attributes("-topmost", True)
+        self.attributes("-topmost", False)
         # Center on parent
         parent_x = parent.winfo_x()
         parent_y = parent.winfo_y()
