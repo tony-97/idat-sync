@@ -25,22 +25,26 @@ class AuthProvider:
         sharepoint_storage_state = await get_sharepoint_cookies(
             username, password, login_flow_ended
         )
-        token = get_token(username, password)
+        token = await asyncio.to_thread(get_token, username, password)
         if sharepoint_storage_state == None:
             return False
         # --- Success ---
         # Create the session file to mark the user as authenticated
-        try:
-            credentials = Credentials(
-                sharepoint_storage_state=sharepoint_storage_state, token=token
-            )
-            with open(self.session_file, "w", encoding="utf-8") as f:
-                json.dump(credentials, f)
-            print(f"Success: User '{username}' is now logged in.")
-            return True
-        except IOError as e:
-            print(f"Error: Could not create session file: {e}")
-            return False
+        credentials = Credentials(
+            sharepoint_storage_state=sharepoint_storage_state, token=token
+        )
+
+        def save_credentials():
+            try:
+                with open(self.session_file, "w", encoding="utf-8") as f:
+                    json.dump(credentials, f)
+                print(f"Success: User '{username}' is now logged in.")
+                return True
+            except IOError as e:
+                print(f"Error: Could not create session file: {e}")
+                return False
+
+        return await asyncio.to_thread(save_credentials)
 
     def logout(self):
         """
