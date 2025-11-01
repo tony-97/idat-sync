@@ -159,19 +159,19 @@ class SyncFrame(tk.Frame):
         )
         self.logout_button.pack(side=tk.LEFT)
         self.sync_button = tk.Button(
-            button_frame, text="Sync", command=self.do_sync, state="disabled"
+            button_frame,
+            text="Sync",
+            command=async_handler(self.do_sync),
+            state="disabled",
         )
         self.sync_button.pack(side=tk.RIGHT)
         self.is_syncing = tk.BooleanVar(value=False)
         self.is_syncing.trace("w", self.validate_buttons)
         self.folder_path.trace("w", self.validate_buttons)
 
-        def load_idat_sync():
-            self.is_syncing.set(True)
-            self.idat_sync = IDATSync(credentials)
-            self.is_syncing.set(False)
-
-        threading.Thread(target=load_idat_sync).start()
+        # Schedule the async task to run after the main loop starts.
+        # This prevents a "no running event loop" error.
+        self.after_idle(lambda: asyncio.create_task(self.load_idat_sync(credentials)))
 
         self.progress_interceptor = ProgressInterceptor(
             lambda text: self.update_progress(text)
@@ -189,6 +189,12 @@ class SyncFrame(tk.Frame):
         self.logout_button.config(state=action_state)
         self.sync_button.config(state=sync_state)
 
+    async def load_idat_sync(self, credentials: Credentials):
+        self.is_syncing.set(True)
+        # Run the synchronous IDATSync constructor in a thread pool
+        self.idat_sync = await asyncio.to_thread(IDATSync, credentials)
+        self.is_syncing.set(False)
+
     def update_progress(self, text):
         self.output_text.config(state="normal")
         self.output_text.insert(tk.END, text)
@@ -196,7 +202,7 @@ class SyncFrame(tk.Frame):
         self.output_text.config(state="disabled")
         self.update_idletasks()
 
-    def do_sync(self):
+    async def do_sync(self):
         if path := self.folder_path.get():
             self.is_syncing.set(True)
             self.output_text.config(state="normal")
@@ -208,7 +214,7 @@ class SyncFrame(tk.Frame):
                     self.idat_sync.sync_courses(path)  # type: ignore
                 self.is_syncing.set(False)
 
-            threading.Thread(target=sync_task, daemon=True).start()
+            await asyncio.to_thread(sync_task)
 
     def browse_folder(self):
         folder_selected = filedialog.askdirectory(
