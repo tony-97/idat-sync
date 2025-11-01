@@ -11,7 +11,7 @@ from tkinter import filedialog
 from async_tkinter_loop import async_handler, async_mainloop
 
 from idat_sync import IDATSync
-from auth import AuthProvider
+from auth import AuthProvider, Credentials
 from dialogs import LoadingDialog
 
 
@@ -53,8 +53,7 @@ class MainApp(tk.Tk):
 
     def switch_to_sync(self):
         if credentials := self.auth.get_credentials():
-            idat_sync = IDATSync(credentials)
-            self.__change(SyncFrame, idat_sync=idat_sync)
+            self.__change(SyncFrame, credentials=credentials)
 
     def switch_to_login(self):
         self.__change(LoginFrame, auth=self.auth)
@@ -116,14 +115,14 @@ class LoginFrame(tk.Frame):
 
 
 class SyncFrame(tk.Frame):
-    def __init__(self, master: MainApp, idat_sync: IDATSync, **kwargs):
+    def __init__(self, master: MainApp, credentials: Credentials, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
         window_width = 700
         window_height = 500
         master.center_window(window_width, window_height)
         master.title("IDAT Sync")
 
-        self.idat_sync = idat_sync
+        self.idat_sync: None | IDATSync = None
 
         # Frame for folder selection
         folder_frame = tk.Frame(self, padx=10, pady=10)
@@ -167,6 +166,13 @@ class SyncFrame(tk.Frame):
         self.is_syncing.trace("w", self.validate_buttons)
         self.folder_path.trace("w", self.validate_buttons)
 
+        def load_idat_sync():
+            self.is_syncing.set(True)
+            self.idat_sync = IDATSync(credentials)
+            self.is_syncing.set(False)
+
+        threading.Thread(target=load_idat_sync).start()
+
         self.progress_interceptor = ProgressInterceptor(
             lambda text: self.update_progress(text)
         )
@@ -199,7 +205,7 @@ class SyncFrame(tk.Frame):
 
             def sync_task():
                 with redirect_stdout(self.progress_interceptor):  # type: ignore
-                    self.idat_sync.sync_courses(path)
+                    self.idat_sync.sync_courses(path)  # type: ignore
                 self.is_syncing.set(False)
 
             threading.Thread(target=sync_task, daemon=True).start()
