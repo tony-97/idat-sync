@@ -1,4 +1,5 @@
-storage_state.json
+storage_state*.json
+session*.json
 testing/
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -47,7 +47,6 @@ class IDATSync:
         self.client = ClientContext(site_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
-        time.sleep(REQUEST_DELAY)
         search_site_url = "https://idat628.sharepoint.com"
         self.search_client = ClientContext(search_site_url).with_cookies(
             lambda: self.sharepoint_cookies
