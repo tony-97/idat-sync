@@ -17,7 +17,7 @@ RQ_HEADER = {
     "Content-Type": "application/x-www-form-urlencoded",
 }
 
-REQUEST_DELAY = 15
+REQUEST_DELAY = 10
 
 WINDOWS_RESERVED = {
     "CON",
