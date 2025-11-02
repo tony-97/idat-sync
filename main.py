@@ -1,10 +1,9 @@
 import os
 import sys
 import asyncio
-from typing import cast
+from typing import Any, cast
 from contextlib import redirect_stdout
 from collections.abc import Callable
-import threading
 
 import tkinter as tk
 from tkinter import filedialog
@@ -16,7 +15,7 @@ from dialogs import LoadingDialog
 
 
 class ProgressInterceptor:
-    def __init__(self, log_func: Callable[[str], None]) -> None:
+    def __init__(self, log_func: Callable[[str], Any]) -> None:
         self.original_stdout = sys.stdout
         self.log_func = log_func
 
@@ -37,6 +36,10 @@ class MainApp(tk.Tk):
             self.switch_to_sync()
         else:
             self.switch_to_login()
+        self.loop = asyncio.new_event_loop()
+
+    def run(self):
+        async_mainloop(self, self.loop)
 
     def center_window(self, window_width, window_height):
         screen_width = self.winfo_screenwidth()
@@ -171,10 +174,14 @@ class SyncFrame(tk.Frame):
 
         # Schedule the async task to run after the main loop starts.
         # This prevents a "no running event loop" error.
-        self.after_idle(lambda: asyncio.create_task(self.load_idat_sync(credentials)))
-
+        self.after_idle(
+            lambda: master.loop.create_task(self.load_idat_sync(credentials))
+        )
+        self.progress_queue: asyncio.Queue[str] = asyncio.Queue()
         self.progress_interceptor = ProgressInterceptor(
-            lambda text: self.update_progress(text)
+            lambda text: master.loop.call_soon_threadsafe(
+                self.progress_queue.put_nowait, text
+            )
         )
 
     def validate_buttons(self, *args):
@@ -195,12 +202,17 @@ class SyncFrame(tk.Frame):
         self.idat_sync = await asyncio.to_thread(IDATSync, credentials)
         self.is_syncing.set(False)
 
-    def update_progress(self, text):
-        self.output_text.config(state="normal")
-        self.output_text.insert(tk.END, text)
-        self.output_text.see(tk.END)
-        self.output_text.config(state="disabled")
-        self.update_idletasks()
+    async def update_progress(self):
+        while True:
+            text = await self.progress_queue.get()
+            if text is None:
+                break
+            self.output_text.config(state="normal")
+            self.output_text.insert(tk.END, text)
+            self.output_text.see(tk.END)
+            self.output_text.config(state="disabled")
+            self.update_idletasks()
+            self.progress_queue.task_done()
 
     async def do_sync(self):
         if path := self.folder_path.get():
@@ -212,9 +224,11 @@ class SyncFrame(tk.Frame):
             def sync_task():
                 with redirect_stdout(self.progress_interceptor):  # type: ignore
                     self.idat_sync.sync_courses(path)  # type: ignore
-                self.is_syncing.set(False)
 
-            await asyncio.to_thread(sync_task)
+            sync_handle = asyncio.to_thread(sync_task)
+            progress_handle = asyncio.create_task(self.update_progress())
+            await asyncio.gather(sync_handle, progress_handle)
+            self.is_syncing.set(False)
 
     def browse_folder(self):
         folder_selected = filedialog.askdirectory(
@@ -228,4 +242,4 @@ class SyncFrame(tk.Frame):
 
 if __name__ == "__main__":
     app = MainApp()
-    async_mainloop(app)
+    app.run()
