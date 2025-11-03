@@ -106,11 +106,9 @@ class LoginFrame(tk.Frame):
                 await login_flow_ended.wait()
                 loading_dialog = LoadingDialog(self.master)
                 if await login_task:
-                    loading_dialog.progress.stop()
-                    loading_dialog.grab_release()
-                    loading_dialog.destroy()
                     cast(MainApp, self.master).switch_to_sync()
-                    self.is_login.set(False)
+                loading_dialog.remove()
+                self.is_login.set(False)
             except:
                 ...
         else:
