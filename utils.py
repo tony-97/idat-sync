@@ -6,7 +6,7 @@ import requests
 from pathlib import Path
 
 from playwright._impl._api_structures import StorageState
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Playwright
 
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
@@ -64,7 +64,7 @@ async def get_sharepoint_cookies(
     storage_state = None
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False, channel="msedge")
-        context = await browser.new_context()
+        context = await browser.new_context(**p.devices["Galaxy A55 landscape"])
         try:
             timeout = 60000 * 3
             page = await context.new_page()
