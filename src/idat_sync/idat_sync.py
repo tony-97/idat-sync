@@ -4,7 +4,7 @@ import re
 import time
 import requests
 
-from utils import (
+from idat_sync.utils import (
     load_cookies_from_storage_state,
     netscape_cookies_format,
     safe_filename,
@@ -15,7 +15,7 @@ from utils import (
     RQ_HEADER,
 )
 
-from auth import Credentials
+from idat_sync.auth import Credentials
 
 from pathlib import Path
 from collections import defaultdict

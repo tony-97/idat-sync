@@ -4,7 +4,7 @@ import os
 
 from typing import TypedDict
 
-from utils import get_sharepoint_cookies, get_token
+from idat_sync.utils import get_sharepoint_cookies, get_token
 
 from playwright._impl._api_structures import StorageState
 

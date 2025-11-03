@@ -9,9 +9,9 @@ import tkinter as tk
 from tkinter import filedialog
 from async_tkinter_loop import async_handler, async_mainloop
 
-from idat_sync import IDATSync
-from auth import AuthProvider, Credentials
-from dialogs import LoadingDialog
+from idat_sync.idat_sync import IDATSync
+from idat_sync.auth import AuthProvider, Credentials
+from idat_sync.ui.dialogs import LoadingDialog
 
 
 class ProgressInterceptor:
@@ -239,6 +239,10 @@ class SyncFrame(tk.Frame):
             self.folder_path.set(folder_selected)
 
 
-if __name__ == "__main__":
+def main():
     app = MainApp()
     app.run()
+
+
+if __name__ == "__main__":
+    main()
