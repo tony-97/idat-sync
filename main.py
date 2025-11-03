@@ -95,6 +95,7 @@ class LoginFrame(tk.Frame):
         )
         login_button.pack(pady=10)
 
+    # TODO add loading dialog until MFA auth
     async def do_login(self, event=None):
         self.is_login.set(True)
         if (user := self.user_entry.get()) and (password := self.pass_entry.get()):

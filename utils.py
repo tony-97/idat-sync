@@ -57,6 +57,8 @@ def save_content(path: str, content: str):
             f.write(content)
 
 
+# TODO maybe raise timeout exception when navigation fails
+# TODO handle bad username or password
 async def get_sharepoint_cookies(
     username: str, password: str, login_flow_ended: asyncio.Event
 ):
