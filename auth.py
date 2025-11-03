@@ -22,6 +22,7 @@ class AuthProvider:
     async def login(
         self, username: str, password: str, login_flow_ended: asyncio.Event
     ):
+        username = username.split("@", 1)[0]
         sharepoint_storage_state = await get_sharepoint_cookies(
             username, password, login_flow_ended
         )
