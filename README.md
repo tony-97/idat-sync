@@ -34,3 +34,9 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
    - Selecciona la carpeta donde quieres que se guarde el material.
    - Pulsa "Sync" y observa el progreso en la ventana.
 3. Los archivos se descargarán y organizarán en la carpeta que seleccionaste.
+
+## TODO
+
+- [ ] Archivo de configuración usando la libreria platformdirs
+- [ ] Versión mobil.
+- [ ] Opción para seleccionar cursos específicos para sincronizar.
