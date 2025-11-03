@@ -23,10 +23,11 @@ class AuthProvider:
         self, username: str, password: str, login_flow_ended: asyncio.Event
     ):
         username = username.split("@", 1)[0]
-        sharepoint_storage_state = await get_sharepoint_cookies(
-            username, password, login_flow_ended
+        token, sharepoint_storage_state = await asyncio.gather(
+            asyncio.to_thread(get_token, username, password),
+            get_sharepoint_cookies(username, password, login_flow_ended),
         )
-        token = await asyncio.to_thread(get_token, username, password)
+
         if sharepoint_storage_state == None:
             return False
         # --- Success ---
