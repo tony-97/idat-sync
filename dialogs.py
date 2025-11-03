@@ -30,3 +30,8 @@ class LoadingDialog(tk.Toplevel):
         self.progress.pack(pady=10)
         self.progress.start(15)
         self.update()
+
+    def remove(self):
+        self.progress.stop()
+        self.grab_release()
+        self.destroy()
