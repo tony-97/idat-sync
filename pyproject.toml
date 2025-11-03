@@ -5,6 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "idat-sync"
 version = "0.0.1"
+dependencies = [
+    "async-tkinter-loop >= 0.10.2",
+    "office365-rest-python-client >= 2.6.2",
+    "playwright >= 1.55.0",
+    "yt-dlp[default]",
+    "requests >= 2.32.5",
+]
 authors = [{ name = "Tony Acuña Flores", email = "toanacfl@gmail.com" }]
 description = "A small example package"
 readme = "README.md"
