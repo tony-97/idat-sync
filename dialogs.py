@@ -5,7 +5,7 @@ from tkinter import ttk
 class LoadingDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Loading...")
+        self.title("Login in...")
         self.geometry("250x100")
         self.lift()
         self.attributes("-topmost", True)
@@ -26,7 +26,7 @@ class LoadingDialog(tk.Toplevel):
 
         ttk.Label(self, text="Processing data, please wait...").pack(pady=20)
 
-        self.progress = ttk.Progressbar(self, mode="indeterminate", length=250)
+        self.progress = ttk.Progressbar(self, mode="indeterminate", length=200)
         self.progress.pack(pady=10)
         self.progress.start(15)
         self.update()
