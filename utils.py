@@ -78,7 +78,7 @@ async def get_sharepoint_cookies(
             await page.wait_for_load_state("networkidle", timeout=timeout)
             # --- Fill login form ---
             # Fill username
-            await page.fill("#i0116", f"{username}@idat.pe")
+            await page.fill("#i0116", f"{username}@idat.pe", force=True)
             await page.click("#idSIButton9")  # Click Next
 
             # Fill password
@@ -101,11 +101,13 @@ async def get_sharepoint_cookies(
                 "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
                 timeout=timeout,
             )
-            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.wait_for_load_state("load", timeout=timeout)
+            await asyncio.sleep(3)
             await page.goto(
                 "https://idat628-my.sharepoint.com/shared",
             )
-            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.wait_for_load_state("load", timeout=timeout)
+            await asyncio.sleep(3)
             # Persist cookies and related state
             storage_state = await context.storage_state()
 
