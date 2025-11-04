@@ -1,4 +1,5 @@
 import os
+import io
 import sys
 import asyncio
 from typing import Any, cast
@@ -240,6 +241,7 @@ class SyncFrame(tk.Frame):
 
 
 def main():
+    sys.stdout = io.StringIO()
     app = MainApp()
     app.run()
 
