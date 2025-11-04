@@ -43,17 +43,11 @@ Las imágenes se almacenan en la carpeta `screenshots` en la raíz del proyecto.
 
 ![Ventana principal](screenshots/login.png)
 
-### Estructura del material sincronizado — vista 1
+### Estructura del material sincronizado
 
-![Estructura del material sincronizado](screenshots/result_folder.png)
+![Lista de cursos](screenshots/result_folder.png)
 
-### Estructura del material sincronizado — vista 2
-
-![Estructura del material sincronizado (2)](screenshots/result_folder2.png)
-
-### Lista de cursos / vista compacta
-
-![Lista de cursos](screenshots/result_folder3.png)
+![Estructura del material sincronizado](screenshots/result_folder3.png) ![Estructura del material sincronizado](screenshots/result_folder2.png)
 
 ## TODO
 
