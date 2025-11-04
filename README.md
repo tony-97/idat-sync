@@ -35,8 +35,28 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
    - Pulsa "Sync" y observa el progreso en la ventana.
 3. Los archivos se descargarán y organizarán en la carpeta que seleccionaste.
 
+## Capturas de pantalla
+
+Las imágenes se almacenan en la carpeta `screenshots` en la raíz del proyecto.
+
+### Ventana principal de la aplicación
+
+![Ventana principal](screenshots/login.png)
+
+### Estructura del material sincronizado — vista 1
+
+![Estructura del material sincronizado](screenshots/result_folder.png)
+
+### Estructura del material sincronizado — vista 2
+
+![Estructura del material sincronizado (2)](screenshots/result_folder2.png)
+
+### Lista de cursos / vista compacta
+
+![Lista de cursos](screenshots/result_folder3.png)
+
 ## TODO
 
-- [ ] Archivo de configuración usando la libreria platformdirs
+- [ ] Archivo de configuración usando la libreria platformdirs.
 - [ ] Versión mobil.
 - [ ] Opción para seleccionar cursos específicos para sincronizar.
