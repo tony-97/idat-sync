@@ -211,7 +211,6 @@ class SyncFrame(tk.Frame):
             self.output_text.insert(tk.END, text)
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
-            self.update_idletasks()
             self.progress_queue.task_done()
 
     async def do_sync(self):
