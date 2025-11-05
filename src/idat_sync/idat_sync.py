@@ -52,17 +52,23 @@ class IDATSync:
             lambda: self.sharepoint_cookies
         )
 
-    def find_recordings_site(self, course_name: str):
+    def search_recordings(self, course_name: str):
         result = self.search_client.search.query(
             course_name,
             row_limit=15,
             source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
         ).execute_query_retry()
         time.sleep(REQUEST_DELAY)
-        for row in result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
-            title: str = (row.Cells or {}).get("Title") or ""
-            parent_link: str = (row.Cells or {}).get("ParentLink") or ""
-            site_name: str = (row.Cells or {}).get("SiteName") or ""
+        return result
+
+    def find_recordings_site(
+        self, course_name: str, search_result: ClientResult[SearchResult]
+    ):
+        for row in search_result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
+            cells = row.Cells or {}
+            title: str = cells.get("Title") or ""
+            parent_link: str = cells.get("ParentLink") or ""
+            site_name: str = cells.get("SiteName") or ""
             if (
                 course_name in title
                 and parent_link.lower().endswith("grabaciones")
@@ -156,6 +162,24 @@ class IDATSync:
                     print(f"downloading file url: {file_url}")
                     print(f"downloading file name: {file_name}")
                     self.download_sharepoint_link(file_url, file_name, folder)
+
+    def find_course_created_at(
+        self, course_name: str, search_result: ClientResult[SearchResult]
+    ):
+        for row in search_result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
+            cells = row.Cells or {}
+            title: str = cells.get("Title") or ""
+            site_name: str = cells.get("SiteName") or ""
+            is_container: bool = cells.get("IsContainer") or False
+            if (course_name in title) and site_name and is_container:
+                client = ClientContext(site_name).with_cookies(
+                    lambda: self.sharepoint_cookies
+                )
+                created = (
+                    client.web.get().execute_query_with_incremental_retry().created
+                )
+                time.sleep(REQUEST_DELAY)
+                return created
 
     def download_recordings(self, course_name: str, recordings_folder: str):
         recording_site = self.find_recordings_site(course_name)
