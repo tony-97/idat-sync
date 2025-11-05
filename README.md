@@ -30,18 +30,15 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
    idat_sync
    ```
 2. En la ventana:
-   - Ingresa tu usuario y contraseña (la app puede pedir MFA si aplica).
+   - Ingresa tu codigo de alumno y contraseña.
+     ![Login](screenshots/login.png)
+   - Espera que aparezca la ventana de autenticación doble te logeas con el codigo que llego a tu celular y esperas que cargue la ventana principal.
    - Selecciona la carpeta donde quieres que se guarde el material.
    - Pulsa "Sync" y observa el progreso en la ventana.
+     ![Progress](screenshots/sync_progress.png)
 3. Los archivos se descargarán y organizarán en la carpeta que seleccionaste.
 
 ## Capturas de pantalla
-
-Las imágenes se almacenan en la carpeta `screenshots` en la raíz del proyecto.
-
-### Ventana principal de la aplicación
-
-![Ventana principal](screenshots/login.png)
 
 ### Estructura del material sincronizado
 
