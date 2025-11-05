@@ -3,6 +3,10 @@ import io
 import re
 import time
 import requests
+from datetime import date
+
+from office365.runtime.client_result import ClientResult
+from office365.sharepoint.search.result import SearchResult
 
 from idat_sync.utils import (
     load_cookies_from_storage_state,
@@ -182,7 +186,8 @@ class IDATSync:
                 return created
 
     def download_recordings(self, course_name: str, recordings_folder: str):
-        recording_site = self.find_recordings_site(course_name)
+        search_recordings = self.search_recordings(course_name)
+        recording_site = self.find_recordings_site(course_name, search_recordings)
         if recording_site:
             client = ClientContext(recording_site).with_cookies(
                 lambda: self.onedrive_cookies
@@ -205,7 +210,7 @@ class IDATSync:
 
             recordings = [item.file for item in filter(is_recording, items)]
             dates = [file.time_created.date() for file in recordings]
-            start = min(dates)
+            start = date(2025, month=9, day=22)
             # Compute week index: 1 + floor(days_since_start / 7)
             week_index = [1 + (d - start).days // 7 for d in dates]
             # Group
@@ -213,7 +218,9 @@ class IDATSync:
             for file, week in zip(recordings, week_index):
                 groups[week].append(file)
             for week, files in groups.items():
-                week_path = os.path.join(recordings_folder, f"Semana {week}")
+                week_path = os.path.join(
+                    os.path.abspath(recordings_folder), f"Semana {week}"
+                )
                 os.makedirs(week_path, exist_ok=True)
                 for file in files:
                     share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
