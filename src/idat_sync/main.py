@@ -208,7 +208,13 @@ class SyncFrame(tk.Frame):
             if text is None:
                 break
             self.output_text.config(state="normal")
-            self.output_text.insert(tk.END, text)
+            if text.startswith("\r"):
+                last_insert_begin, last_insert_end = self.output_text.tag_ranges(
+                    "last_insert"
+                )
+                self.output_text.delete(last_insert_begin, last_insert_end)
+            self.output_text.tag_remove("last_insert", "1.0", tk.END)
+            self.output_text.insert(tk.END, text, "last_insert")
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
             self.progress_queue.task_done()
