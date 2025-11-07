@@ -190,7 +190,7 @@ class IDATSync:
             f"downloading share url: {url}",
         )
         output_path_template = os.path.join(
-            f"\\\\?\\{os.path.abspath(folder)}", "%(title)s.%(ext)s"
+            f"\\\\?\\{os.path.abspath(folder)}", "%(title)s %(id)s.%(ext)s"
         )
         ydl_opts = {
             "cookiefile": io.StringIO(self.netscape_cookies_format),
