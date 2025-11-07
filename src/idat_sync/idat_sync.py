@@ -196,8 +196,8 @@ class IDATSync:
             time.sleep(REQUEST_DELAY)
             items = (
                 doc_lib.items.select(["FileSystemObjectType"])
-                .expand(["File", "Folder"])
-                .get_all()
+                .expand(["File"])
+                .get_all(page_size=50)
                 .execute_query_retry()
             )
             time.sleep(REQUEST_DELAY)
