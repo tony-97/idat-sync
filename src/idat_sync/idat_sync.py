@@ -196,6 +196,7 @@ class IDATSync:
             "cookiefile": io.StringIO(self.netscape_cookies_format),
             "format_sort": ["proto:dash"],
             "postprocessors": [{"key": "FFmpegMetadata"}],
+            "format": "bestvideo+bestaudio/bestvideo",
             "outtmpl": output_path_template,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
