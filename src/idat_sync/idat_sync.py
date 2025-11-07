@@ -185,6 +185,22 @@ class IDATSync:
                 time.sleep(REQUEST_DELAY)
                 return created
 
+    def download_recording(self, url: str, folder: str):
+        print(
+            f"downloading share url: {url}",
+        )
+        output_path_template = os.path.join(
+            f"\\\\?\\{os.path.abspath(folder)}", "%(title)s.%(ext)s"
+        )
+        ydl_opts = {
+            "cookiefile": io.StringIO(self.netscape_cookies_format),
+            "format_sort": ["proto:dash"],
+            "postprocessors": [{"key": "FFmpegMetadata"}],
+            "outtmpl": output_path_template,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
+            ydl.download([url])
+
     def download_recordings(self, course_name: str, recordings_folder: str):
         search_recordings = self.search_recordings(course_name)
         recording_site = self.find_recordings_site(course_name, search_recordings)
@@ -224,20 +240,7 @@ class IDATSync:
                 os.makedirs(week_path, exist_ok=True)
                 for file in files:
                     share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
-                    print(
-                        f"downloading share url: {share_url}",
-                    )
-                    output_path_template = os.path.join(
-                        f"\\\\?\\{week_path}", "%(title)s.%(ext)s"
-                    )
-                    ydl_opts = {
-                        "cookiefile": io.StringIO(self.netscape_cookies_format),
-                        "format_sort": ["proto:dash"],
-                        "postprocessors": [{"key": "FFmpegMetadata"}],
-                        "outtmpl": output_path_template,
-                    }
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
-                        ydl.download([share_url])
+                    self.download_recording(share_url, week_path)
 
     def sync_course(self, contents, assignments, course_name: str, course_path: str):
         recordings_folder = os.path.join(course_path, "Grabaciones")
