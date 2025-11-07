@@ -310,9 +310,8 @@ class IDATSync:
                             for course_assignment in assignments_courses
                             if course_assignment.get("id") == cid
                         ),
-                        None,
+                        {},
                     )
-                    or {}
                 ).get("assignments", [])
                 course_folder = os.path.join(root_folder, safe_filename(course_name))
                 self.sync_course(contents, assignments, course_name, course_folder)
