@@ -28,6 +28,11 @@ class ProgressInterceptor:
         self.original_stdout.flush()
 
 
+class AppFrame(tk.Frame):
+    def exit(self):
+        pass
+
+
 class MainApp(tk.Tk):
     def __init__(self):
         tk.Tk.__init__(self)
@@ -49,9 +54,10 @@ class MainApp(tk.Tk):
         center_y = int(screen_height / 2 - window_height / 2)
         self.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
 
-    def __change(self, frame: type[tk.Frame], **kwargs):
+    def __change(self, frame: type[AppFrame], **kwargs):
         if self.__frame:
             self.__frame.pack_forget()  # delete currrent frame
+            self.__frame.exit()
         self.__frame = frame(self, **kwargs)
         self.__frame.pack()  # make new frame
 
@@ -63,7 +69,7 @@ class MainApp(tk.Tk):
         self.__change(LoginFrame, auth=self.auth)
 
 
-class LoginFrame(tk.Frame):
+class LoginFrame(AppFrame):
     def __init__(self, master: MainApp, auth: AuthProvider, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
         self.auth = auth
@@ -117,7 +123,7 @@ class LoginFrame(tk.Frame):
             ...
 
 
-class SyncFrame(tk.Frame):
+class SyncFrame(AppFrame):
     def __init__(self, master: MainApp, credentials: Credentials, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
         window_width = 700
@@ -183,6 +189,12 @@ class SyncFrame(tk.Frame):
                 self.progress_queue.put_nowait, text
             )
         )
+        progress_handle = cast(MainApp, self.master).loop.create_task(
+            self.update_progress()
+        )
+
+    def exit(self):
+        self.progress_queue.put(None)  # type: ignore
 
     def validate_buttons(self, *args):
         is_syncing = self.is_syncing.get()
@@ -206,7 +218,7 @@ class SyncFrame(tk.Frame):
         while True:
             text = await self.progress_queue.get()
             if text is None:
-                break
+                return
             self.output_text.config(state="normal")
             if text.startswith("\r"):
                 last_insert_begin, last_insert_end = self.output_text.tag_ranges(
@@ -230,9 +242,8 @@ class SyncFrame(tk.Frame):
                 with redirect_stdout(self.progress_interceptor):  # type: ignore
                     self.idat_sync.sync_courses(path)  # type: ignore
 
-            sync_handle = asyncio.to_thread(sync_task)
-            progress_handle = asyncio.create_task(self.update_progress())
-            await asyncio.gather(sync_handle, progress_handle)
+            await asyncio.to_thread(sync_task)
+            await self.progress_queue.put("Sync done...")
             self.is_syncing.set(False)
 
     def browse_folder(self):
