@@ -36,13 +36,13 @@ class AppFrame(tk.Frame):
 class MainApp(tk.Tk):
     def __init__(self):
         tk.Tk.__init__(self)
+        self.loop = asyncio.new_event_loop()
         self.auth = AuthProvider()
         self.__frame = None
         if self.auth.is_authenticated():
             self.switch_to_sync()
         else:
             self.switch_to_login()
-        self.loop = asyncio.new_event_loop()
 
     def run(self):
         async_mainloop(self, self.loop)
@@ -189,9 +189,7 @@ class SyncFrame(AppFrame):
                 self.progress_queue.put_nowait, text
             )
         )
-        progress_handle = cast(MainApp, self.master).loop.create_task(
-            self.update_progress()
-        )
+        progress_handle = master.loop.create_task(self.update_progress())
 
     def exit(self):
         self.progress_queue.put(None)  # type: ignore
