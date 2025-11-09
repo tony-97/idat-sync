@@ -10,7 +10,7 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 
 ## Requisitos
 
-- Python 3.9+
+- Python 3.10+
 
 ## Instalación
 
