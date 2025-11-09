@@ -32,9 +32,9 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 2. En la ventana:
    - Ingresa tu codigo de alumno y contraseña.
      ![Login](screenshots/login.png)
-   - Espera que aparezca la ventana de autenticación doble te logeas con el codigo que llego a tu celular y esperas que cargue la ventana principal.
-   - Selecciona la carpeta donde quieres que se guarde el material.
-   - Pulsa "Sync" y observa el progreso en la ventana.
+   - Completa la autenticación de dos factores (2FA) con el código recibido en tu dispositivo móvil.
+   - Una vez que cargue la ventana principal, selecciona la carpeta de destino para tus archivos.
+   - Haz clic en el botón **"Sync"** para iniciar el proceso. Podrás ver el progreso en la misma ventana.
      ![Progress](screenshots/sync_progress.png)
 3. Los archivos se descargarán y organizarán en la carpeta que seleccionaste.
 
