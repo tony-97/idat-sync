@@ -32,8 +32,6 @@ from office365.sharepoint.listitems.collection import ListItem
 
 import yt_dlp
 
-SHARE_URL = re.compile(r"^(https://idat628\.sharepoint\.com/)(:\w:)(?=/)")
-
 
 class IDATSync:
     def __init__(self, credentials: Credentials) -> None:
@@ -134,14 +132,14 @@ class IDATSync:
     ):
         print(f"downloading share url1: {share_url}")
 
-        if match := SHARE_URL.search(share_url):
-            if match.group(2) == ":f:":
-                print(f"Skipping url: {share_url}")
-                folder = self.client.web.get_folder_by_guest_url(
-                    share_url
-                ).execute_query_with_incremental_retry()
-                time.sleep(REQUEST_DELAY)
-                self.download_sharepoint_folder(folder, download_path)
+        if share_url.startswith("https://idat628.sharepoint.com/:f:"):
+            print(f"Skipping url: {share_url}")
+            folder = self.client.web.get_folder_by_guest_url(
+                share_url
+            ).execute_query_with_incremental_retry()
+            time.sleep(REQUEST_DELAY)
+            folder_path = os.path.join(download_path, name)
+            self.download_sharepoint_folder(folder, folder_path)
         else:
             print(f"downloading share url2: {share_url}")
             file = self.client.web.get_file_by_guest_url(share_url)
