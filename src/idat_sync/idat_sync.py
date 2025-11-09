@@ -217,13 +217,15 @@ class IDATSync:
             )
             time.sleep(REQUEST_DELAY)
 
-            def is_recording(item: ListItem):
+            def is_course_recording(item: ListItem):
+                relative_url = item.file.serverRelativeUrl
                 return (
-                    Path(urlparse(item.file.serverRelativeUrl).path).parent.name.lower()
+                    Path(urlparse(relative_url).path).parent.name.lower()
                     == "grabaciones"
+                    and course_name in relative_url
                 )
 
-            recordings = [item.file for item in filter(is_recording, items)]
+            recordings = [item.file for item in filter(is_course_recording, items)]
             dates = [file.time_created.date() for file in recordings]
             start = date(2025, month=9, day=22)
             # Compute week index: 1 + floor(days_since_start / 7)
