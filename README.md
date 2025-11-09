@@ -51,3 +51,4 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 - [ ] Archivo de configuración usando la libreria platformdirs.
 - [ ] Versión mobil.
 - [ ] Opción para seleccionar cursos específicos para sincronizar.
+- [ ] Descargar los contenidos html en pdf.
