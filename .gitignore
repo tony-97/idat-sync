@@ -1,6 +1,6 @@
 storage_state*.json
 session*.json
-testing/
+experimenting/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
