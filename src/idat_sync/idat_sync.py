@@ -139,6 +139,7 @@ class IDATSync:
             ).execute_query_with_incremental_retry()
             time.sleep(REQUEST_DELAY)
             folder_path = os.path.join(download_path, name)
+            os.makedirs(folder_path, exist_ok=True)
             self.download_sharepoint_folder(folder, folder_path)
         else:
             print(f"downloading share url2: {share_url}")
