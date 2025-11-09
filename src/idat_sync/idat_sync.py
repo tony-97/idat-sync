@@ -133,7 +133,6 @@ class IDATSync:
         download_path: str,
     ):
         print(f"downloading share url1: {share_url}")
-        from office365.sharepoint.sharing.links.kind import SharingLinkKind
 
         if match := SHARE_URL.search(share_url):
             if match.group(2) == ":f:":
