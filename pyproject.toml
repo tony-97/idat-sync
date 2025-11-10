@@ -7,7 +7,7 @@ name = "idat-sync"
 version = "0.0.1"
 dependencies = [
     "async-tkinter-loop >= 0.10.2",
-    "office365-rest-python-client >= 2.6.2",
+    "office365-rest-python-client @ git+https://github.com/vgrem/office365-rest-python-client.git@8268769c2575549a6e8af87c5ba4518f3a714cf3",
     "playwright >= 1.55.0",
     "yt-dlp[default]",
     "requests >= 2.32.5",
