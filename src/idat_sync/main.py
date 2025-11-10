@@ -256,8 +256,10 @@ class SyncFrame(AppFrame):
 
 def main():
     sys.stdout = io.StringIO()
+    sys.stderr = open("./log.err", mode="+w", encoding="utf-8")
     app = MainApp()
     app.run()
+    sys.stderr.close()
 
 
 if __name__ == "__main__":
