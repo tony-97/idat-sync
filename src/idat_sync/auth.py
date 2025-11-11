@@ -1,12 +1,11 @@
-import asyncio
-import json
 import os
-
+import json
+import asyncio
 from typing import TypedDict
 
-from idat_sync.utils import get_sharepoint_cookies, get_token
-
 from playwright._impl._api_structures import StorageState
+
+from idat_sync.utils import get_token, get_sharepoint_cookies
 
 
 class Credentials(TypedDict):

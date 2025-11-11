@@ -1,18 +1,18 @@
-import os
 import io
+import os
 import sys
 import asyncio
-from typing import Any, cast
-from contextlib import redirect_stdout
-from collections.abc import Callable
-
 import tkinter as tk
+from typing import Any, cast
 from tkinter import filedialog
+from collections.abc import Callable
+from contextlib import redirect_stdout
+
 from async_tkinter_loop import async_handler, async_mainloop
 
 from idat_sync.idat_sync import IDATSync
-from idat_sync.auth import AuthProvider, Credentials
 from idat_sync.ui.dialogs import LoadingDialog
+from idat_sync.auth import Credentials, AuthProvider
 
 
 class ProgressInterceptor:

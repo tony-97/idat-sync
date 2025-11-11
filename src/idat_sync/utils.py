@@ -1,12 +1,14 @@
 import re
+import time
 import asyncio
 import unicodedata
-import time
-import requests
 from pathlib import Path
 
+import requests
+
 from playwright._impl._api_structures import StorageState
-from playwright.async_api import async_playwright, Playwright
+from playwright.async_api import async_playwright
+
 
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
@@ -27,6 +29,9 @@ WINDOWS_RESERVED = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
+
+
+class c: ...
 
 
 def safe_filename(s: str, replacement: str = " ", max_len: int = 100) -> str:

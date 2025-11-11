@@ -1,36 +1,30 @@
-import os
 import io
-import re
+import os
 import time
-import requests
-from datetime import date
-
-from office365.runtime.client_result import ClientResult
-from office365.sharepoint.search.result import SearchResult
-
-from idat_sync.utils import (
-    load_cookies_from_storage_state,
-    netscape_cookies_format,
-    safe_filename,
-    save_content,
-    call_ws,
-    get_course_contents,
-    REQUEST_DELAY,
-    RQ_HEADER,
-)
-
-from idat_sync.auth import Credentials
-
 from pathlib import Path
+from datetime import date
 from collections import defaultdict
-from urllib.parse import urlparse
-from urllib.parse import quote
-
-from office365.sharepoint.client_context import ClientContext
-from office365.sharepoint.files.file import File, Folder
-from office365.sharepoint.listitems.collection import ListItem
+from urllib.parse import quote, urlparse
 
 import yt_dlp
+import requests
+from office365.runtime.client_result import ClientResult
+from office365.sharepoint.files.file import File, Folder
+from office365.sharepoint.search.result import SearchResult
+from office365.sharepoint.client_context import ClientContext
+from office365.sharepoint.listitems.collection import ListItem
+
+from idat_sync.auth import Credentials
+from idat_sync.utils import (
+    RQ_HEADER,
+    REQUEST_DELAY,
+    call_ws,
+    save_content,
+    safe_filename,
+    get_course_contents,
+    netscape_cookies_format,
+    load_cookies_from_storage_state,
+)
 
 
 class IDATSync:
