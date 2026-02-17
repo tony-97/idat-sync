@@ -29,8 +29,7 @@ class ProgressInterceptor:
 
 
 class AppFrame(tk.Frame):
-    def exit(self):
-        pass
+    def exit(self): ...
 
 
 class MainApp(tk.Tk):
@@ -192,7 +191,7 @@ class SyncFrame(AppFrame):
         progress_handle = master.loop.create_task(self.update_progress())
 
     def exit(self):
-        self.progress_queue.put(None)  # type: ignore
+        self.progress_queue.put_nowait(None)  # type: ignore
 
     def validate_buttons(self, *args):
         is_syncing = self.is_syncing.get()
