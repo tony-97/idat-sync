@@ -166,8 +166,7 @@ class SharepointDownloader(Downloader):
 
 
 class MemoryDownloader(Downloader):
-    def can_handle(self, content) -> bool:
-        return super().can_handle(content)
+    def can_handle(self, content) -> bool: ...
 
 
 class RecordingDownloader(Downloader):
