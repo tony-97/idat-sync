@@ -30,7 +30,6 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
    idat_sync
    ```
 2. En la ventana:
-
    - Ingresa tu codigo de alumno y contraseña.
 
      ![Login](screenshots/login.png)
@@ -56,3 +55,4 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 - [ ] Versión mobil.
 - [ ] Opción para seleccionar cursos específicos para sincronizar.
 - [ ] Descargar los contenidos html en pdf.
+- [ ] Handle auth expiration.
