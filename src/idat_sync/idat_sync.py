@@ -239,6 +239,7 @@ class IDATSync:
 
     def sync_course(self, contents, assignments, course_name: str, course_path: str):
         recordings_folder = os.path.join(course_path, "Grabaciones")
+        course_path = os.path.join(course_path, "contenido")
         os.makedirs(course_path, exist_ok=True)
         os.makedirs(recordings_folder, exist_ok=True)
         self.download_recordings(course_name, recordings_folder)
