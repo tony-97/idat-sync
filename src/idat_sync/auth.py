@@ -1,11 +1,12 @@
 import os
 import json
 import asyncio
+import requests
 from typing import TypedDict
 
 from playwright._impl._api_structures import StorageState
 
-from idat_sync.utils import get_token, get_sharepoint_cookies
+from idat_sync.utils import get_sharepoint_cookies, MOODLE_IDAT, RQ_HEADER
 
 
 class Credentials(TypedDict):
@@ -23,7 +24,7 @@ class AuthProvider:
     ):
         username = username.split("@", 1)[0]
         token, sharepoint_storage_state = await asyncio.gather(
-            asyncio.to_thread(get_token, username, password),
+            asyncio.to_thread(self.__get_moodle_token, username, password),
             get_sharepoint_cookies(username, password, login_flow_ended),
         )
 
@@ -46,6 +47,29 @@ class AuthProvider:
                 return False
 
         return await asyncio.to_thread(save_credentials)
+
+    # TODO: raise exceptions
+    def __get_moodle_token(self, user: str, password: str) -> str:
+        response = requests.get(
+            f"{MOODLE_IDAT}/login/token.php",
+            params={
+                "username": user,
+                "password": password,
+                "service": "moodle_mobile_app",
+            },
+            timeout=60,
+            headers=RQ_HEADER,
+        )
+        response.raise_for_status()
+        login = response.json()
+        if "error" in login:
+            print(f"[!] Token error: {login.get('error')}")
+        token = login.get("token")
+        if not token:
+            print(
+                "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
+            )
+        return token
 
     def logout(self):
         """

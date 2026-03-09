@@ -1,12 +1,9 @@
 import re
-import time
 import asyncio
 import unicodedata
 from pathlib import Path
 
-import requests
 
-from playwright._impl._api_structures import StorageState
 from playwright.async_api import async_playwright
 
 
@@ -29,9 +26,6 @@ WINDOWS_RESERVED = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
-
-
-class c: ...
 
 
 def safe_filename(s: str, replacement: str = " ", max_len: int = 100) -> str:
@@ -124,110 +118,3 @@ async def get_sharepoint_cookies(
             await context.close()
             await browser.close()
         return storage_state
-
-
-def netscape_cookies_format(storage_state: StorageState):
-    lines = []
-    lines.append("# Netscape HTTP Cookie File")
-
-    for c in storage_state.get("cookies", []):
-        to_bool_str = lambda value: "TRUE" if value else "FALSE"
-        # Required fields with sane defaults
-        name = c.get("name", "")
-        value = c.get("value", "")
-        domain = c.get("domain", "")
-        path = c.get("path", "/")
-        secure = bool(c.get("secure", False))
-        expires = c.get("expires", 0)  # Playwright uses Unix seconds, 0/-1 for session
-        try:
-            expires_int = int(expires if expires and expires > 0 else 0)
-        except Exception:
-            expires_int = 0
-
-        if not domain or not name:
-            # Skip malformed cookies
-            continue
-
-        # include_subdomains flag:
-        # TRUE if domain starts with a dot (host-only cookies typically won’t)
-        include_subdomains = domain.startswith(".")
-
-        # Netscape format columns:
-        # domain, include_subdomains(TRUE|FALSE), path, secure(TRUE|FALSE),
-        # expiration (Unix epoch), name, value
-        line = "\t".join(
-            [
-                domain,
-                to_bool_str(include_subdomains),
-                path,
-                to_bool_str(secure),
-                str(expires_int),
-                name,
-                value,
-            ]
-        )
-        lines.append(line)
-    return "\n".join(lines)
-
-
-def load_cookies_from_storage_state(
-    storage_state: StorageState, domain: str, subdomain: str = ""
-):
-    cookies = {}
-    for cookie in storage_state.get("cookies", []):
-        name = cookie.get("name")
-        cookie_domain = cookie.get("domain", "")
-        if (name in {"FedAuth", "rtFa", "SPOIDCRL"}) and (
-            domain == cookie_domain or (subdomain in cookie_domain)
-        ):
-            cookies[name] = cookie.get("value", "")
-    return cookies
-
-
-# TODO: raise exceptions
-def get_token(user: str, password: str) -> str:
-    response = requests.get(
-        f"{MOODLE_IDAT}/login/token.php",
-        params={
-            "username": user,
-            "password": password,
-            "service": "moodle_mobile_app",
-        },
-        timeout=60,
-        headers=RQ_HEADER,
-    )
-    response.raise_for_status()
-    login = response.json()
-    if "error" in login:
-        print(f"[!] Token error: {login.get('error')}")
-    token = login.get("token")
-    if not token:
-        print(
-            "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
-        )
-    return token
-
-
-def call_ws(token, function: str, **kwargs):
-    url = f"{MOODLE_IDAT}/webservice/rest/server.php"
-    payload = {
-        "wstoken": token,
-        "wsfunction": function,
-        "moodlewsrestformat": "json",
-        **kwargs,
-    }
-    response = requests.post(url, data=payload, timeout=45)
-    response.raise_for_status()
-    j = response.json()
-    if isinstance(j, dict) and j.get("exception"):
-        raise RuntimeError(f"{j.get('errorcode')}: {j.get('message')}")
-    time.sleep(REQUEST_DELAY)
-    return j
-
-
-def get_course_contents(token, course_id):
-    return call_ws(
-        token,
-        "core_course_get_contents",
-        courseid=f"{course_id}",
-    )
