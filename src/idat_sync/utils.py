@@ -1,6 +1,7 @@
 import re
 import time
 import asyncio
+from typing import Awaitable, Callable
 import unicodedata
 from pathlib import Path
 
@@ -65,12 +66,15 @@ def save_content(path: str, content: str):
 # TODO maybe raise timeout exception when navigation fails
 # TODO handle bad username or password
 async def get_sharepoint_cookies(
-    username: str, password: str, login_flow_ended: asyncio.Event
+    username: str,
+    password: str,
+    login_flow_ended: asyncio.Event,
+    get_mfa_code: Callable[[], Awaitable[str]],
 ):
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
     storage_state = None
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, channel="msedge")
+        browser = await p.chromium.launch(headless=True, channel="msedge")
         context = await browser.new_context(**p.devices["Galaxy A55 landscape"])
         try:
             timeout = 60000 * 3
@@ -96,13 +100,21 @@ async def get_sharepoint_cookies(
                 "https://login.microsoftonline.com/*/login",
                 timeout=timeout,
             )
+            await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(1)")
+            mfa_code = await get_mfa_code()
+            await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
+            await page.click("#idChkBx_SAOTCC_TD")  # Do not ask for 30 days
+            await page.click("#idSubmit_SAOTCC_Continue")  # Click verify
+            # MFA ended
+
+            login_flow_ended.set()
             await page.wait_for_url(
                 "https://login.microsoftonline.com/common/SAS/ProcessAuth",
                 timeout=timeout,
             )
             await page.click("#KmsiCheckboxField")  # Keep Signed in
             await page.click("#idSIButton9")  # Click Sign in
-            login_flow_ended.set()
+
             # Wait for redirection back to SharePoint after successful login
             await page.wait_for_url(
                 "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
