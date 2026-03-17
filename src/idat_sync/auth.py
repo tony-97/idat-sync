@@ -1,7 +1,7 @@
 import os
 import json
 import asyncio
-from typing import TypedDict
+from typing import Awaitable, Callable, TypedDict
 
 from playwright._impl._api_structures import StorageState
 
@@ -19,12 +19,16 @@ class AuthProvider:
 
     # TODO: Handle exceptions from sharepoint and moodle
     async def login(
-        self, username: str, password: str, login_flow_ended: asyncio.Event
+        self,
+        username: str,
+        password: str,
+        login_flow_ended: asyncio.Event,
+        get_mfa_code: Callable[[], Awaitable[str]],
     ):
         username = username.split("@", 1)[0]
         token, sharepoint_storage_state = await asyncio.gather(
             asyncio.to_thread(get_token, username, password),
-            get_sharepoint_cookies(username, password, login_flow_ended),
+            get_sharepoint_cookies(username, password, login_flow_ended, get_mfa_code),
         )
 
         if sharepoint_storage_state == None:
