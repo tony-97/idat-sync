@@ -205,7 +205,7 @@ def get_token(user: str, password: str) -> str:
             "password": password,
             "service": "moodle_mobile_app",
         },
-        timeout=60,
+        timeout=120,
         headers=RQ_HEADER,
     )
     response.raise_for_status()
