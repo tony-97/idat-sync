@@ -1,6 +1,7 @@
 import re
 import time
 import asyncio
+import platform
 from typing import Awaitable, Callable
 import unicodedata
 from pathlib import Path
@@ -72,9 +73,10 @@ async def get_sharepoint_cookies(
     get_mfa_code: Callable[[], Awaitable[str]],
 ):
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
+    channel = "msedge" if platform.system() == "Windows" else "chromium"
     storage_state = None
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, channel="msedge")
+        browser = await p.chromium.launch(headless=True, channel=channel)
         context = await browser.new_context(**p.devices["Galaxy A55 landscape"])
         try:
             timeout = 60000 * 3
