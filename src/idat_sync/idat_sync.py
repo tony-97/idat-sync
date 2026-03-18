@@ -181,8 +181,9 @@ class IDATSync:
         print(
             f"downloading share url: {url}",
         )
+        prefix = "\\\\?\\" if platform.system() == "Windows" else ""
         output_path_template = os.path.join(
-            f"\\\\?\\{os.path.abspath(folder)}", "%(title)s %(id)s.%(ext)s"
+            f"{prefix}{os.path.abspath(folder)}", "%(title)s %(id)s.%(ext)s"
         )
         ydl_opts = {
             "cookiefile": io.StringIO(self.netscape_cookies_format),
