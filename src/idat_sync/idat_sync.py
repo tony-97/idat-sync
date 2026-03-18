@@ -255,7 +255,7 @@ class IDATSync:
             time.sleep(REQUEST_DELAY)
 
             def is_course_recording(item: ListItem):
-                relative_url = item.file.serverRelativeUrl
+                relative_url = item.file.serverRelativeUrl or ""
                 return (
                     Path(urlparse(relative_url).path).parent.name.lower()
                     == "grabaciones"
