@@ -200,13 +200,14 @@ def load_cookies_from_storage_state(
 
 # TODO: raise exceptions
 def get_token(user: str, password: str) -> str:
-    response = requests.get(
+    payload = params = {
+        "username": user,
+        "password": password,
+        "service": "moodle_mobile_app",
+    }
+    response = requests.post(
         f"{MOODLE_IDAT}/login/token.php",
-        params={
-            "username": user,
-            "password": password,
-            "service": "moodle_mobile_app",
-        },
+        data=payload,
         timeout=120,
         headers=RQ_HEADER,
     )
