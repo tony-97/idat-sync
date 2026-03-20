@@ -102,7 +102,8 @@ class IDATSync:
         if Path(file_path).exists():
             return
         with open(file_path, "wb") as local_file:
-            file.download(local_file).execute_query_with_incremental_retry()
+            file.download(local_file)
+            file.context.execute_query_with_incremental_retry()
             time.sleep(REQUEST_DELAY)
 
     def download_sharepoint_folder(self, folder: Folder, download_path: str):
