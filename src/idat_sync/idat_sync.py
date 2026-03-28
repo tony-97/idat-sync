@@ -152,10 +152,11 @@ class IDATSync:
         download_path: str,
     ):
         print(f"downloading share url1: {share_url}")
+        ctx = self.get_sharepoint_client_from_url(share_url)
         if re.search(r"https://idat628\.sharepoint\.com/:(\w+):", share_url):
             if share_url.startswith("https://idat628.sharepoint.com/:f:"):
                 print(f"Skipping url: {share_url}")
-                folder = self.client.web.get_folder_by_guest_url(
+                folder = ctx.web.get_folder_by_guest_url(
                     share_url
                 ).execute_query_with_incremental_retry()
                 time.sleep(REQUEST_DELAY)
@@ -164,31 +165,16 @@ class IDATSync:
                 self.download_sharepoint_folder(folder, folder_path)
             else:
                 print(f"downloading share url2: {share_url}")
-                file = self.client.web.get_file_by_guest_url(share_url)
-                self.client.load(file, ["Name"])
-                self.client.execute_query_with_incremental_retry()
+                file = ctx.web.get_file_by_guest_url(share_url)
+                ctx.load(file, ["Name"])
+                ctx.execute_query_with_incremental_retry()
                 time.sleep(REQUEST_DELAY)
                 self.download_sharepoint_file(file, download_path, name=name)
         else:
-            parsed_url = urllib.parse.urlparse(share_url)
-            # 1. Extract Site URL
-            # Matches patterns like /sites/YourSite or /teams/YourTeam
-            site_url = None
-            path_match = re.search(
-                r"/(sites|teams)/([^/]+)", parsed_url.path, re.IGNORECASE
-            )
-
-            if path_match:
-                # Rebuild the URL: https://tenant.sharepoint.com + /sites/SiteName
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                site_url = f"{base_url}{path_match.group(0)}"
-            else:
-                # Fallback if the file is stored on the root tenant site
-                site_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
             # 2. Extract File ID (UniqueId)
             file_id = None
-            query_params = urllib.parse.parse_qs(parsed_url.query)
+            query_params = urllib.parse.parse_qs(urllib.parse.urlparse(share_url).query)
 
             # Lowercase the keys just to be safe against varying URL cases
             lower_query_keys = {k.lower(): v for k, v in query_params.items()}
@@ -199,12 +185,11 @@ class IDATSync:
             elif "sourcedoc" in lower_query_keys:  # Another common SP parameter for IDs
                 file_id = lower_query_keys["sourcedoc"][0].strip("{}")
 
-            ctx = ClientContext(site_url).with_cookies(lambda: self.sharepoint_cookies)
             # 2. Download by Unique ID
             # Use get_file_by_id instead of get_file_by_server_relative_url
-            file = ctx.web.get_file_by_id(
-                file_id
-            ).execute_query_with_incremental_retry()
+            file = ctx.web.get_file_by_id(file_id)
+            ctx.load(file, ["Name"])
+            ctx.execute_query_with_incremental_retry()
             time.sleep(REQUEST_DELAY)
             self.download_sharepoint_file(file, download_path, name)
 
