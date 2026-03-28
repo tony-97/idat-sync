@@ -123,6 +123,28 @@ class IDATSync:
                     os.makedirs(sub_folder_path, exist_ok=True)
                     self.download_sharepoint_folder(folder, sub_folder_path)
 
+    def get_sharepoint_client_from_url(self, url: str):
+        parsed_url = urllib.parse.urlparse(url)
+        # 1. Extract Site URL
+        # Matches patterns like /sites/YourSite or /teams/YourTeam
+        site_url = None
+        path_match = re.search(
+            r"/(sites|teams|s)/([^/]+)", parsed_url.path, re.IGNORECASE
+        )
+
+        if path_match:
+            # Rebuild the URL: https://tenant.sharepoint.com + /sites/SiteName
+            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+            if path_match.group(1) == "s":
+                site_url = f"{base_url}/sites/{path_match.group(2)}"
+            else:
+                site_url = f"{base_url}{path_match.group(0)}"
+
+        if site_url:
+            return ClientContext(site_url).with_cookies(lambda: self.sharepoint_cookies)
+        else:
+            return self.client
+
     def download_sharepoint_link(
         self,
         share_url: str,
