@@ -108,9 +108,9 @@ class IDATSync:
 
     def download_sharepoint_folder(self, folder: Folder, download_path: str):
         get_name = lambda f: f.name or safe_filename(folder.serverRelativeUrl or "")
-        files = folder.files.get_all().execute_query_retry()
+        files = folder.get_files().execute_query_retry()
         time.sleep(REQUEST_DELAY)
-        folders = folder.folders.get_all().execute_query_retry()
+        folders = folder.get_folders().execute_query_retry()
         time.sleep(REQUEST_DELAY)
         for file in files:
             self.download_sharepoint_file(file, download_path, get_name(file))
