@@ -8,20 +8,21 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 - Descarga grabaciones de video (cuando aun están accesibles) y las guarda en la estructura del curso.
 - Interfaz gráfica simple para seleccionar carpeta de sincronización y ver el progreso.
 
-## Requisitos
-
-- Python 3.10+
-
 ## Instalación
 
-1.  **Instalar el paquete:**
-    ```shell
-    pip install git+https://github.com/tony-97/idat-sync
-    ```
-2.  **Instalar el navegador para Playwright (solo en Linux / macOS):**
-    ```shell
-    playwright install chromium
-    ```
+1. **Requisitos**
+
+   > - Python 3.10+
+   > - [ffmpeg](https://www.ffmpeg.org/)
+
+2. **Instalar el paquete:**
+   ```shell
+   pip install git+https://github.com/tony-97/idat-sync
+   ```
+3. **Instalar el navegador para Playwright (solo en Linux / macOS):**
+   ```shell
+   playwright install chromium
+   ```
 
 ## Cómo usar
 
@@ -30,7 +31,6 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
    idat_sync
    ```
 2. En la ventana:
-
    - Ingresa tu codigo de alumno y contraseña.
 
      ![Login](screenshots/login.png)
