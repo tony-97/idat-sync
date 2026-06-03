@@ -52,7 +52,6 @@ jobs:
           playwright install webkit
 
       # --onefile \
-      # --windowed \
       - name: Build Executable with PyInstaller
         shell: bash
         run: |
@@ -64,6 +63,7 @@ jobs:
             SEP=":"
           fi
           pyinstaller \
+          --windowed \
           --collect-all yt_dlp \
           --copy-metadata yt-dlp \
           --hidden-import yt_dlp.extractor \
