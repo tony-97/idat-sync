@@ -57,12 +57,18 @@ jobs:
       - name: Build Executable with PyInstaller
         shell: bash
         run: |
-          FFMPEG_PATH=$(which ffmpeg)
-          FFPROBE_PATH=$(which ffprobe)
           if [ "$RUNNER_OS" == "Windows" ]; then
             SEP=";"
+            FFMPEG_PATH=$(cygpath -w "$(which ffmpeg)")
+            FFPROBE_PATH=$(cygpath -w "$(which ffprobe)")
+
+            # Ensure Windows binaries have the .exe extension
+            [[ "$FFMPEG_PATH" != *".exe" ]] && FFMPEG_PATH="${FFMPEG_PATH}.exe"
+            [[ "$FFPROBE_PATH" != *".exe" ]] && FFPROBE_PATH="${FFPROBE_PATH}.exe"
           else
             SEP=":"
+            FFMPEG_PATH=$(which ffmpeg)
+            FFPROBE_PATH=$(which ffprobe)
           fi
 
           if [ "$RUNNER_OS" == "macOS" ]; then
