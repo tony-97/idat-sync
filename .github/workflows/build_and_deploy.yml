@@ -83,7 +83,6 @@ jobs:
           src_dir: "dist/idat_sync.app"
 
       - name: Rename Output Files
-        if: matrix.os != 'macos-latest'
         shell: bash
         run: |
           echo "==================================s"
