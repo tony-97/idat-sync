@@ -16,7 +16,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [macos-latest]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -39,17 +40,19 @@ jobs:
 
       - name: Build Python Package (sdist and wheel)
         # We only need to build the Python package once, so we tie it to the Linux runner
-        if: matrix.os == 'ubuntu-latest'
+        # if: matrix.os == 'ubuntu-latest'
         run: |
           pip install build
           python -m build
 
       - name: Install chromium for non windows OS
-        if: matrix.os != 'windows-latest'
+        # if: matrix.os != 'windows-latest'
         run: |
           export PLAYWRIGHT_BROWSERS_PATH=0
-          playwright install chromium
+          playwright install webkit
 
+      # --onefile \
+      # --windowed \
       - name: Build Executable with PyInstaller
         shell: bash
         run: |
@@ -61,8 +64,7 @@ jobs:
             SEP=":"
           fi
           pyinstaller \
-          --onefile \
-          --windowed \
+
           --collect-all yt_dlp \
           --copy-metadata yt-dlp \
           --hidden-import yt_dlp.extractor \
