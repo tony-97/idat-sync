@@ -74,6 +74,7 @@ jobs:
           --paths=src/idat_sync \
           ./src/idat_sync/main.py
           ls dist/idat_sync
+          echo "==================================s"
           ls dist
 
       - name: Rename Output Files
