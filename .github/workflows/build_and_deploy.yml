@@ -90,7 +90,7 @@ jobs:
           elif [ "$RUNNER_OS" == "Linux" ]; then
             mv dist/idat_sync dist/idat_sync-${{ runner.os }}
           else
-            mv ${{ steps.create-dmg.outputs.dmg_path }}/idat_sync.dmg dist/idat_sync-${{ runner.os }}.dmg
+            mv idat_sync.dmg dist/idat_sync-${{ runner.os }}.dmg
           fi
 
       - name: Create Release and Upload Asset
