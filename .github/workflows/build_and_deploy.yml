@@ -86,7 +86,7 @@ jobs:
         shell: bash
         run: |
           echo "==================================s"
-          ls dist
+          ls ${{ steps.create-dmg.outputs.dmg_path }}
           if [ "$RUNNER_OS" == "Windows" ]; then
             mv dist/idat_sync.exe dist/idat_sync-${{ runner.os }}.exe
           elif [ "$RUNNER_OS" == "Linux" ]; then
