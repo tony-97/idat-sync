@@ -73,6 +73,7 @@ jobs:
           --name idat_sync \
           --paths=src/idat_sync \
           ./src/idat_sync/main.py
+          find dist/idat_sync
 
       - name: Rename Output Files
         shell: bash
