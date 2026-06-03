@@ -73,17 +73,27 @@ jobs:
           --name idat_sync \
           --paths=src/idat_sync \
           ./src/idat_sync/main.py
-          ls dist/idat_sync
-          echo "==================================s"
-          ls dist
+
+      - name: Create DMG
+        if: matrix.os == 'macos-latest'
+        id: create-dmg
+        uses: L-Super/create-dmg-actions@v1
+        with:
+          dmg_name: "idat_sync"
+          src_dir: "dist/idat_sync.app"
 
       - name: Rename Output Files
+        if: matrix.os != 'macos-latest'
         shell: bash
         run: |
+          echo "==================================s"
+          ls dist
           if [ "$RUNNER_OS" == "Windows" ]; then
             mv dist/idat_sync.exe dist/idat_sync-${{ runner.os }}.exe
-          else
+          elif [ "$RUNNER_OS" == "Linux" ]; then
             mv dist/idat_sync dist/idat_sync-${{ runner.os }}
+          else
+            mv dist/idat_sync.dmg dist/idat_sync-${{ runner.os }}.dmg
           fi
 
       - name: Create Release and Upload Asset
