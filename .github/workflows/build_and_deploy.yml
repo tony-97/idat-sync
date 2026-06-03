@@ -1,0 +1,96 @@
+name: Build and Release Package and Executable
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - uses: FedericoCarboni/setup-ffmpeg@v3
+        id: setup-ffmpeg
+        with:
+          ffmpeg-version: release
+          linking-type: static
+          github-token: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14" # Update this to your target Python version
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Installs the package and its dependencies from pyproject.toml
+          pip install .
+          # Install PyInstaller
+          pip install pyinstaller
+
+      - name: Build Python Package (sdist and wheel)
+        # We only need to build the Python package once, so we tie it to the Linux runner
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          pip install build
+          python -m build
+
+      - name: Install chromium for non windows OS
+        if: matrix.os != 'windows-latest'
+        run: |
+          export PLAYWRIGHT_BROWSERS_PATH=0
+          playwright install chromium
+
+      - name: Build Executable with PyInstaller
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            SEP=";"
+          else
+            SEP=":"
+          fi
+          pyinstaller \
+          --onefile \
+          --windowed \
+          --collect-all yt_dlp \
+          --copy-metadata yt-dlp \
+          --hidden-import yt_dlp.extractor \
+          --hidden-import yt_dlp.postprocessor \
+          --add-binary "${{ steps.setup-ffmpeg.outputs.ffmpeg-path }}/ffmpeg*${SEP}." \
+          --add-binary "${{ steps.setup-ffmpeg.outputs.ffmpeg-path }}/ffprobe*${SEP}." \
+          --name idat_sync \
+          --paths=src/idat_sync \
+          ./src/idat_sync/main.py
+
+      - name: Rename Output Files
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            mv dist/idat_sync.exe dist/idat_sync-${{ runner.os }}.exe
+          else
+            mv dist/idat_sync dist/idat_sync-${{ runner.os }}
+          fi
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          # Automatically attaches the built files to the GitHub Release
+          files: |
+            dist/idat_sync-*
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true

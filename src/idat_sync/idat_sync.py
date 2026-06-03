@@ -2,6 +2,7 @@ import io
 import os
 import platform
 import re
+import sys
 import time
 from pathlib import Path
 from datetime import date
@@ -31,6 +32,7 @@ from idat_sync.utils import (
 )
 
 
+# TODO add ffmpeg path option
 class IDATSync:
     def __init__(self, credentials: Credentials) -> None:
         self.token = credentials.get("token")
@@ -241,6 +243,8 @@ class IDATSync:
             "format": "bestvideo+bestaudio/bestvideo",
             "outtmpl": output_path_template,
         }
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            ydl_opts["ffmpeg_location"] = sys._MEIPASS  # type: ignore
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
             ydl.download([url])
 
