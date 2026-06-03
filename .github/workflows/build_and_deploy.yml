@@ -27,7 +27,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.14" # Update this to your target Python version
+          python-version: "3.14"
+
+      - name: Enable Git long paths
+        run: git config --system core.longpaths true
 
       - name: Install Dependencies
         run: |
