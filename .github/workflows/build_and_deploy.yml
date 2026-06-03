@@ -64,7 +64,6 @@ jobs:
             SEP=":"
           fi
           pyinstaller \
-
           --collect-all yt_dlp \
           --copy-metadata yt-dlp \
           --hidden-import yt_dlp.extractor \
