@@ -99,22 +99,18 @@ jobs:
       - name: Fix MacOS app bundle
         if: matrix.os == 'macos-latest'
         run: |
-          # 1. Strip the problematic Swift library to arm64 only
-          LIB="dist/idat_sync.app/Contents/Frameworks/playwright/driver/package/.local-browsers/webkit-2287/libswiftCompatibilitySpan.dylib"
-          lipo "$LIB" -thin arm64 -output "$LIB"
-
-          # 2. Delete any broken PyInstaller signatures
+          # Delete any broken PyInstaller signatures
           find dist/idat_sync.app -type d -name "_CodeSignature" -exec rm -rf {} +
 
-          # 3. Sign all inner Playwright libraries and binaries (.dylib and .so)
+          # Sign all inner Playwright libraries and binaries (.dylib and .so)
           find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.dylib" -o -name "*.so" | \
             xargs -I{} codesign -s - --force {}
 
-          # 4. Sign all inner Playwright frameworks
+          # Sign all inner Playwright frameworks
           find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.framework" | \
             xargs -I{} codesign -s - --force --options runtime {}
 
-          # 5. Finally, sign the outer application wrapper
+          # Finally, sign the outer application wrapper
           codesign -s - --force --options runtime dist/idat_sync.app
 
       - name: Create DMG
