@@ -99,8 +99,10 @@ jobs:
       - name: Fix MacOS app bundle
         if: matrix.os == 'macos-latest'
         run: |
-          # 1. Clean hidden macOS files that break signatures
+          # 1. Clean garbage files and linker stubs that break macOS codesign
           find dist/idat_sync.app -name ".DS_Store" -delete
+          find dist/idat_sync.app -name "._*" -delete
+          find dist/idat_sync.app -name "*.tbd" -delete
 
           # 2. Delete broken PyInstaller signatures
           find dist/idat_sync.app -type d -name "_CodeSignature" -exec rm -rf {} +
