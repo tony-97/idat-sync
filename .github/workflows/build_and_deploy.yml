@@ -99,18 +99,45 @@ jobs:
       - name: Fix MacOS app bundle
         if: matrix.os == 'macos-latest'
         run: |
-          # Delete any broken PyInstaller signatures
+          # 1. Remove hidden files that macOS codesign strictly rejects
+          find dist/idat_sync.app -name ".DS_Store" -delete
+
+          # 2. Delete any broken PyInstaller signatures
           find dist/idat_sync.app -type d -name "_CodeSignature" -exec rm -rf {} +
 
-          # Sign all inner Playwright libraries and binaries (.dylib and .so)
+          # 3. THE FIX: Rebuild Apple's required symlink structure inside the frameworks.
+          # PyInstaller breaks these by duplicating files instead of keeping symlinks.
+          find dist/idat_sync.app/Contents/Frameworks/playwright -type d -name "*.framework" | while read fw; do
+              fw_name=$(basename "$fw" .framework)
+              
+              # Re-link Versions/Current -> A
+              if [ -d "$fw/Versions/A" ]; then
+                  rm -rf "$fw/Versions/Current"
+                  ln -s "A" "$fw/Versions/Current"
+              fi
+              
+              # Re-link root binary -> Versions/Current/binary
+              if [ -f "$fw/Versions/A/$fw_name" ]; then
+                  rm -rf "$fw/$fw_name"
+                  ln -s "Versions/Current/$fw_name" "$fw/$fw_name"
+              fi
+              
+              # Re-link root Resources -> Versions/Current/Resources
+              if [ -d "$fw/Versions/A/Resources" ]; then
+                  rm -rf "$fw/Resources"
+                  ln -s "Versions/Current/Resources" "$fw/Resources"
+              fi
+          done
+
+          # 4. Sign all inner Playwright libraries and binaries (.dylib and .so)
           find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.dylib" -o -name "*.so" | \
             xargs -I{} codesign -s - --force {}
 
-          # Sign all inner Playwright frameworks
+          # 5. Sign the repaired Playwright frameworks
           find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.framework" | \
             xargs -I{} codesign -s - --force --options runtime {}
 
-          # Finally, sign the outer application wrapper
+          # 6. Finally, sign the outer application wrapper
           codesign -s - --force --options runtime dist/idat_sync.app
 
       - name: Create DMG
