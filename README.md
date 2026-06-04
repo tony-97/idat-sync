@@ -20,9 +20,14 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
    pip install git+https://github.com/tony-97/idat-sync
    ```
 3. **Instalar el navegador para Playwright (solo en Linux / macOS):**
-   ```shell
-   playwright install chromium
-   ```
+   - Para Linux:
+     ```shell
+     playwright install chromium
+     ```
+   - Para macOS:
+     ```shell
+     playwright install webkit
+     ```
 
 ## Cómo usar
 
