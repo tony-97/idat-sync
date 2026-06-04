@@ -52,7 +52,7 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           export PLAYWRIGHT_BROWSERS_PATH=0
-          playwright install webkit
+          playwright install --no-shell chromium
 
       - name: Build Executable with PyInstaller
         shell: bash
@@ -119,3 +119,4 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
           generate_release_notes: true
+# pyinstaller --windowed --onefile --collect-all yt_dlp --copy-metadata yt-dlp --hidden-import yt_dlp.extractor --hidden-import yt_dlp.postprocessor --name idat_sync --paths=src/idat_sync ./src/idat_sync/main.py
