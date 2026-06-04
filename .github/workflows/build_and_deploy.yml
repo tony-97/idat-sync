@@ -99,41 +99,40 @@ jobs:
       - name: Fix MacOS app bundle
         if: matrix.os == 'macos-latest'
         run: |
-          # 1. Remove hidden files that macOS codesign strictly rejects
+          # 1. Clean hidden macOS files that break signatures
           find dist/idat_sync.app -name ".DS_Store" -delete
 
-          # 2. Delete any broken PyInstaller signatures
+          # 2. Delete broken PyInstaller signatures
           find dist/idat_sync.app -type d -name "_CodeSignature" -exec rm -rf {} +
 
-          # 3. THE FIX: Rebuild Apple's required symlink structure inside the frameworks.
-          # PyInstaller breaks these by duplicating files instead of keeping symlinks.
-          find dist/idat_sync.app/Contents/Frameworks/playwright -type d -name "*.framework" | while read fw; do
-              fw_name=$(basename "$fw" .framework)
-              
-              # Re-link Versions/Current -> A
+          # 3. THE FIX: Dynamically rebuild Apple's exact framework symlink structure
+          echo "=== Fixing PyInstaller Framework structures ==="
+          find dist/idat_sync.app/Contents/Frameworks/playwright -type d -name "*.framework" | while read -r fw; do
               if [ -d "$fw/Versions/A" ]; then
+                  echo "Repairing structure of: $(basename "$fw")"
+                  
+                  # A. Delete everything in the root EXCEPT the 'Versions' directory
+                  find "$fw" -mindepth 1 -maxdepth 1 ! -name "Versions" -exec rm -rf {} +
+                  
+                  # B. Re-link Current -> A
                   rm -rf "$fw/Versions/Current"
                   ln -s "A" "$fw/Versions/Current"
-              fi
-              
-              # Re-link root binary -> Versions/Current/binary
-              if [ -f "$fw/Versions/A/$fw_name" ]; then
-                  rm -rf "$fw/$fw_name"
-                  ln -s "Versions/Current/$fw_name" "$fw/$fw_name"
-              fi
-              
-              # Re-link root Resources -> Versions/Current/Resources
-              if [ -d "$fw/Versions/A/Resources" ]; then
-                  rm -rf "$fw/Resources"
-                  ln -s "Versions/Current/Resources" "$fw/Resources"
+                  
+                  # C. Dynamically create correct symlinks in the root pointing to Versions/Current/
+                  for item in "$fw/Versions/A"/*; do
+                      item_name=$(basename "$item")
+                      ln -s "Versions/Current/$item_name" "$fw/$item_name"
+                  done
+              else
+                  echo "Warning: No Versions/A found in $(basename "$fw")"
               fi
           done
 
-          # 4. Sign all inner Playwright libraries and binaries (.dylib and .so)
+          # 4. Sign inner Playwright libraries and binaries (.dylib and .so)
           find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.dylib" -o -name "*.so" | \
             xargs -I{} codesign -s - --force {}
 
-          # 5. Sign the repaired Playwright frameworks
+          # 5. Sign the newly repaired Playwright frameworks
           find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.framework" | \
             xargs -I{} codesign -s - --force --options runtime {}
 
