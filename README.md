@@ -8,7 +8,31 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 - Descarga grabaciones de video (cuando aun están accesibles) y las guarda en la estructura del curso.
 - Interfaz gráfica simple para seleccionar carpeta de sincronización y ver el progreso.
 
-## Instalación
+## Descargar
+
+Descarga la última versión desde [GitHub Releases](https://github.com/tony-97/idat-sync/releases/latest):
+
+| Sistema Operativo | Archivo                                                                                                        | Notas                                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **Windows**       | [`idat_sync-Windows.exe`](https://github.com/tony-97/idat-sync/releases/latest/download/idat_sync-Windows.exe) | Ejecutable portable, no requiere instalación   |
+| **Linux**         | [`idat_sync-Linux`](https://github.com/tony-97/idat-sync/releases/latest/download/idat_sync-Linux)             | Dar permisos de ejecución antes de usar        |
+| **macOS**         | [`idat_sync-macOS.dmg`](https://github.com/tony-97/idat-sync/releases/latest/download/idat_sync-macOS.dmg)     | Aplicación sin firmar, ver instrucciones abajo |
+
+### macOS (aplicación sin firmar)
+
+Al ser una aplicación sin firmar, macOS bloqueará su ejecución por defecto. Sigue estos pasos:
+
+1. **Monta el DMG** haciendo doble clic en `idat_sync-macOS.dmg` y arrastra la app a la carpeta **Aplicaciones**.
+
+2. **Elimina el atributo de cuarentena** abriendo la Terminal y ejecutando:
+
+   ```shell
+   xattr -cr /Applications/idat_sync.app
+   ```
+
+3. **Abre la aplicación** normalmente desde Aplicaciones.
+
+## Instalación (desde código fuente)
 
 1. **Requisitos**
 
