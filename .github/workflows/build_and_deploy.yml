@@ -48,11 +48,17 @@ jobs:
           pip install build
           python -m build
 
-      - name: Install chromium for non windows OS
-        if: matrix.os != 'windows-latest'
+      - name: Install chromium on Linux
+        if: matrix.os == 'ubuntu-latest'
         run: |
           export PLAYWRIGHT_BROWSERS_PATH=0
           playwright install --no-shell chromium
+
+      - name: Install webkit on MacOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          export PLAYWRIGHT_BROWSERS_PATH=0
+          playwright install webkit
 
       - name: Build Executable with PyInstaller
         shell: bash

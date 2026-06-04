@@ -72,7 +72,12 @@ async def get_sharepoint_cookies(
     get_mfa_code: Callable[[], Awaitable[str]],
 ):
     site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
-    channel = "msedge" if platform.system() == "Windows" else "chromium"
+    channel = "chromium"
+    if (os := platform.system()) == "Windows":
+        channel = "msedge"
+    elif os == "Darwin":
+        channel = "webkit"
+
     storage_state = None
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, channel=channel)
