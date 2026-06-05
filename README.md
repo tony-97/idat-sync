@@ -3,6 +3,7 @@
 [![Build Windows](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=Windows&logo=windows&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
 [![Build Linux](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=Linux&logo=linux&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
 [![Build macOS](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=macOS&logo=apple&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
+
 [![Latest Release](https://img.shields.io/github/v/release/tony-97/idat-sync?label=Release&logo=github)](https://github.com/tony-97/idat-sync/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/tony-97/idat-sync/total?label=Downloads&logo=github)](https://github.com/tony-97/idat-sync/releases)
 [![License: MIT](https://img.shields.io/github/license/tony-97/idat-sync?label=License)](LICENSE)
