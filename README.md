@@ -3,6 +3,7 @@
 [![Build Windows](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=Windows&logo=windows&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
 [![Build Linux](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=Linux&logo=linux&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
 [![Build macOS](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=macOS&logo=apple&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tony-97/idat-sync/blob/main/colab.ipynb)
 
 [![Latest Release](https://img.shields.io/github/v/release/tony-97/idat-sync?label=Release&logo=github)](https://github.com/tony-97/idat-sync/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/tony-97/idat-sync/total?label=Downloads&logo=github)](https://github.com/tony-97/idat-sync/releases)
@@ -82,6 +83,32 @@ Al ser una aplicación sin firmar, macOS bloqueará su ejecución por defecto. S
      ![Progress](screenshots/sync_progress.png)
 
 3. Los archivos se descargarán y organizarán en la carpeta que seleccionaste.
+
+## Google Colab + Google Drive + NotebookLM
+
+Si no quieres instalar nada localmente, puedes ejecutar **idat-sync** directamente desde Google Colab. El notebook [`colab.ipynb`](colab.ipynb) sincroniza el material de tus cursos a tu Google Drive y genera enlaces listos para importar en [NotebookLM](https://notebooklm.google.com/).
+
+### ¿Qué incluye?
+
+| Funcionalidad              | Descripción                                                              |
+| -------------------------- | ------------------------------------------------------------------------ |
+| 📥 Sincronización a Drive  | Descarga todo el material del curso seleccionado a `drive/MyDrive/sync/` |
+| 🎥 Extracción de audio     | Convierte las grabaciones de video a MP3 automáticamente                 |
+| 📄 Conversión HTML → PDF   | Transforma los contenidos HTML del curso a PDF para mejor lectura        |
+| 🔗 Enlaces de Google Drive | Genera enlaces compartibles de cada archivo para importar a NotebookLM   |
+
+### Pasos
+
+1. **Abre el notebook** haciendo clic en el badge _Open In Colab_ de arriba.
+2. **Ejecuta la primera celda** para instalar las dependencias (`idat-sync`, `moviepy`, `playwright`, `weasyprint`).
+3. **Autoriza el acceso a Google Drive** cuando se te solicite.
+4. **Ingresa tu código MFA** en la consola de Colab cuando el script lo pida.
+5. **Selecciona el curso** de la lista que aparecerá en la salida.
+6. **Espera a que finalice** la sincronización. Al terminar, el script mostrará dos bloques de enlaces:
+   - **🎧 Recordings** — enlaces a los archivos de audio (MP3) para descargar e importar manualmente a NotebookLM.
+   - **📎 Links** — enlaces a documentos (PDF, archivos del curso) que se pueden importar directamente a NotebookLM desde Google Drive.
+
+> Puedes usar los enlaces generados para crear un notebook en [NotebookLM](https://notebooklm.google.com/) con todo el material de un curso y hacer consultas con IA sobre el contenido.
 
 ## Capturas de pantalla
 
