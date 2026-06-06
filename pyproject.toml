@@ -13,7 +13,7 @@ dependencies = [
     "requests >= 2.32.5",
 ]
 authors = [{ name = "Tony Acuña Flores", email = "toanacfl@gmail.com" }]
-description = "Sincroniza automáticamente el material académico de IDAT (Moodle, SharePoint, grabaciones) a tu computadora, manteniendo la misma estructura de los cursos"
+description = "Sincroniza automáticamente el material y grabaciones de IDAT (Moodle, SharePoint, OneDrive) a una carpeta local, manteniendo la estructura original de los cursos."
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
