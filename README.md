@@ -74,6 +74,9 @@ Al ser una aplicación sin firmar, macOS bloqueará su ejecución por defecto. S
      ![Login](screenshots/login.png)
 
    - Completa la autenticación de dos factores (2FA) con el código recibido en tu dispositivo móvil.
+
+     ![2FA](screenshots/mfa.png)
+
    - Una vez que cargue la ventana principal, selecciona la carpeta de destino para tus archivos.
    - Haz clic en el botón **"Sync"** para iniciar el proceso. Podrás ver el progreso en la misma ventana.
      ![Progress](screenshots/sync_progress.png)
