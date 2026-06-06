@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -160,14 +160,34 @@ jobs:
             mv idat_sync.dmg dist/idat_sync-${{ runner.os }}.dmg
           fi
 
-      - name: Create Release and Upload Asset
-        uses: softprops/action-gh-release@v2
+      - name: Upload built artifacts
+        uses: actions/upload-artifact@v4
         if: github.ref_type == 'tag'
         with:
-          # Automatically attaches the built files to the GitHub Release
+          name: build-artifacts-${{ matrix.os }}-${{ strategy.job-index }} # Ensure unique names
+          path: |
+            dist/idat_sync-*
+            dist/*.whl
+            dist/*.tar.gz
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-artifacts-*
+          merge-multiple: true
+          path: dist # Downloads everything into the 'dist' folder
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
           files: |
             dist/idat_sync-*
             dist/*.whl
             dist/*.tar.gz
           generate_release_notes: true
-# pyinstaller --windowed --onefile --collect-all yt_dlp --copy-metadata yt-dlp --hidden-import yt_dlp.extractor --hidden-import yt_dlp.postprocessor --name idat_sync --paths=src/idat_sync ./src/idat_sync/main.py
