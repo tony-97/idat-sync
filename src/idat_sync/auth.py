@@ -31,7 +31,7 @@ class AuthProvider:
             get_sharepoint_cookies(username, password, login_flow_ended, get_mfa_code),
         )
 
-        if sharepoint_storage_state == None:
+        if sharepoint_storage_state == None or not token:
             return False
         # --- Success ---
         # Create the session file to mark the user as authenticated
