@@ -49,10 +49,20 @@ class IDATSync:
         self.client = ClientContext(site_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
-        search_site_url = "https://idat628.sharepoint.com"
-        self.search_client = ClientContext(search_site_url).with_cookies(
+        personal_sharepoint_url = "https://idat628-my.sharepoint.com"
+        self.personal_client = ClientContext(personal_sharepoint_url).with_cookies(
             lambda: self.sharepoint_cookies
         )
+        personal_site = (
+            self.personal_client.web.current_user.get_personal_site().execute_query_with_incremental_retry()
+        )
+        if personal_site.url:
+            self.search_client = ClientContext(personal_site.url).with_cookies(
+                lambda: self.sharepoint_cookies
+            )
+            time.sleep(REQUEST_DELAY)
+        else:
+            raise Exception("login expired")
 
     def search_recordings(self, course_name: str):
         result = self.search_client.search.query(
@@ -297,6 +307,7 @@ class IDATSync:
         os.makedirs(course_path, exist_ok=True)
         os.makedirs(recordings_folder, exist_ok=True)
         self.download_recordings(course_name, recordings_folder)
+        return
         for content in contents:
             if content_name := safe_filename(content.get("name", "")):
                 content_path = os.path.join(course_path, content_name)
