@@ -307,7 +307,6 @@ class IDATSync:
         os.makedirs(course_path, exist_ok=True)
         os.makedirs(recordings_folder, exist_ok=True)
         self.download_recordings(course_name, recordings_folder)
-        return
         for content in contents:
             if content_name := safe_filename(content.get("name", "")):
                 content_path = os.path.join(course_path, content_name)
