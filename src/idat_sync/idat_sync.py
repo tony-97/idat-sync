@@ -2,13 +2,14 @@ import os
 from pathlib import Path
 
 from idat_sync.auth import Credentials
-from idat_sync.download_manager import DownloadManager
+from idat_sync.download_manager import DownloadManager, SyncDiff
 from idat_sync.models import Course
 from idat_sync.services.course_repository import CourseRepository
 from idat_sync.services.moodle_client import MoodleClient
 from idat_sync.services.moodle_adapter import MoodleAdapter
 from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.services.downloaders import (
+    Content,
     Downloader,
     MoodleDownloader,
     RecordingDownloader,
@@ -45,11 +46,11 @@ class IDATSync:
         self.task_orchestrator = TaskOrchestrator(self.download_tasks_group)
         self.download_manager = DownloadManager(self.downloaders)
 
-    def sync_course(self, course: Course, course_dir: str | Path) -> None:
+    def get_course_remote_tree(
+        self, course: Course, course_dir: str | Path
+    ) -> list[Content]:
         course_path = Path(course_dir)
         recordings_folder = course_path / "Grabaciones"
-        os.makedirs(course_path, exist_ok=True)
-        os.makedirs(recordings_folder, exist_ok=True)
         remote_tree = self.course_repository.get_course_content(
             course, course_path
         )
@@ -57,8 +58,26 @@ class IDATSync:
             course.name, recordings_folder
         )
         remote_tree.extend(recordings_content)
-        tasks = self.download_manager.prepare_download_tasks(remote_tree)
+        return remote_tree
+
+    def check_course_sync(
+        self, course: Course, course_dir: str | Path
+    ) -> SyncDiff:
+        remote_tree = self.get_course_remote_tree(course, course_dir)
+        return self.download_manager.diff_trees(course_dir, remote_tree)
+
+    def sync_course(self, course: Course, course_dir: str | Path) -> SyncDiff:
+        course_path = Path(course_dir)
+        recordings_folder = course_path / "Grabaciones"
+        os.makedirs(course_path, exist_ok=True)
+        os.makedirs(recordings_folder, exist_ok=True)
+
+        diff = self.check_course_sync(course, course_path)
+        tasks = self.download_manager.prepare_download_tasks(
+            diff.pending_contents
+        )
         self.task_orchestrator.run(tasks)
+        return diff
 
     def sync_courses(self, root_folder: str | Path) -> None:
         root_path = Path(root_folder)

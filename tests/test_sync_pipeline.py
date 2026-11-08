@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import MagicMock
 
-from idat_sync.download_manager import DownloadManager
+from idat_sync.download_manager import DownloadManager, SyncStatus
 from idat_sync.services.downloaders import (
     MoodleContent,
     MoodleDownloader,
@@ -88,6 +88,49 @@ class TestSyncPipeline(unittest.TestCase):
         tasks = self.manager.prepare_download_tasks([rec])
         self.assertEqual(len(tasks), 1)
         self.assertIs(tasks[0].downloader, self.recording_downloader)
+
+    def test_diff_trees_uses_python_sets_for_sync_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+
+            synced_file = tmp_path / "Semana 01" / "synced.pdf"
+            synced_file.parent.mkdir(parents=True, exist_ok=True)
+            synced_file.write_bytes(b"ok")
+            os.utime(synced_file, (2000000000, 2000000000))
+
+            outdated_file = tmp_path / "Semana 01" / "outdated.pdf"
+            outdated_file.write_bytes(b"old")
+            os.utime(outdated_file, (1500000000, 1500000000))
+
+            local_only_file = tmp_path / "Semana 01" / "my_notes.txt"
+            local_only_file.write_text("personal notes", encoding="utf-8")
+
+            missing_file = tmp_path / "Semana 02" / "new_slides.pdf"
+
+            remote_contents = [
+                MoodleContent(synced_file, 1900000000, "https://aulavirtual/1"),
+                MoodleContent(outdated_file, 1800000000, "https://aulavirtual/2"),
+                SharepointContent(missing_file, 1800000000, MagicMock()),
+            ]
+
+            diff = self.manager.diff_trees(tmp_path, remote_contents)
+
+            self.assertEqual(diff.missing_paths, {missing_file})
+            self.assertEqual(diff.outdated_paths, {outdated_file})
+            self.assertEqual(diff.synced_paths, {synced_file})
+            self.assertEqual(diff.local_only_paths, {local_only_file})
+            self.assertEqual(
+                diff.to_download_paths, {missing_file, outdated_file}
+            )
+            self.assertEqual(len(diff.pending_contents), 2)
+
+            status_by_path = {e.path: e.status for e in diff.entries}
+            self.assertEqual(status_by_path[synced_file], SyncStatus.SYNCED)
+            self.assertEqual(status_by_path[outdated_file], SyncStatus.OUTDATED)
+            self.assertEqual(status_by_path[missing_file], SyncStatus.MISSING)
+            self.assertEqual(
+                status_by_path[local_only_file], SyncStatus.LOCAL_ONLY
+            )
 
 
 if __name__ == "__main__":
