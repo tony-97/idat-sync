@@ -96,18 +96,21 @@ class SharepointApiAdapter:
             ):
                 return site_name
 
-    def __get_name(self, f: Folder | File, fallback_name: str = ""):
+    def get_name(self, f: Folder | File, fallback_name: str = ""):
         return (
             f.name
             or pathlib.PurePosixPath(f.serverRelativeUrl or "").name
             or fallback_name
         )
 
-    def __get_last_modified(self, f: Folder | File, fallback_last_modified: int = 0):
+    def get_last_modified(self, f: Folder | File, fallback_last_modified: int = 0):
         if last_modified := f.time_last_modified:
             return int(last_modified.timestamp())
         else:
             return fallback_last_modified
+
+    __get_name = get_name
+    __get_last_modified = get_last_modified
 
     def __load_entity(self, f: File | Folder, ctx: ClientContext):
         ctx.load(f, self.properties_to_retrieve)

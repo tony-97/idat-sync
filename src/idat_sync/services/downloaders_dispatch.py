@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, TYPE_CHECKING
 from dataclasses import dataclass
 import datetime
 from urllib.parse import urlparse
@@ -13,8 +15,10 @@ from office365.sharepoint.folders.folder import Folder
 
 from playwright._impl._api_structures import StorageStateCookie
 
-from idat_sync.services.moodle_adapter import MoodleApiAdapter
-from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
+if TYPE_CHECKING:
+    from idat_sync.services.moodle_adapter import MoodleApiAdapter
+    from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
+
 from idat_sync.utils import REQUEST_DELAY, RQ_HEADER, safe_filename
 
 

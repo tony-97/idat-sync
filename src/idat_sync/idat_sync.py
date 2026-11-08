@@ -5,7 +5,8 @@ import os
 from idat_sync.auth import Credentials
 from idat_sync.download_manager import DownloadManager
 from idat_sync.services.course_repository import CourseContent, CourseRepository
-from idat_sync.services.moodle_adapter import MoodleApiAdapter
+from idat_sync.services.moodle_client import MoodleClient
+from idat_sync.services.moodle_adapter import MoodleAdapter
 from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.services.downloaders import (
     DownloadTask,
@@ -22,14 +23,15 @@ class IDATSync:
     def __init__(self, credentials: Credentials) -> None:
         sharepoint_storage_state = credentials.get("sharepoint_storage_state")
         cookies = sharepoint_storage_state.get("cookies", [])
-        self.moodle_client = MoodleApiAdapter(credentials.get("token"))
+        self.moodle_client = MoodleClient(credentials.get("token"))
+        self.moodle_adapter = MoodleAdapter(self.moodle_client)
         self.sharepoint_client = SharepointApiAdapter(cookies)
         self.course_repository = CourseRepository(
-            self.moodle_client, self.sharepoint_client
+            self.moodle_adapter, self.sharepoint_client
         )
         self.download_tasks_group = [
             [
-                [MoodleDownloader(self.moodle_client)],
+                [MoodleDownloader(self.moodle_adapter)],
                 [StringDownloader()],
                 [
                     SharepointDownloader(self.sharepoint_client),
@@ -71,6 +73,6 @@ class IDATSync:
         asyncio.gather()
 
     def sync_courses(self, root_folder: str):
-        courses_contents = self.course_repository.get_courses_raw_contents()
-        for content in courses_contents:
-            self.sync_course(content, "")
+        courses = self.course_repository.get_courses()
+        for course in courses:
+            self.sync_course(course, "")

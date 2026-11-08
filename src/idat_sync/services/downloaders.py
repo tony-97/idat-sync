@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import requests
 import time
 import io
+from typing import TYPE_CHECKING
 
 from office365.sharepoint.files.file import File
 
 from playwright._impl._api_structures import StorageStateCookie
 
-from idat_sync.services.moodle_adapter import MoodleApiAdapter
-from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
+if TYPE_CHECKING:
+    from idat_sync.services.moodle_adapter import MoodleAdapter, MoodleApiAdapter
+    from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
+
 from idat_sync.utils import REQUEST_DELAY, RQ_HEADER
 
 
@@ -61,7 +66,7 @@ class RecordingContent(Content):
 
 @dataclass
 class Downloader[T: DownloadTask](ABC):
-    tasks: list[T] = []
+    tasks: list[T] = field(default_factory=list)
 
     def create_moodle_download_task(
         self, content: MoodleContent
@@ -127,7 +132,7 @@ class StringDownloadTask(DownloadTask["StringDownloader"]):
 
 
 class MoodleDownloader(Downloader[MoodleDownloadTask]):
-    def __init__(self, client: MoodleApiAdapter) -> None:
+    def __init__(self, client: MoodleAdapter | MoodleApiAdapter) -> None:
         super().__init__()
         self.moodle_client = client
 
