@@ -6,7 +6,6 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-
 MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
     "User-Agent": (

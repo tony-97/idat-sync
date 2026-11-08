@@ -1,10 +1,13 @@
+from urllib.parse import urlparse
+
 import requests
 import time
 
+from idat_sync.services.downloaders import MoodleContent
 from idat_sync.utils import REQUEST_DELAY, MOODLE_IDAT
 
 
-class MoodleClient:
+class MoodleApiAdapter:
     def __init__(self, token: str) -> None:
         self.token = token
 
@@ -24,7 +27,16 @@ class MoodleClient:
         time.sleep(REQUEST_DELAY)
         return j
 
-    def list_my_courses(self):
+    def can_handle(self, url: str):
+        return "aulavirtual" in urlparse(url).netloc
+
+    def list_url_content(
+        self, url: str, parents: list[str], filename, last_modified: int
+    ):
+        # TODO list recursive moodle folder url
+        return [MoodleContent(parents, filename, last_modified, url)]
+
+    def fetch_enrolled_courses(self) -> list[dict]:
         try:
             return self.__call_ws(
                 "core_course_get_enrolled_courses_by_timeline_classification",
@@ -36,7 +48,7 @@ class MoodleClient:
             print("[!] Could not list courses via core_enrol_get_users_courses.")
             raise e
 
-    def get_assignements_from_courses(self):
+    def fetch_assignements_from_courses(self):
         courses = self.__call_ws("mod_assign_get_assignments").get("courses", [])
         courses_assignments: dict[int, dict[int, dict]] = {}
         for course in courses:
@@ -47,8 +59,8 @@ class MoodleClient:
             courses_assignments[course.get("id")] = module_assignments
         return courses_assignments
 
-    def get_course_contents(self, course_id):
+    def fetch_course_contents(self, course_id: int):
         return self.__call_ws(
             "core_course_get_contents",
-            courseid=f"{course_id}",
+            courseid=course_id,
         )
