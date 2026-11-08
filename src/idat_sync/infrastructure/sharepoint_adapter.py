@@ -1,0 +1,149 @@
+import pathlib
+from pathlib import Path
+import re
+import time
+import urllib.parse
+from urllib.parse import urlparse
+
+from office365.runtime.client_result import ClientResult
+from office365.sharepoint.client_context import ClientContext
+from office365.sharepoint.files.file import File
+from office365.sharepoint.folders.folder import Folder
+from office365.sharepoint.listitems.collection import ListItem
+from office365.sharepoint.search.result import SearchResult
+from playwright._impl._api_structures import StorageStateCookie
+
+from idat_sync.domain.content import SharepointContent
+from idat_sync.infrastructure.sharepoint_client import SharepointClient
+from idat_sync.utils import REQUEST_DELAY
+
+
+class SharepointApiAdapter:
+    def __init__(
+        self, client_or_cookies: SharepointClient | list[StorageStateCookie]
+    ) -> None:
+        if isinstance(client_or_cookies, SharepointClient):
+            self.sp_client = client_or_cookies
+        else:
+            self.sp_client = SharepointClient(client_or_cookies)
+        self.properties_to_retrieve = self.sp_client.properties_to_retrieve
+        self.client = self.sp_client.client
+        self.search_client = self.sp_client.search_client
+
+    def __find_recordings_site(
+        self, course_name: str, search_result: ClientResult[SearchResult]
+    ):
+        for row in search_result.value.PrimaryQueryResult.RelevantResults.Table.Rows:
+            cells = row.Cells or {}
+            title: str = cells.get("Title") or ""
+            parent_link: str = cells.get("ParentLink") or ""
+            site_name: str = cells.get("SiteName") or ""
+            if (
+                course_name in title
+                and parent_link.lower().endswith("grabaciones")
+                and site_name
+            ):
+                return site_name
+
+    def get_name(self, f: Folder | File, fallback_name: str = ""):
+        return (
+            f.name
+            or pathlib.PurePosixPath(f.serverRelativeUrl or "").name
+            or fallback_name
+        )
+
+    def get_last_modified(
+        self, f: Folder | File, fallback_last_modified: int = 0
+    ):
+        if last_modified := f.time_last_modified:
+            return int(last_modified.timestamp())
+        else:
+            return fallback_last_modified
+
+    __get_name = get_name
+    __get_last_modified = get_last_modified
+
+    def __file_to_content(
+        self, f: File, file_name: str = "", last_modified: int = 0
+    ):
+        return SharepointContent(
+            Path(self.__get_name(f, file_name)),
+            self.__get_last_modified(f, last_modified),
+            f,
+        )
+
+    def can_handle(self, url: str):
+        return "idat628.sharepoint" in urlparse(url).netloc
+
+    def list_url_content(
+        self, url: str, filename: str, last_modified: int
+    ) -> list[SharepointContent]:
+        if re.search(r"https://idat628\.sharepoint\.com/:(\w+):", url):
+            ctx: ClientContext = self.sp_client.get_client_from_url(url)
+            if url.startswith("https://idat628.sharepoint.com/:f:"):
+                folder: Folder = ctx.web.get_folder_by_guest_url(url)
+                self.sp_client.load_entity(folder, ctx)
+                return self.fetch_folder_contents(folder)
+            else:
+                file = ctx.web.get_file_by_guest_url(url)
+                self.sp_client.load_entity(file, ctx)
+                return [self.__file_to_content(file, filename, last_modified)]
+        else:
+            if file := self.fetch_file_from_direct_link(url):
+                return [self.__file_to_content(file, filename, last_modified)]
+        return []
+
+    def fetch_folder_contents(self, folder: Folder) -> list[SharepointContent]:
+        contents = list[SharepointContent]()
+        files = (
+            folder.get_files()
+            .select(self.properties_to_retrieve)
+            .execute_query_retry()
+        )
+        for file in files:
+            contents.append(self.__file_to_content(file))
+        time.sleep(REQUEST_DELAY)
+        folders = folder.get_folders().execute_query_retry()
+        time.sleep(REQUEST_DELAY)
+        for sub_folder in folders:
+            if save_name := self.__get_name(sub_folder):
+                for item in self.fetch_folder_contents(sub_folder):
+                    contents.append(item.in_folder(save_name))
+        return contents
+
+    def fetch_file_from_direct_link(self, link: str):
+        ctx = self.sp_client.get_client_from_url(link)
+        file_id = None
+        query_params = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
+        lower_query_keys = {k.lower(): v for k, v in query_params.items()}
+
+        if "uniqueid" in lower_query_keys:
+            file_id = lower_query_keys["uniqueid"][0].strip("{}")
+        elif "sourcedoc" in lower_query_keys:
+            file_id = lower_query_keys["sourcedoc"][0].strip("{}")
+        else:
+            return
+
+        file = ctx.web.get_file_by_id(file_id)
+        self.sp_client.load_entity(file, ctx)
+        return file
+
+    def fetch_recordings(self, course_name: str) -> list[File]:
+        search_result = self.sp_client.search_for_recordings(course_name)
+        recording_site = self.__find_recordings_site(course_name, search_result)
+        onedrive_recordings = list[File]()
+        if recording_site:
+            items = self.sp_client.fetch_document_library_items(recording_site)
+
+            def is_course_recording(item: ListItem):
+                relative_url = item.file.serverRelativeUrl or ""
+                return (
+                    Path(urlparse(relative_url).path).parent.name.lower()
+                    == "grabaciones"
+                    and course_name in relative_url
+                )
+
+            onedrive_recordings = [
+                item.file for item in filter(is_course_recording, items)
+            ]
+        return onedrive_recordings

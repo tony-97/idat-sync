@@ -4,18 +4,21 @@ import os
 import unittest
 from unittest.mock import MagicMock
 
-from idat_sync.download_manager import DownloadManager, SyncStatus
-from idat_sync.services.downloaders import (
+from idat_sync.application.download_manager import DownloadManager
+from idat_sync.application.task_orchestrator import TaskOrchestrator
+from idat_sync.domain.content import (
     MoodleContent,
-    MoodleDownloader,
     RecordingContent,
-    RecordingDownloader,
     SharepointContent,
-    SharepointDownloader,
     StringContent,
+)
+from idat_sync.domain.sync import SyncStatus
+from idat_sync.infrastructure.downloaders import (
+    MoodleDownloader,
+    RecordingDownloader,
+    SharepointDownloader,
     StringDownloader,
 )
-from idat_sync.ui.task_orchestrator import TaskOrchestrator
 
 
 class TestSyncPipeline(unittest.TestCase):

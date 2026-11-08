@@ -1,73 +1,30 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, replace
-from pathlib import Path
-import os
-import requests
-import time
+from dataclasses import dataclass, field
 import io
-from typing import Self, TYPE_CHECKING
+import os
+from pathlib import Path
+import time
+from typing import TYPE_CHECKING
 
 from office365.sharepoint.files.file import File
 from playwright._impl._api_structures import StorageStateCookie
+import requests
 import yt_dlp
 
-if TYPE_CHECKING:
-    from idat_sync.services.moodle_adapter import MoodleAdapter
-    from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
-
+from idat_sync.domain.content import (
+    Content,
+    MoodleContent,
+    RecordingContent,
+    SharepointContent,
+    StringContent,
+)
 from idat_sync.utils import REQUEST_DELAY, RQ_HEADER
 
-
-@dataclass
-class Content(ABC):
-    path: Path
-    last_modified: int
-
-    @property
-    def filename(self) -> str:
-        return self.path.name
-
-    def in_folder(self, folder: str | Path) -> Self:
-        if not folder:
-            return self
-        return replace(self, path=Path(folder) / self.path)
-
-    @abstractmethod
-    def generate_task(self, downloader: Downloader) -> DownloadTask | None: ...
-
-
-@dataclass
-class MoodleContent(Content):
-    url: str
-
-    def generate_task(self, downloader: Downloader):
-        return downloader.create_moodle_download_task(self)
-
-
-@dataclass
-class SharepointContent(Content):
-    file: File
-
-    def generate_task(self, downloader: Downloader):
-        return downloader.create_sharepoint_download_task(self)
-
-
-@dataclass
-class StringContent(Content):
-    contents: list[str]
-
-    def generate_task(self, downloader: Downloader):
-        return downloader.create_string_download_task(self)
-
-
-@dataclass
-class RecordingContent(Content):
-    url: str
-
-    def generate_task(self, downloader: Downloader):
-        return downloader.create_recording_download_task(self)
+if TYPE_CHECKING:
+    from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
+    from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 
 
 @dataclass(eq=False)
@@ -187,7 +144,9 @@ class SharepointDownloader(Downloader[SharepointDownloadTask]):
     def download(self, file_info: SharepointDownloadTask) -> None:
         Path(file_info.path).parent.mkdir(parents=True, exist_ok=True)
         with open(file_info.path, "wb") as local_file:
-            file_info.file.download(local_file).execute_query_with_incremental_retry()
+            file_info.file.download(
+                local_file
+            ).execute_query_with_incremental_retry()
             time.sleep(REQUEST_DELAY)
 
 
@@ -228,31 +187,21 @@ class RecordingDownloader(Downloader[RecordingDownloadTask]):
 
         for c in cookies:
             to_bool_str = lambda value: "TRUE" if value else "FALSE"
-            # Required fields with sane defaults
             name = c.get("name", "")
             value = c.get("value", "")
             domain = c.get("domain", "")
             path = c.get("path", "/")
             secure = bool(c.get("secure", False))
-            expires = c.get(
-                "expires", 0
-            )  # Playwright uses Unix seconds, 0/-1 for session
+            expires = c.get("expires", 0)
             try:
                 expires_int = int(expires if expires and expires > 0 else 0)
             except Exception:
                 expires_int = 0
 
             if not domain or not name:
-                # Skip malformed cookies
                 continue
 
-            # include_subdomains flag:
-            # TRUE if domain starts with a dot (host-only cookies typically won’t)
             include_subdomains = domain.startswith(".")
-
-            # Netscape format columns:
-            # domain, include_subdomains(TRUE|FALSE), path, secure(TRUE|FALSE),
-            # expiration (Unix epoch), name, value
             line = "\t".join(
                 [
                     domain,
@@ -278,7 +227,8 @@ class RecordingDownloader(Downloader[RecordingDownloadTask]):
         else:
             target_path.mkdir(parents=True, exist_ok=True)
             output_path_template = os.path.join(
-                f"\\\\?\\{os.path.abspath(target_path)}", "%(title)s %(id)s.%(ext)s"
+                f"\\\\?\\{os.path.abspath(target_path)}",
+                "%(title)s %(id)s.%(ext)s",
             )
         ydl_opts = {
             "cookiefile": io.StringIO(self.cookies),
@@ -289,3 +239,22 @@ class RecordingDownloader(Downloader[RecordingDownloadTask]):
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
             ydl.download([task.url])
+
+
+__all__ = [
+    "Content",
+    "DownloadTask",
+    "Downloader",
+    "MoodleContent",
+    "MoodleDownloadTask",
+    "MoodleDownloader",
+    "RecordingContent",
+    "RecordingDownloadTask",
+    "RecordingDownloader",
+    "SharepointContent",
+    "SharepointDownloadTask",
+    "SharepointDownloader",
+    "StringContent",
+    "StringDownloadTask",
+    "StringDownloader",
+]

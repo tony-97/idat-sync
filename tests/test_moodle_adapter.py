@@ -2,10 +2,10 @@ from pathlib import Path
 import unittest
 from unittest.mock import MagicMock
 
-from idat_sync.models import Assignment, Course, CourseModule, CourseSection, ModuleContent
-from idat_sync.services.downloaders import MoodleContent
-from idat_sync.services.moodle_adapter import MoodleAdapter
-from idat_sync.services.moodle_client import MoodleClient
+from idat_sync.domain.content import MoodleContent
+from idat_sync.domain.course import Assignment, Course, CourseModule, CourseSection, ModuleContent
+from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
+from idat_sync.infrastructure.moodle_client import MoodleClient
 
 
 class TestMoodleAdapter(unittest.TestCase):

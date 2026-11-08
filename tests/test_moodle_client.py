@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import requests
 
-from idat_sync.services.moodle_client import MoodleClient
+from idat_sync.infrastructure.moodle_client import MoodleClient
 
 
 class TestMoodleClient(unittest.TestCase):
@@ -10,8 +10,8 @@ class TestMoodleClient(unittest.TestCase):
         self.token = "fake_test_token"
         self.client = MoodleClient(token=self.token)
 
-    @patch("idat_sync.services.moodle_client.time.sleep")
-    @patch("idat_sync.services.moodle_client.requests.post")
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.post")
     def test_call_ws_success(self, mock_post, mock_sleep):
         mock_response = MagicMock()
         mock_response.json.return_value = {"courses": [{"id": 1, "fullname": "Test Course"}]}
@@ -28,8 +28,8 @@ class TestMoodleClient(unittest.TestCase):
         self.assertEqual(payload["classification"], "all")
         self.assertEqual(result, {"courses": [{"id": 1, "fullname": "Test Course"}]})
 
-    @patch("idat_sync.services.moodle_client.time.sleep")
-    @patch("idat_sync.services.moodle_client.requests.post")
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.post")
     def test_call_ws_moodle_exception(self, mock_post, mock_sleep):
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -45,7 +45,7 @@ class TestMoodleClient(unittest.TestCase):
         self.assertIn("invalidtoken", str(ctx.exception))
         self.assertIn("Invalid token", str(ctx.exception))
 
-    @patch("idat_sync.services.moodle_client.MoodleClient.call_ws")
+    @patch("idat_sync.infrastructure.moodle_client.MoodleClient.call_ws")
     def test_fetch_enrolled_courses(self, mock_call_ws):
         raw_courses = [{"id": 101, "fullname": "Course 101"}]
         mock_call_ws.return_value = {"courses": raw_courses}
@@ -61,7 +61,7 @@ class TestMoodleClient(unittest.TestCase):
         self.assertIsInstance(courses, list)
         self.assertIsInstance(courses[0], dict)  # Raw vendor data type
 
-    @patch("idat_sync.services.moodle_client.MoodleClient.call_ws")
+    @patch("idat_sync.infrastructure.moodle_client.MoodleClient.call_ws")
     def test_fetch_assignments(self, mock_call_ws):
         raw_assignments = [{"id": 101, "assignments": [{"id": 5, "cmid": 12, "name": "Tarea"}]}]
         mock_call_ws.return_value = {"courses": raw_assignments}
@@ -72,7 +72,7 @@ class TestMoodleClient(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertIsInstance(result[0], dict)  # Raw vendor data type
 
-    @patch("idat_sync.services.moodle_client.MoodleClient.call_ws")
+    @patch("idat_sync.infrastructure.moodle_client.MoodleClient.call_ws")
     def test_fetch_course_contents(self, mock_call_ws):
         raw_sections = [{"id": 1, "name": "General", "modules": []}]
         mock_call_ws.return_value = raw_sections

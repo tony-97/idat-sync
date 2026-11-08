@@ -1,10 +1,15 @@
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Sequence
 
-from idat_sync.models import Assignment, Course, CourseModule, CourseSection, ModuleContent
-from idat_sync.services.downloaders import MoodleContent
-from idat_sync.services.moodle_client import MoodleClient
+from idat_sync.domain.content import MoodleContent
+from idat_sync.domain.course import (
+    Assignment,
+    Course,
+    CourseModule,
+    CourseSection,
+    ModuleContent,
+)
+from idat_sync.infrastructure.moodle_client import MoodleClient
 
 
 class MoodleAdapter:
@@ -137,4 +142,3 @@ class MoodleAdapter:
             course.assignments = assignments_by_course.get(course.id, {})
 
         return courses
-

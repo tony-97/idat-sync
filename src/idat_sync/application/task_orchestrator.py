@@ -2,7 +2,7 @@ import asyncio
 from collections import defaultdict
 from typing import Sequence
 
-from idat_sync.services.downloaders import DownloadTask, Downloader
+from idat_sync.infrastructure.downloaders import DownloadTask, Downloader
 
 
 class TaskOrchestrator:

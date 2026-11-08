@@ -1,45 +1,9 @@
-from dataclasses import dataclass
-from enum import Enum, auto
 from pathlib import Path
 from typing import Sequence
 
-from idat_sync.services.downloaders import Content, DownloadTask, Downloader
-
-
-class SyncStatus(Enum):
-    SYNCED = auto()
-    MISSING = auto()
-    OUTDATED = auto()
-    LOCAL_ONLY = auto()
-
-
-@dataclass
-class SyncEntry:
-    path: Path
-    status: SyncStatus
-    content: Content | None = None
-
-
-@dataclass
-class SyncDiff:
-    entries: list[SyncEntry]
-    missing_paths: set[Path]
-    outdated_paths: set[Path]
-    synced_paths: set[Path]
-    local_only_paths: set[Path]
-
-    @property
-    def to_download_paths(self) -> set[Path]:
-        return self.missing_paths | self.outdated_paths
-
-    @property
-    def pending_contents(self) -> list[Content]:
-        pending = self.to_download_paths
-        return [
-            entry.content
-            for entry in self.entries
-            if entry.content is not None and entry.path in pending
-        ]
+from idat_sync.domain.content import Content
+from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
+from idat_sync.infrastructure.downloaders import DownloadTask, Downloader
 
 
 class DownloadManager:
@@ -81,11 +45,17 @@ class DownloadManager:
 
         entries: list[SyncEntry] = []
         for path in missing_paths:
-            entries.append(SyncEntry(path, SyncStatus.MISSING, remote_map[path]))
+            entries.append(
+                SyncEntry(path, SyncStatus.MISSING, remote_map[path])
+            )
         for path in outdated_paths:
-            entries.append(SyncEntry(path, SyncStatus.OUTDATED, remote_map[path]))
+            entries.append(
+                SyncEntry(path, SyncStatus.OUTDATED, remote_map[path])
+            )
         for path in synced_paths:
-            entries.append(SyncEntry(path, SyncStatus.SYNCED, remote_map[path]))
+            entries.append(
+                SyncEntry(path, SyncStatus.SYNCED, remote_map[path])
+            )
         for path in local_only_paths:
             entries.append(SyncEntry(path, SyncStatus.LOCAL_ONLY, None))
 
@@ -124,3 +94,6 @@ class DownloadManager:
                 if root_dir is not None or self.should_download(task):
                     tasks.append(task)
         return tasks
+
+
+__all__ = ["DownloadManager", "SyncDiff", "SyncEntry", "SyncStatus"]

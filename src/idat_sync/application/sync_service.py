@@ -1,22 +1,24 @@
 import os
 from pathlib import Path
 
-from idat_sync.auth import Credentials
-from idat_sync.download_manager import DownloadManager, SyncDiff
-from idat_sync.models import Course
-from idat_sync.services.course_repository import CourseRepository
-from idat_sync.services.moodle_client import MoodleClient
-from idat_sync.services.moodle_adapter import MoodleAdapter
-from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
-from idat_sync.services.downloaders import (
-    Content,
+from idat_sync.application.course_repository import CourseRepository
+from idat_sync.application.download_manager import DownloadManager
+from idat_sync.application.task_orchestrator import TaskOrchestrator
+from idat_sync.domain.content import Content
+from idat_sync.domain.course import Course
+from idat_sync.domain.sync import SyncDiff
+from idat_sync.infrastructure.auth import Credentials
+from idat_sync.infrastructure.downloaders import (
     Downloader,
     MoodleDownloader,
     RecordingDownloader,
     SharepointDownloader,
     StringDownloader,
 )
-from idat_sync.ui.task_orchestrator import TaskOrchestrator
+from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
+from idat_sync.infrastructure.moodle_client import MoodleClient
+from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
+from idat_sync.infrastructure.sharepoint_client import SharepointClient
 from idat_sync.utils import safe_filename
 
 
@@ -26,7 +28,10 @@ class IDATSync:
         cookies = sharepoint_storage_state.get("cookies", [])
         self.moodle_client = MoodleClient(credentials.get("token"))
         self.moodle_adapter = MoodleAdapter(self.moodle_client)
-        self.sharepoint_client = SharepointApiAdapter(cookies)
+        self.sharepoint_raw_client = SharepointClient(cookies)
+        self.sharepoint_client = SharepointApiAdapter(
+            self.sharepoint_raw_client
+        )
         self.course_repository = CourseRepository(
             self.moodle_adapter, self.sharepoint_client
         )

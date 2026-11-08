@@ -4,15 +4,15 @@ from pathlib import Path
 from shlex import quote
 from typing import Any, Sequence
 
-from idat_sync.models import (
+from idat_sync.domain.content import Content, RecordingContent, StringContent
+from idat_sync.domain.course import (
     Course,
     CourseModule,
     CourseSection,
     ModuleContent,
 )
-from idat_sync.services.downloaders import Content, RecordingContent, StringContent
-from idat_sync.services.moodle_adapter import MoodleAdapter
-from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
+from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
+from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 
 
 class CourseRepository:
@@ -24,7 +24,9 @@ class CourseRepository:
     """
 
     def __init__(
-        self, moodle_adapter: MoodleAdapter, sharepoint_adapter: SharepointApiAdapter
+        self,
+        moodle_adapter: MoodleAdapter,
+        sharepoint_adapter: SharepointApiAdapter,
     ) -> None:
         self.moodle_adapter = moodle_adapter
         self.sharepoint_adapter = sharepoint_adapter
@@ -36,7 +38,9 @@ class CourseRepository:
                 return strategy
         return None
 
-    def list_url_content(self, contents: Sequence[ModuleContent]) -> list[Content]:
+    def list_url_content(
+        self, contents: Sequence[ModuleContent]
+    ) -> list[Content]:
         resolved_contents = list[Content]()
         for content in contents:
             if content.fileurl and content.filename:
@@ -55,7 +59,11 @@ class CourseRepository:
         self, course_name: str, recordings_folder: str | Path = ""
     ) -> list[Content]:
         recordings = self.sharepoint_adapter.fetch_recordings(course_name)
-        dates = [file.time_created.date() for file in recordings if file.time_created]
+        dates = [
+            file.time_created.date()
+            for file in recordings
+            if file.time_created
+        ]
         start = date(2025, month=9, day=22)
         # Compute week index: 1 + floor(days_since_start / 7)
         week_index = [1 + (d - start).days // 7 for d in dates]
@@ -73,7 +81,7 @@ class CourseRepository:
                     last_mod = self.sharepoint_adapter.get_last_modified(file)
                     recordings_content.append(
                         RecordingContent(
-                            Path( name),
+                            Path(name),
                             last_mod,
                             share_url,
                         ).in_folder(week_folder)
@@ -110,7 +118,9 @@ class CourseRepository:
                         [assignment.intro],
                     )
                 )
-                items.extend(self.list_url_content(assignment.introattachments))
+                items.extend(
+                    self.list_url_content(assignment.introattachments)
+                )
         else:
             items.extend(self.list_url_content(module.contents))
 
@@ -143,7 +153,9 @@ class CourseRepository:
                 course_modules_contents.extend(
                     self._get_section_content(course, section)
                 )
-        return [item.in_folder(course_dir) for item in course_modules_contents]
+        return [
+            item.in_folder(course_dir) for item in course_modules_contents
+        ]
 
     def get_all_courses_contents(self) -> list[Content]:
         to_download = list[Content]()

@@ -2,21 +2,21 @@ from pathlib import Path
 import unittest
 from unittest.mock import MagicMock
 
-from idat_sync.models import (
+from idat_sync.application.course_repository import CourseRepository
+from idat_sync.domain.content import (
+    MoodleContent,
+    SharepointContent,
+    StringContent,
+)
+from idat_sync.domain.course import (
     Assignment,
     Course,
     CourseModule,
     CourseSection,
     ModuleContent,
 )
-from idat_sync.services.course_repository import CourseRepository
-from idat_sync.services.downloaders import (
-    MoodleContent,
-    SharepointContent,
-    StringContent,
-)
-from idat_sync.services.moodle_adapter import MoodleAdapter
-from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
+from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
+from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 
 
 class TestCourseRepository(unittest.TestCase):

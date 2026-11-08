@@ -28,7 +28,7 @@ class AuthProvider:
             get_sharepoint_cookies(username, password, login_flow_ended),
         )
 
-        if sharepoint_storage_state == None:
+        if sharepoint_storage_state is None:
             return False
         # --- Success ---
         # Create the session file to mark the user as authenticated
@@ -72,9 +72,7 @@ class AuthProvider:
         return token
 
     def logout(self):
-        """
-        Logs the user out by deleting the session file.
-        """
+        """Logs the user out by deleting the session file."""
         try:
             if os.path.exists(self.session_file):
                 os.remove(self.session_file)
@@ -85,21 +83,11 @@ class AuthProvider:
             print(f"Error: Could not remove session file: {e}")
 
     def is_authenticated(self):
-        """
-        Checks if a user is currently logged in.
-
-        Returns:
-            bool: True if the session file exists, False otherwise.
-        """
+        """Checks if a user is currently logged in."""
         return os.path.exists(self.session_file)
 
     def get_credentials(self):
-        """
-        Gets the username of the currently logged-in user.
-
-        Returns:
-            str or None: The username if logged in, None otherwise.
-        """
+        """Gets the stored credentials of the currently logged-in user."""
         if not self.is_authenticated():
             return None
 
@@ -107,5 +95,4 @@ class AuthProvider:
             with open(self.session_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except IOError:
-            # Session file exists but is unreadable
             return None
