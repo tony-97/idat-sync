@@ -10,8 +10,8 @@ import io
 from typing import Self, TYPE_CHECKING
 
 from office365.sharepoint.files.file import File
-
 from playwright._impl._api_structures import StorageStateCookie
+import yt_dlp
 
 if TYPE_CHECKING:
     from idat_sync.services.moodle_adapter import MoodleAdapter
@@ -70,7 +70,7 @@ class RecordingContent(Content):
         return downloader.create_recording_download_task(self)
 
 
-@dataclass
+@dataclass(eq=False)
 class Downloader[T: DownloadTask](ABC):
     tasks: list[T] = field(default_factory=list)
 
@@ -148,6 +148,7 @@ class MoodleDownloader(Downloader[MoodleDownloadTask]):
         )
 
     def download(self, file_info: MoodleDownloadTask) -> None:
+        Path(file_info.path).parent.mkdir(parents=True, exist_ok=True)
         with requests.get(
             file_info.url,
             params={
@@ -176,17 +177,33 @@ class SharepointDownloader(Downloader[SharepointDownloadTask]):
         super().__init__()
         self.sharepoint_client = client
 
-    def download(self, file_info: SharepointDownloadTask):
+    def create_sharepoint_download_task(
+        self, content: SharepointContent
+    ) -> SharepointDownloadTask:
+        return SharepointDownloadTask(
+            str(content.path), content.last_modified, self, content.file
+        )
+
+    def download(self, file_info: SharepointDownloadTask) -> None:
+        Path(file_info.path).parent.mkdir(parents=True, exist_ok=True)
         with open(file_info.path, "wb") as local_file:
             file_info.file.download(local_file).execute_query_with_incremental_retry()
             time.sleep(REQUEST_DELAY)
 
 
 class StringDownloader(Downloader[StringDownloadTask]):
-    def can_handle_string_content(self, content: StringContent):
-        return StringDownloadTask("", 0, self, "".join(content.contents))
+    def create_string_download_task(
+        self, content: StringContent
+    ) -> StringDownloadTask | None:
+        text = "".join(content.contents).strip()
+        if not text:
+            return None
+        return StringDownloadTask(
+            str(content.path), content.last_modified, self, text
+        )
 
-    def download(self, task: StringDownloadTask):
+    def download(self, task: StringDownloadTask) -> None:
+        Path(task.path).parent.mkdir(parents=True, exist_ok=True)
         with open(task.path, "w", encoding="utf-8") as f:
             f.write(task.contents)
 
@@ -196,9 +213,14 @@ class RecordingDownloader(Downloader[RecordingDownloadTask]):
         super().__init__()
         self.cookies = self.netscape_cookies_format(cookies)
 
-    def create_url_download_task(self, content: RecordingDownloadTask):
+    def create_recording_download_task(
+        self, content: RecordingContent
+    ) -> RecordingDownloadTask | None:
         if "idat628-my.sharepoint.com/:v:" in content.url:
-            return RecordingDownloadTask("", 0, self, content.url)
+            return RecordingDownloadTask(
+                str(content.path), content.last_modified, self, content.url
+            )
+        return None
 
     def netscape_cookies_format(self, cookies: list[StorageStateCookie]):
         lines = []
@@ -249,9 +271,15 @@ class RecordingDownloader(Downloader[RecordingDownloadTask]):
         print(
             f"downloading share url: {task.url}",
         )
-        output_path_template = os.path.join(
-            f"\\\\?\\{os.path.abspath(task.path)}", "%(title)s %(id)s.%(ext)s"
-        )
+        target_path = Path(task.path)
+        if target_path.suffix:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path_template = f"\\\\?\\{os.path.abspath(target_path)}"
+        else:
+            target_path.mkdir(parents=True, exist_ok=True)
+            output_path_template = os.path.join(
+                f"\\\\?\\{os.path.abspath(target_path)}", "%(title)s %(id)s.%(ext)s"
+            )
         ydl_opts = {
             "cookiefile": io.StringIO(self.cookies),
             "format_sort": ["proto:dash"],
