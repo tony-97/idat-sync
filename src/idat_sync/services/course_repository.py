@@ -4,10 +4,7 @@ from shlex import quote
 from typing import Any, Sequence
 
 from idat_sync.models import (
-    Assignment,
     Course,
-    CourseModule,
-    CourseSection,
     ModuleContent,
 )
 from idat_sync.services.downloaders import Content, RecordingContent, StringContent
@@ -44,7 +41,10 @@ class CourseRepository:
                 if strategy := self.__get_strategy(content.fileurl):
                     return (
                         strategy.list_url_content(
-                            content.fileurl, parents, content.filename, content.timemodified
+                            content.fileurl,
+                            parents,
+                            content.filename,
+                            content.timemodified,
                         )
                         or []
                     )
@@ -82,11 +82,9 @@ class CourseRepository:
 
     def get_courses(self) -> list[Course]:
         """Retrieve all enrolled courses with full domain structure."""
-        return self.moodle_adapter.get_courses()
+        return self.moodle_adapter.get_courses_with_contents()
 
-    def get_course_content(
-        self, course: Course, course_dir: str = ""
-    ) -> list[Content]:
+    def get_course_content(self, course: Course, course_dir: str = "") -> list[Content]:
         """Generate download tasks / Content objects for a course using domain models."""
         course_modules_contents = list[Content]()
 
@@ -116,7 +114,10 @@ class CourseRepository:
                     if module.description:
                         course_modules_contents.append(
                             StringContent(
-                                module_path, f"{module.name}.html", 0, [module.description]
+                                module_path,
+                                f"{module.name}.html",
+                                0,
+                                [module.description],
                             )
                         )
                 elif module.modname == "url" and len(module.contents) == 1:

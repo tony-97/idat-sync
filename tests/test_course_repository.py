@@ -32,7 +32,7 @@ class TestCourseRepository(unittest.TestCase):
 
     def test_get_courses_delegates_to_moodle_adapter(self):
         domain_courses = [Course(id=1, name="Algorithms"), Course(id=2, name="Databases")]
-        self.mock_moodle.get_courses.return_value = domain_courses
+        self.mock_moodle.get_courses_with_contents.return_value = domain_courses
 
         result = self.repo.get_courses()
 
@@ -184,7 +184,7 @@ class TestCourseRepository(unittest.TestCase):
                 )
             ],
         )
-        self.mock_moodle.get_courses.return_value = [course]
+        self.mock_moodle.get_courses_with_contents.return_value = [course]
 
         all_contents = self.repo.get_all_courses_contents()
         self.assertEqual(len(all_contents), 1)

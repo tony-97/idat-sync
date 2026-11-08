@@ -24,14 +24,14 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(items[0].filename, "file.pdf")
         self.assertEqual(items[0].last_modified, 123456)
 
-    def test_fetch_enrolled_courses_converts_to_domain_models(self):
+    def test_list_courses_converts_to_domain_models(self):
         # Raw vendor data returned by MoodleClient
         self.mock_client.fetch_enrolled_courses.return_value = [
             {"id": 10, "fullname": "Software Engineering", "shortname": "SE"},
             {"id": 20, "fullname": "", "shortname": "DB101"},
         ]
 
-        courses = self.adapter.fetch_enrolled_courses()
+        courses = self.adapter.list_courses()
 
         self.assertEqual(len(courses), 2)
         for c in courses:
@@ -44,7 +44,7 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(courses[1].id, 20)
         self.assertEqual(courses[1].name, "DB101")
 
-    def test_fetch_assignments_converts_to_domain_models(self):
+    def test_get_assignments_by_course_converts_to_domain_models(self):
         # Raw vendor data returned by MoodleClient
         self.mock_client.fetch_assignments.return_value = [
             {
@@ -68,7 +68,7 @@ class TestMoodleAdapter(unittest.TestCase):
             }
         ]
 
-        assignments_by_course = self.adapter.fetch_assignments_from_courses()
+        assignments_by_course = self.adapter.get_assignments_by_course()
 
         self.assertIn(10, assignments_by_course)
         assignments = assignments_by_course[10]
@@ -90,7 +90,7 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(att.fileurl, "https://aulavirtual/rubric.pdf")
         self.assertEqual(att.timemodified, 1700000000)
 
-    def test_fetch_course_contents_converts_to_domain_models(self):
+    def test_get_course_sections_converts_to_domain_models(self):
         # Raw vendor sections returned by MoodleClient
         self.mock_client.fetch_course_contents.return_value = [
             {
@@ -122,7 +122,7 @@ class TestMoodleAdapter(unittest.TestCase):
             }
         ]
 
-        sections = self.adapter.fetch_course_contents(course_id=10)
+        sections = self.adapter.get_course_sections(course_id=10)
 
         self.assertEqual(len(sections), 1)
         section = sections[0]
@@ -150,7 +150,7 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(mod2.modname, "label")
         self.assertEqual(mod2.description, "<p>Class starts at 8am</p>")
 
-    def test_get_courses_orchestrates_full_domain_models(self):
+    def test_get_courses_with_contents_orchestrates_full_domain_models(self):
         self.mock_client.fetch_enrolled_courses.return_value = [
             {"id": 42, "fullname": "Data Structures"}
         ]
@@ -166,7 +166,7 @@ class TestMoodleAdapter(unittest.TestCase):
             {"id": 1, "name": "Topic 1", "summary": "Intro", "modules": []}
         ]
 
-        courses = self.adapter.get_courses()
+        courses = self.adapter.get_courses_with_contents()
 
         self.assertEqual(len(courses), 1)
         course = courses[0]

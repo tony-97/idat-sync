@@ -85,8 +85,8 @@ class MoodleAdapter:
     # Domain-facing Retrieval Methods
     # -------------------------------------------------------------------------
 
-    def fetch_enrolled_courses(self) -> list[Course]:
-        """Fetch all enrolled courses as domain Course models."""
+    def list_courses(self) -> list[Course]:
+        """List all enrolled courses with basic metadata (id and name)."""
         raw_courses = self.client.fetch_enrolled_courses()
         courses: list[Course] = []
         for raw in raw_courses:
@@ -98,8 +98,8 @@ class MoodleAdapter:
                 courses.append(Course(id=int(course_id), name=str(course_name)))
         return courses
 
-    def fetch_assignments_from_courses(self) -> dict[int, dict[int, Assignment]]:
-        """Fetch all course assignments organized by course_id -> {cmid: Assignment}."""
+    def get_assignments_by_course(self) -> dict[int, dict[int, Assignment]]:
+        """Fetch assignments across all enrolled courses organized by course_id -> {cmid: Assignment}."""
         raw_courses = self.client.fetch_assignments()
         courses_assignments: dict[int, dict[int, Assignment]] = {}
         for raw_course in raw_courses:
@@ -116,8 +116,8 @@ class MoodleAdapter:
             courses_assignments[int(cid)] = module_assignments
         return courses_assignments
 
-    def fetch_course_contents(self, course_id: int) -> list[CourseSection]:
-        """Fetch sections and modules for a course as domain models."""
+    def get_course_sections(self, course_id: int) -> list[CourseSection]:
+        """Retrieve sections and modules for a specific course as domain models."""
         raw_sections = self.client.fetch_course_contents(course_id)
         return [
             self._to_course_section(raw_sec)
@@ -125,17 +125,14 @@ class MoodleAdapter:
             if isinstance(raw_sec, dict)
         ]
 
-    def get_courses(self) -> list[Course]:
-        """Fetch all enrolled courses populated with sections, modules, and assignments.
-
-        Returns domain models exclusively.
-        """
-        courses = self.fetch_enrolled_courses()
-        assignments_by_course = self.fetch_assignments_from_courses()
+    def get_courses_with_contents(self) -> list[Course]:
+        """Retrieve all enrolled courses fully populated with sections, modules, and assignments."""
+        courses = self.list_courses()
+        assignments_by_course = self.get_assignments_by_course()
 
         for course in courses:
             print(f"\nFetching contents for: {course.name} (id={course.id}) ...")
-            course.sections = self.fetch_course_contents(course.id)
+            course.sections = self.get_course_sections(course.id)
             course.assignments = assignments_by_course.get(course.id, {})
 
         return courses
