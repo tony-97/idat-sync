@@ -1,3 +1,4 @@
+from pathlib import Path
 import unittest
 from unittest.mock import MagicMock
 
@@ -18,9 +19,10 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertFalse(self.adapter.can_handle("https://idat628.sharepoint.com/sites/my_site"))
 
     def test_list_url_content(self):
-        items = self.adapter.list_url_content("https://aulavirtual.idat.edu.pe/file.pdf", ["Course", "Unit 1"], "file.pdf", 123456)
+        items = self.adapter.list_url_content("https://aulavirtual.idat.edu.pe/file.pdf", "file.pdf", 123456)
         self.assertEqual(len(items), 1)
         self.assertIsInstance(items[0], MoodleContent)
+        self.assertEqual(items[0].path, Path("file.pdf"))
         self.assertEqual(items[0].filename, "file.pdf")
         self.assertEqual(items[0].last_modified, 123456)
 

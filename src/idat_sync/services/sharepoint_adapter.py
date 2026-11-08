@@ -118,11 +118,10 @@ class SharepointApiAdapter:
         time.sleep(REQUEST_DELAY)
 
     def __file_to_content(
-        self, f: File, parents: list[str], file_name: str = "", last_modified: int = 0
+        self, f: File, file_name: str = "", last_modified: int = 0
     ):
         return SharepointContent(
-            parents,
-            self.__get_name(f, file_name),
+            Path(self.__get_name(f, file_name)),
             self.__get_last_modified(f, last_modified),
             f,
         )
@@ -131,44 +130,38 @@ class SharepointApiAdapter:
         return "idat628.sharepoint" in urlparse(url).netloc
 
     def list_url_content(
-        self, url: str, parents: list[str], filename: str, last_modified: int
-    ):
-        url_contents = list[SharepointContent]()
+        self, url: str, filename: str, last_modified: int
+    ) -> list[SharepointContent]:
         if re.search(r"https://idat628\.sharepoint\.com/:(\w+):", url):
             ctx: ClientContext = self.__get_sharepoint_client_from_url(url)
             if url.startswith("https://idat628.sharepoint.com/:f:"):
                 folder: Folder = ctx.web.get_folder_by_guest_url(url)
                 self.__load_entity(folder, ctx)
-                folder_path = [*parents, self.__get_name(folder, filename)]
-                self.fetch_folder_contents(folder, url_contents, folder_path)
+                return self.fetch_folder_contents(folder)
             else:
                 file = ctx.web.get_file_by_guest_url(url)
                 self.__load_entity(file, ctx)
-                url_contents.append(
-                    self.__file_to_content(file, parents, filename, last_modified)
-                )
+                return [self.__file_to_content(file, filename, last_modified)]
         else:
             if file := self.fetch_file_from_direct_link(url):
-                url_contents.append(
-                    self.__file_to_content(file, parents, filename, last_modified)
-                )
-        return url_contents
+                return [self.__file_to_content(file, filename, last_modified)]
+        return []
 
-    def fetch_folder_contents(
-        self, folder: Folder, all_contents: list[SharepointContent], parents: list[str]
-    ):
+    def fetch_folder_contents(self, folder: Folder) -> list[SharepointContent]:
+        contents = list[SharepointContent]()
         files = (
             folder.get_files().select(self.properties_to_retrieve).execute_query_retry()
         )
         for file in files:
-            all_contents.append(self.__file_to_content(file, parents))
+            contents.append(self.__file_to_content(file))
         time.sleep(REQUEST_DELAY)
         folders = folder.get_folders().execute_query_retry()
         time.sleep(REQUEST_DELAY)
-        for folder in folders:
-            if save_name := self.__get_name(folder):
-                sub_folder_path = [*parents, save_name]
-                self.fetch_folder_contents(folder, all_contents, sub_folder_path)
+        for sub_folder in folders:
+            if save_name := self.__get_name(sub_folder):
+                for item in self.fetch_folder_contents(sub_folder):
+                    contents.append(item.in_folder(save_name))
+        return contents
 
     def fetch_file_from_direct_link(self, link: str):
         ctx = self.__get_sharepoint_client_from_url(link)

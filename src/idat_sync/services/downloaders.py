@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 import os
 import requests
 import time
 import io
-from typing import TYPE_CHECKING
+from typing import Self, TYPE_CHECKING
 
 from office365.sharepoint.files.file import File
 
@@ -20,13 +21,18 @@ from idat_sync.utils import REQUEST_DELAY, RQ_HEADER
 
 
 @dataclass
-class Content:
-    parents: list[str]
-    filename: str
+class Content(ABC):
+    path: Path
     last_modified: int
 
-    def __post_init__(self):
-        self.parents = self.parents.copy()
+    @property
+    def filename(self) -> str:
+        return self.path.name
+
+    def in_folder(self, folder: str | Path) -> Self:
+        if not folder:
+            return self
+        return replace(self, path=Path(folder) / self.path)
 
     @abstractmethod
     def generate_task(self, downloader: Downloader) -> DownloadTask | None: ...
@@ -138,7 +144,7 @@ class MoodleDownloader(Downloader[MoodleDownloadTask]):
 
     def create_moodle_download_task(self, content: MoodleContent):
         return MoodleDownloadTask(
-            "".join(content.parents), content.last_modified, self, content.url
+            str(content.path), content.last_modified, self, content.url
         )
 
     def download(self, file_info: MoodleDownloadTask) -> None:

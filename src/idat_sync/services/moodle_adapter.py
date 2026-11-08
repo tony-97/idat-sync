@@ -1,3 +1,4 @@
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Sequence
 
@@ -23,10 +24,10 @@ class MoodleAdapter:
         return "aulavirtual" in urlparse(url).netloc
 
     def list_url_content(
-        self, url: str, parents: list[str], filename: str, last_modified: int
+        self, url: str, filename: str, last_modified: int
     ) -> list[MoodleContent]:
         # TODO: list recursive moodle folder url
-        return [MoodleContent(parents, filename, last_modified, url)]
+        return [MoodleContent(Path(filename), last_modified, url)]
 
     # -------------------------------------------------------------------------
     # Internal Vendor-to-Domain Mappers
