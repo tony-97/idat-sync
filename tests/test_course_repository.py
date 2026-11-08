@@ -4,7 +4,6 @@ from unittest.mock import MagicMock
 from idat_sync.models import (
     Assignment,
     Course,
-    CourseContent,
     CourseModule,
     CourseSection,
     ModuleContent,
@@ -41,15 +40,6 @@ class TestCourseRepository(unittest.TestCase):
         for c in result:
             self.assertIsInstance(c, Course)
             self.assertNotIsInstance(c, dict)
-
-    def test_get_courses_raw_contents_alias_returns_domain_models(self):
-        domain_courses = [Course(id=1, name="Algorithms")]
-        self.mock_moodle.get_courses.return_value = domain_courses
-
-        result = self.repo.get_courses_raw_contents()
-
-        self.assertEqual(result, domain_courses)
-        self.assertIsInstance(result[0], Course)
 
     def test_list_url_content_with_domain_module_content(self):
         items = [

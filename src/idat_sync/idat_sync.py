@@ -4,7 +4,8 @@ import os
 
 from idat_sync.auth import Credentials
 from idat_sync.download_manager import DownloadManager
-from idat_sync.services.course_repository import CourseContent, CourseRepository
+from idat_sync.models import Course
+from idat_sync.services.course_repository import CourseRepository
 from idat_sync.services.moodle_client import MoodleClient
 from idat_sync.services.moodle_adapter import MoodleAdapter
 from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
@@ -47,15 +48,15 @@ class IDATSync:
         self.task_orchestrator = TaskOrchestrator(self.download_tasks_group)
         self.download_manager = DownloadManager(self.downloaders)
 
-    def sync_course(self, course_content: CourseContent, course_dir: str):
+    def sync_course(self, course: Course, course_dir: str):
         recordings_folder = os.path.join(course_dir, "Grabaciones")
         os.makedirs(course_dir, exist_ok=True)
         os.makedirs(recordings_folder, exist_ok=True)
         remote_tree = self.course_repository.get_course_content(
-            course_content, course_dir
+            course, course_dir
         )
         recordings_content = self.course_repository.get_recordings(
-            course_content.course_name, recordings_folder
+            course.name, recordings_folder
         )
         remote_tree.extend(recordings_content)
         tasks = list[DownloadTask]()

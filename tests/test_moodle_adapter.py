@@ -13,11 +13,6 @@ class TestMoodleAdapter(unittest.TestCase):
         self.mock_client.token = "test_token_123"
         self.adapter = MoodleAdapter(client=self.mock_client)
 
-    def test_init_with_token_str(self):
-        adapter = MoodleAdapter("token_string_abc")
-        self.assertIsInstance(adapter.client, MoodleClient)
-        self.assertEqual(adapter.token, "token_string_abc")
-
     def test_can_handle(self):
         self.assertTrue(self.adapter.can_handle("https://aulavirtual.idat.edu.pe/mod/resource/view.php?id=123"))
         self.assertFalse(self.adapter.can_handle("https://idat628.sharepoint.com/sites/my_site"))

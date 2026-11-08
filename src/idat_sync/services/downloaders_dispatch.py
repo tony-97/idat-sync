@@ -16,7 +16,7 @@ from office365.sharepoint.folders.folder import Folder
 from playwright._impl._api_structures import StorageStateCookie
 
 if TYPE_CHECKING:
-    from idat_sync.services.moodle_adapter import MoodleApiAdapter
+    from idat_sync.services.moodle_adapter import MoodleAdapter
     from idat_sync.services.sharepoint_adapter import SharepointApiAdapter
 
 from idat_sync.utils import REQUEST_DELAY, RQ_HEADER, safe_filename
@@ -72,7 +72,7 @@ class SharepointFileInfo(FileDownloadInfoBase["SharepointDownloader"]):
 
 
 class MoodleDownloader(Downloader):
-    def __init__(self, client: MoodleApiAdapter) -> None:
+    def __init__(self, client: MoodleAdapter) -> None:
         super().__init__()
         self.moodle_client = client
 

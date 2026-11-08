@@ -6,7 +6,6 @@ from typing import Any, Sequence
 from idat_sync.models import (
     Assignment,
     Course,
-    CourseContent,
     CourseModule,
     CourseSection,
     ModuleContent,
@@ -38,25 +37,14 @@ class CourseRepository:
         return None
 
     def list_url_content(
-        self, contents: Sequence[ModuleContent | Any], parents: list[str]
+        self, contents: Sequence[ModuleContent], parents: list[str]
     ) -> Sequence[Content]:
         for content in contents:
-            # Access domain model attributes safely, supporting legacy dicts if encountered
-            file_url = getattr(content, "fileurl", None) or (
-                content.get("fileurl") if isinstance(content, dict) else None
-            )
-            file_name = getattr(content, "filename", None) or (
-                content.get("filename") if isinstance(content, dict) else None
-            )
-            last_modified = getattr(content, "timemodified", 0) or (
-                content.get("timemodified", 0) if isinstance(content, dict) else 0
-            )
-
-            if file_url and file_name:
-                if strategy := self.__get_strategy(file_url):
+            if content.fileurl and content.filename:
+                if strategy := self.__get_strategy(content.fileurl):
                     return (
                         strategy.list_url_content(
-                            file_url, parents, file_name, int(last_modified)
+                            content.fileurl, parents, content.filename, content.timemodified
                         )
                         or []
                     )
@@ -96,96 +84,50 @@ class CourseRepository:
         """Retrieve all enrolled courses with full domain structure."""
         return self.moodle_adapter.get_courses()
 
-    def get_courses_raw_contents(self) -> list[Course]:
-        """Backward-compatible alias for get_courses.
-
-        Previously returned raw vendor dicts; now returns clean domain Course models.
-        """
-        return self.get_courses()
-
     def get_course_content(
-        self, course_content: Course, course_dir: str = ""
+        self, course: Course, course_dir: str = ""
     ) -> list[Content]:
         """Generate download tasks / Content objects for a course using domain models."""
         course_modules_contents = list[Content]()
 
-        # Support both domain Course (with sections) and legacy CourseContent
-        sections: list[CourseSection] = []
-        if hasattr(course_content, "sections") and isinstance(course_content.sections, list):
-            sections = course_content.sections
-        elif hasattr(course_content, "contents"):
-            raw_contents = course_content.contents
-            if isinstance(raw_contents, list):
-                sections = raw_contents
-            elif isinstance(raw_contents, CourseSection):
-                sections = [raw_contents]
-
-        # Assignments map: cmid -> Assignment
-        assignments: dict[int, Assignment] = (
-            course_content.assignments
-            if isinstance(course_content.assignments, dict)
-            else {}
-        )
-
-        for section in sections:
-            section_name = section.name if hasattr(section, "name") else ""
-            if not section_name:
+        for section in course.sections:
+            if not section.name:
                 continue
 
-            content_path = [section_name, course_dir]
-            section_id = section.id if hasattr(section, "id") else ""
-            summary_name = f"{section_name}-[{section_id}]-resumen.html"
-            section_summary = section.summary if hasattr(section, "summary") else ""
+            content_path = [section.name, course_dir]
+            summary_name = f"{section.name}-[{section.id}]-resumen.html"
 
             course_modules_contents.append(
                 StringContent(
                     content_path,
                     summary_name,
                     0,
-                    [section_summary],
+                    [section.summary],
                 )
             )
 
-            modules: list[CourseModule] = getattr(section, "modules", [])
-            for module in modules:
-                module_name = getattr(module, "name", "")
-                if not module_name:
+            for module in section.modules:
+                if not module.name:
                     continue
 
-                module_path = [*content_path, module_name]
-                modname = getattr(module, "modname", "")
-                module_contents = getattr(module, "contents", [])
+                module_path = [*content_path, module.name]
 
-                if modname == "label":
-                    description = getattr(module, "description", "")
-                    if description:
+                if module.modname == "label":
+                    if module.description:
                         course_modules_contents.append(
                             StringContent(
-                                module_path, f"{module_name}.html", 0, [description]
+                                module_path, f"{module.name}.html", 0, [module.description]
                             )
                         )
-                elif modname == "url" and len(module_contents) == 1:
+                elif module.modname == "url" and len(module.contents) == 1:
                     course_modules_contents.extend(
-                        self.list_url_content(module_contents, content_path)
+                        self.list_url_content(module.contents, content_path)
                     )
-                elif modname == "assign":
-                    cmid = getattr(module, "id", None)
-                    # Lookup assignment by cmid
-                    assignment = assignments.get(cmid)
-                    if not assignment and isinstance(assignments, (list, tuple)):
-                        assignment = next(
-                            (a for a in assignments if getattr(a, "cmid", None) == cmid),
-                            None,
-                        )
-
+                elif module.modname == "assign":
+                    assignment = course.assignments.get(module.id)
                     if assignment:
-                        assignment_id = getattr(assignment, "id", "")
-                        assignment_name = getattr(assignment, "name", "")
-                        assignment_intro = getattr(assignment, "intro", "")
-                        assignment_attachments = getattr(assignment, "introattachments", [])
-
                         assignment_intro_name = (
-                            f"{assignment_name}-[{assignment_id}]-intro.html"
+                            f"{assignment.name}-[{assignment.id}]-intro.html"
                         )
                         assignment_intro_path = [
                             *module_path,
@@ -196,18 +138,18 @@ class CourseRepository:
                                 assignment_intro_path,
                                 assignment_intro_name,
                                 0,
-                                [assignment_intro],
+                                [assignment.intro],
                             )
                         )
                         course_modules_contents.extend(
                             self.list_url_content(
-                                assignment_attachments,
+                                assignment.introattachments,
                                 module_path,
                             )
                         )
                 else:
                     course_modules_contents.extend(
-                        self.list_url_content(module_contents, module_path)
+                        self.list_url_content(module.contents, module_path)
                     )
 
         return course_modules_contents
@@ -218,6 +160,3 @@ class CourseRepository:
         for course in courses:
             to_download += self.get_course_content(course)
         return to_download
-
-    # Backward-compatible typo alias
-    get_all_coruses_contents = get_all_courses_contents

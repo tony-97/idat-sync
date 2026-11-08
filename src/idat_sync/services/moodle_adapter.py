@@ -12,11 +12,8 @@ class MoodleAdapter:
     MoodleClient into strongly-typed domain models.
     """
 
-    def __init__(self, client: MoodleClient | str) -> None:
-        if isinstance(client, str):
-            self.client = MoodleClient(token=client)
-        else:
-            self.client = client
+    def __init__(self, client: MoodleClient) -> None:
+        self.client = client
 
     @property
     def token(self) -> str:
@@ -119,9 +116,6 @@ class MoodleAdapter:
             courses_assignments[int(cid)] = module_assignments
         return courses_assignments
 
-    # Backward-compatible typo alias
-    fetch_assignements_from_courses = fetch_assignments_from_courses
-
     def fetch_course_contents(self, course_id: int) -> list[CourseSection]:
         """Fetch sections and modules for a course as domain models."""
         raw_sections = self.client.fetch_course_contents(course_id)
@@ -146,6 +140,3 @@ class MoodleAdapter:
 
         return courses
 
-
-# Backward-compatible alias
-MoodleApiAdapter = MoodleAdapter

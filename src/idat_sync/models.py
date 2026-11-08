@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Sequence
 
 
 @dataclass
@@ -52,29 +51,3 @@ class Course:
     name: str
     sections: list[CourseSection] = field(default_factory=list)
     assignments: dict[int, Assignment] = field(default_factory=dict)
-
-    def __init__(
-        self,
-        id: int,
-        name: str = "",
-        sections: list[CourseSection] | None = None,
-        assignments: dict[int, Assignment] | None = None,
-        course_name: str = "",
-        contents: list[CourseSection] | None = None,
-    ) -> None:
-        self.id = id
-        self.name = name or course_name
-        self.sections = sections if sections is not None else (contents or [])
-        self.assignments = assignments or {}
-
-    @property
-    def course_name(self) -> str:
-        return self.name
-
-    @property
-    def contents(self) -> list[CourseSection]:
-        return self.sections
-
-
-# Backward-compatible alias
-CourseContent = Course
