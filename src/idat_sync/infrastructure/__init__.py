@@ -2,13 +2,9 @@ from idat_sync.infrastructure.auth import AuthProvider, Credentials
 from idat_sync.infrastructure.downloaders import (
     DownloadTask,
     Downloader,
-    MoodleDownloadTask,
     MoodleDownloader,
-    RecordingDownloadTask,
     RecordingDownloader,
-    SharepointDownloadTask,
     SharepointDownloader,
-    StringDownloadTask,
     StringDownloader,
 )
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
@@ -23,14 +19,10 @@ __all__ = [
     "Downloader",
     "MoodleAdapter",
     "MoodleClient",
-    "MoodleDownloadTask",
     "MoodleDownloader",
-    "RecordingDownloadTask",
     "RecordingDownloader",
     "SharepointApiAdapter",
     "SharepointClient",
-    "SharepointDownloadTask",
     "SharepointDownloader",
-    "StringDownloadTask",
     "StringDownloader",
 ]

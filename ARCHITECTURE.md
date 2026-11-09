@@ -110,8 +110,9 @@ flowchart TD
    - [`MoodleAdapter`](src/idat_sync/infrastructure/moodle_adapter.py) and [`SharepointApiAdapter`](src/idat_sync/infrastructure/sharepoint_adapter.py) translate vendor responses into domain models.
 2. **Repository Pattern**:
    - [`CourseRepository`](src/idat_sync/application/course_repository.py) provides a read-only domain query interface that combines Moodle courses/sections/modules and SharePoint links/recordings into a unified remote tree (`list[Content]`).
-3. **Command + Strategy Pattern (Double Dispatch)**:
-   - Each [`Content`](src/idat_sync/domain/content.py) dispatches to the matching [`Downloader`](src/idat_sync/infrastructure/downloaders.py) strategy to create a self-contained [`DownloadTask`](src/idat_sync/infrastructure/downloaders.py) command (`task.download()`).
+3. **Command + Strategy Pattern (`Downloader[C]` & `DownloadTask[C]`)**:
+   - [`Content`](src/idat_sync/domain/content.py) subclasses are pure domain value objects with zero infrastructure dependencies.
+   - Each [`Downloader[C]`](src/idat_sync/infrastructure/downloaders.py) strategy declares its `content_type` and optional `can_handle(content)` predicate, producing a generic [`DownloadTask[C]`](src/idat_sync/infrastructure/downloaders.py) command (`task.download()`) without requiring per-downloader task subclasses or modifying base classes when new downloaders are added.
 4. **Parallel Pipeline Orchestration**:
    - [`TaskOrchestrator`](src/idat_sync/application/task_orchestrator.py) executes independent downloader groups (`[MoodleDownloader]`, `[StringDownloader]`, `[SharepointDownloader, RecordingDownloader]`) concurrently while keeping tasks within the same rate-limited backend sequential.
 

@@ -12,7 +12,7 @@ class DownloadManager:
 
     def create_download_task(self, content: Content) -> DownloadTask | None:
         for downloader in self.strategies:
-            if task := content.generate_task(downloader):
+            if task := downloader.create_task(content):
                 return task
         return None
 

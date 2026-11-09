@@ -14,6 +14,7 @@ from idat_sync.domain.content import (
 )
 from idat_sync.domain.sync import SyncStatus
 from idat_sync.infrastructure.downloaders import (
+    Downloader,
     MoodleDownloader,
     RecordingDownloader,
     SharepointDownloader,
@@ -91,6 +92,35 @@ class TestSyncPipeline(unittest.TestCase):
         tasks = self.manager.prepare_download_tasks([rec])
         self.assertEqual(len(tasks), 1)
         self.assertIs(tasks[0].downloader, self.recording_downloader)
+        self.assertIs(tasks[0].content, rec)
+
+    def test_custom_downloader_extends_without_modifying_base_classes(self):
+        downloaded: list[RecordingContent] = []
+
+        class YoutubeRecordingDownloader(Downloader[RecordingContent]):
+            content_type = RecordingContent
+
+            def can_handle(self, content: RecordingContent) -> bool:
+                return "youtube.com" in content.url
+
+            def download(self, content: RecordingContent) -> None:
+                downloaded.append(content)
+
+        yt_downloader = YoutubeRecordingDownloader()
+        manager = DownloadManager([self.recording_downloader, yt_downloader])
+        orchestrator = TaskOrchestrator([[self.recording_downloader, yt_downloader]])
+
+        yt_rec = RecordingContent(
+            Path("Grabaciones/Semana 1/yt_video.mp4"),
+            1700000000,
+            "https://youtube.com/watch?v=123",
+        )
+        tasks = manager.prepare_download_tasks([yt_rec])
+        self.assertEqual(len(tasks), 1)
+        self.assertIs(tasks[0].downloader, yt_downloader)
+
+        orchestrator.run(tasks)
+        self.assertEqual(downloaded, [yt_rec])
 
     def test_diff_trees_uses_python_sets_for_sync_status(self):
         with tempfile.TemporaryDirectory() as tmpdir:
