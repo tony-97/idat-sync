@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import io
 import os
 from pathlib import Path
+import platform
+import sys
 import time
 from typing import TYPE_CHECKING
 
@@ -98,7 +100,7 @@ class SharepointDownloader(Downloader[SharepointContent]):
     def download(self, content: SharepointContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
         with open(content.path, "wb") as local_file:
-            content.file.download(
+            content.file.download_session(
                 local_file
             ).execute_query_with_incremental_retry()
             time.sleep(REQUEST_DELAY)
@@ -165,14 +167,15 @@ class RecordingDownloader(Downloader[RecordingContent]):
         print(
             f"downloading share url: {content.url}",
         )
+        prefix = "\\\\?\\" if platform.system() == "Windows" else ""
         target_path = Path(content.path)
         if target_path.suffix:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path_template = f"\\\\?\\{os.path.abspath(target_path)}"
+            output_path_template = f"{prefix}{os.path.abspath(target_path)}"
         else:
             target_path.mkdir(parents=True, exist_ok=True)
             output_path_template = os.path.join(
-                f"\\\\?\\{os.path.abspath(target_path)}",
+                f"{prefix}{os.path.abspath(target_path)}",
                 "%(title)s %(id)s.%(ext)s",
             )
         ydl_opts = {
@@ -182,6 +185,8 @@ class RecordingDownloader(Downloader[RecordingContent]):
             "format": "bestvideo+bestaudio/bestvideo",
             "outtmpl": output_path_template,
         }
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            ydl_opts["ffmpeg_location"] = sys._MEIPASS  # type: ignore
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
             ydl.download([content.url])
 

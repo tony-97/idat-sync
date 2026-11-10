@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import requests
-from typing import TypedDict
+from typing import Awaitable, Callable, TypedDict
 
 from playwright._impl._api_structures import StorageState
 
@@ -20,15 +20,21 @@ class AuthProvider:
 
     # TODO: Handle exceptions from sharepoint and moodle
     async def login(
-        self, username: str, password: str, login_flow_ended: asyncio.Event
+        self,
+        username: str,
+        password: str,
+        login_flow_ended: asyncio.Event,
+        get_mfa_code: Callable[[], Awaitable[str]],
     ):
         username = username.split("@", 1)[0]
         token, sharepoint_storage_state = await asyncio.gather(
             asyncio.to_thread(self.__get_moodle_token, username, password),
-            get_sharepoint_cookies(username, password, login_flow_ended),
+            get_sharepoint_cookies(
+                username, password, login_flow_ended, get_mfa_code
+            ),
         )
 
-        if sharepoint_storage_state is None:
+        if sharepoint_storage_state is None or not token:
             return False
         # --- Success ---
         # Create the session file to mark the user as authenticated
@@ -50,14 +56,15 @@ class AuthProvider:
 
     # TODO: raise exceptions
     def __get_moodle_token(self, user: str, password: str) -> str:
-        response = requests.get(
+        payload = {
+            "username": user,
+            "password": password,
+            "service": "moodle_mobile_app",
+        }
+        response = requests.post(
             f"{MOODLE_IDAT}/login/token.php",
-            params={
-                "username": user,
-                "password": password,
-                "service": "moodle_mobile_app",
-            },
-            timeout=60,
+            data=payload,
+            timeout=120,
             headers=RQ_HEADER,
         )
         response.raise_for_status()

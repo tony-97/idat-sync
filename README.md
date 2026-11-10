@@ -1,5 +1,15 @@
 # idat-sync
 
+[![Build Windows](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=Windows&logo=windows&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
+[![Build Linux](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=Linux&logo=linux&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
+[![Build macOS](https://img.shields.io/github/actions/workflow/status/tony-97/idat-sync/build_and_deploy.yml?label=macOS&logo=apple&logoColor=white)](https://github.com/tony-97/idat-sync/actions/workflows/build_and_deploy.yml)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/tony-97/idat-sync/blob/main/colab.ipynb)
+
+[![Latest Release](https://img.shields.io/github/v/release/tony-97/idat-sync?label=Release&logo=github)](https://github.com/tony-97/idat-sync/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/tony-97/idat-sync/total?label=Downloads&logo=github)](https://github.com/tony-97/idat-sync/releases)
+[![License: MIT](https://img.shields.io/github/license/tony-97/idat-sync?label=License)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+
 idat-sync automatiza la descarga y organización del material de tus cursos (Moodle, SharePoint/OneDrive) y las grabaciones de clase. Está pensado para evitar la tarea tediosa de abrir muchos enlaces, crear carpetas manualmente y perder tiempo buscando archivos dispersos.
 
 ## ¿Qué hace?
@@ -8,20 +18,50 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
 - Descarga grabaciones de video (cuando aun están accesibles) y las guarda en la estructura del curso.
 - Interfaz gráfica simple para seleccionar carpeta de sincronización y ver el progreso.
 
-## Requisitos
+## Descargar
 
-- Python 3.10+
+Descarga la última versión desde [GitHub Releases](https://github.com/tony-97/idat-sync/releases/latest):
 
-## Instalación
+| Sistema Operativo | Archivo                                                                                                        | Notas                                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **Windows**       | [`idat_sync-Windows.exe`](https://github.com/tony-97/idat-sync/releases/latest/download/idat_sync-Windows.exe) | Ejecutable portable, no requiere instalación   |
+| **Linux**         | [`idat_sync-Linux`](https://github.com/tony-97/idat-sync/releases/latest/download/idat_sync-Linux)             | Dar permisos de ejecución antes de usar        |
+| **macOS**         | [`idat_sync-macOS.dmg`](https://github.com/tony-97/idat-sync/releases/latest/download/idat_sync-macOS.dmg)     | Aplicación sin firmar, ver instrucciones abajo |
 
-1.  **Instalar el paquete:**
-    ```shell
-    pip install git+https://github.com/tony-97/idat-sync
-    ```
-2.  **Instalar el navegador para Playwright (solo en Linux / macOS):**
-    ```shell
-    playwright install chromium
-    ```
+### macOS (aplicación sin firmar)
+
+Al ser una aplicación sin firmar, macOS bloqueará su ejecución por defecto. Sigue estos pasos:
+
+1. **Monta el DMG** haciendo doble clic en `idat_sync-macOS.dmg` y arrastra la app a la carpeta **Aplicaciones**.
+
+2. **Elimina el atributo de cuarentena** abriendo la Terminal y ejecutando:
+
+   ```shell
+   xattr -cr /Applications/idat_sync.app
+   ```
+
+3. **Abre la aplicación** normalmente desde Aplicaciones.
+
+## Instalación (desde código fuente)
+
+1. **Requisitos**
+
+   > - Python 3.10+
+   > - [ffmpeg](https://www.ffmpeg.org/)
+
+2. **Instalar el paquete:**
+   ```shell
+   pip install git+https://github.com/tony-97/idat-sync
+   ```
+3. **Instalar el navegador para Playwright (solo en Linux / macOS):**
+   - Para Linux:
+     ```shell
+     playwright install chromium
+     ```
+   - Para macOS:
+     ```shell
+     playwright install webkit
+     ```
 
 ## Cómo usar
 
@@ -35,11 +75,40 @@ idat-sync automatiza la descarga y organización del material de tus cursos (Moo
      ![Login](screenshots/login.png)
 
    - Completa la autenticación de dos factores (2FA) con el código recibido en tu dispositivo móvil.
+
+     ![2FA](screenshots/mfa.png)
+
    - Una vez que cargue la ventana principal, selecciona la carpeta de destino para tus archivos.
    - Haz clic en el botón **"Sync"** para iniciar el proceso. Podrás ver el progreso en la misma ventana.
      ![Progress](screenshots/sync_progress.png)
 
 3. Los archivos se descargarán y organizarán en la carpeta que seleccionaste.
+
+## Google Colab + Google Drive + NotebookLM
+
+Si no quieres instalar nada localmente, puedes ejecutar **idat-sync** directamente desde Google Colab. El notebook [`colab.ipynb`](colab.ipynb) sincroniza el material de tus cursos a tu Google Drive y genera enlaces listos para importar en [NotebookLM](https://notebooklm.google.com/).
+
+### ¿Qué incluye?
+
+| Funcionalidad              | Descripción                                                              |
+| -------------------------- | ------------------------------------------------------------------------ |
+| 📥 Sincronización a Drive  | Descarga todo el material del curso seleccionado a `drive/MyDrive/sync/` |
+| 🎥 Extracción de audio     | Convierte las grabaciones de video a MP3 automáticamente                 |
+| 📄 Conversión HTML → PDF   | Transforma los contenidos HTML del curso a PDF para mejor lectura        |
+| 🔗 Enlaces de Google Drive | Genera enlaces compartibles de cada archivo para importar a NotebookLM   |
+
+### Pasos
+
+1. **Abre el notebook** haciendo clic en el badge _Open In Colab_ de arriba.
+2. **Ejecuta la primera celda** para instalar las dependencias (`idat-sync`, `moviepy`, `playwright`, `weasyprint`).
+3. **Autoriza el acceso a Google Drive** cuando se te solicite.
+4. **Ingresa tu código MFA** en la consola de Colab cuando el script lo pida.
+5. **Selecciona el curso** de la lista que aparecerá en la salida.
+6. **Espera a que finalice** la sincronización. Al terminar, el script mostrará dos bloques de enlaces:
+   - **🎧 Recordings** — enlaces a los archivos de audio (MP3) para descargar e importar manualmente a NotebookLM.
+   - **📎 Links** — enlaces a documentos (PDF, archivos del curso) que se pueden importar directamente a NotebookLM desde Google Drive.
+
+> Puedes usar los enlaces generados para crear un notebook en [NotebookLM](https://notebooklm.google.com/) con todo el material de un curso y hacer consultas con IA sobre el contenido.
 
 ## Capturas de pantalla
 

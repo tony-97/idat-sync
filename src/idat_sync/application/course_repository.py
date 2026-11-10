@@ -1,8 +1,8 @@
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
-from shlex import quote
 from typing import Any, Sequence
+from urllib.parse import quote
 
 from idat_sync.domain.content import Content, RecordingContent, StringContent
 from idat_sync.domain.course import (

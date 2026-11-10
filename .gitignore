@@ -1,6 +1,9 @@
+# development testing files
 storage_state*.json
 session*.json
 experimenting/
+*.err
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

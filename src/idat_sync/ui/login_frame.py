@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import tkinter as tk
 from typing import cast
 
@@ -6,7 +7,6 @@ from async_tkinter_loop import async_handler
 
 from idat_sync.infrastructure.auth import AuthProvider
 from idat_sync.ui.app import AppFrame, MainApp
-from idat_sync.ui.dialogs import LoadingDialog
 
 
 class LoginFrame(AppFrame):
@@ -41,6 +41,36 @@ class LoginFrame(AppFrame):
         )
         login_button.pack(pady=10)
 
+    async def get_mfa_code_ui(self):
+        """Creates a Tkinter popup that pauses the async function until submitted."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[str] = loop.create_future()
+
+        # Create the popup window
+        popup = tk.Toplevel(self.master)
+        popup.title("MFA Required")
+        popup.geometry("250x150")
+
+        tk.Label(popup, text="Enter your 6-digit MFA code:").pack(pady=10)
+
+        entry = tk.Entry(popup)
+        entry.pack(pady=5)
+
+        # The button callback simply fulfills the Future
+        def on_submit():
+            code = entry.get()
+            future.set_result(code)  # This resumes the async function!
+            popup.destroy()  # Close the popup
+
+        tk.Button(popup, text="Submit", command=on_submit).pack(pady=10)
+
+        # Pause the async execution here until the user clicks Submit
+        return await future
+
+    async def get_mfa_code(self):
+        code = await self.get_mfa_code_ui()
+        return code
+
     # TODO add loading dialog until MFA auth
     async def do_login(self, event=None):
         self.is_login.set(True)
@@ -50,15 +80,17 @@ class LoginFrame(AppFrame):
             try:
                 login_flow_ended = asyncio.Event()
                 login_task = asyncio.create_task(
-                    self.auth.login(user, password, login_flow_ended)
+                    self.auth.login(
+                        user, password, login_flow_ended, self.get_mfa_code
+                    )
                 )
-                await login_flow_ended.wait()
-                loading_dialog = LoadingDialog(self.master)
+                # loading_dialog = LoadingDialog(self.master)
+                # await login_flow_ended.wait()
                 if await login_task:
                     cast(MainApp, self.master).switch_to_sync()
-                loading_dialog.remove()
+                # loading_dialog.remove()
                 self.is_login.set(False)
-            except Exception:
-                ...
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
         else:
             ...

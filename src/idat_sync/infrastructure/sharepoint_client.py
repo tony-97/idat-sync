@@ -29,9 +29,17 @@ class SharepointClient:
             cookies, "idat628-my.sharepoint.com", ".sharepoint.com"
         )
         site_url = "https://idat628.sharepoint.com/sites/MATERIALESTED-ACADEMICOIDAT"
-        search_site_url = "https://idat628.sharepoint.com"
         self.client = self.get_client(site_url)
-        self.search_client = self.get_client(search_site_url)
+        personal_sharepoint_url = "https://idat628-my.sharepoint.com"
+        self.personal_client = self.get_client(personal_sharepoint_url)
+        personal_site = (
+            self.personal_client.web.current_user.get_personal_site().execute_query_with_incremental_retry()
+        )
+        if personal_site.url:
+            self.search_client = self.get_client(personal_site.url)
+            time.sleep(REQUEST_DELAY)
+        else:
+            raise Exception("login expired")
 
     def get_client(self, site_url: str) -> ClientContext:
         return ClientContext(site_url).with_cookies(
@@ -82,7 +90,6 @@ class SharepointClient:
         result = self.search_client.search.query(
             course_name,
             row_limit=15,
-            source_id="8413cd39-2156-4e00-b54d-11efd9abdb89",
         ).execute_query_retry()
         time.sleep(REQUEST_DELAY)
         return result
