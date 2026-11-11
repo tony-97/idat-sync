@@ -10,7 +10,7 @@ class DownloadManager:
     def __init__(
         self,
         strategies: Sequence[Downloader],
-        file_system: FileSystemPort | None = None,
+        file_system: FileSystemPort,
     ) -> None:
         self.strategies = list(strategies)
         self.file_system = file_system
@@ -24,33 +24,17 @@ class DownloadManager:
     def diff_trees(
         self, root_dir: str | Path, remote_contents: Sequence[Content]
     ) -> SyncDiff:
-        if self.file_system is not None:
-            local_map = dict(self.file_system.scan_mtimes(Path(root_dir)))
-        else:
-            root_path = Path(root_dir)
-            local_map = {}
-            if root_path.exists():
-                for p in root_path.rglob("*"):
-                    if p.is_file():
-                        local_map[p] = int(p.stat().st_mtime)
-
+        local_map = dict(self.file_system.scan_mtimes(Path(root_dir)))
         return SyncDiff.from_trees(remote_contents, local_map)
 
     def should_download(self, task: DownloadTask) -> bool:
         local_path = Path(task.path)
-        if self.file_system is not None:
-            if not self.file_system.exists(local_path):
-                return True
-            if task.last_modified > 0:
-                return self.file_system.get_mtime(local_path) < int(
-                    task.last_modified
-                )
-            return False
-
-        if not local_path.exists():
+        if not self.file_system.exists(local_path):
             return True
         if task.last_modified > 0:
-            return int(local_path.stat().st_mtime) < int(task.last_modified)
+            return self.file_system.get_mtime(local_path) < int(
+                task.last_modified
+            )
         return False
 
     def prepare_download_tasks(

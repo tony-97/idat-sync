@@ -28,6 +28,14 @@ _Avoid_: Attachment, raw link
 A resolved, downloadable item with a relative or target local path and modification timestamp, ready to be compared against local files or written to disk.
 _Avoid_: Downloadable, file item, asset
 
+**StringContent**:
+An in-memory text artifact (such as a section summary, label notice, or assignment introduction) represented as a sequence of strings ready to be rendered to an HTML file on disk. Subtype of `Content`.
+_Avoid_: Text content, inline HTML, note item
+
+**RecordingContent**:
+A remote class video recording hosted on SharePoint or Microsoft Teams with a target path and last modified timestamp, ready to be downloaded by a specialized video downloader. Subtype of `Content`.
+_Avoid_: Video, class recording, meeting recording
+
 **SyncStatus**:
 The synchronization state of a single path between the remote course tree and the local directory (`SYNCED`, `MISSING`, `OUTDATED`, or `LOCAL_ONLY`).
 _Avoid_: File state, diff state

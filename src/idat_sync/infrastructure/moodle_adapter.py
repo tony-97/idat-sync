@@ -142,7 +142,7 @@ class MoodleAdapter:
                 courses.append(Course(id=int(course_id), name=str(course_name)))
         return courses
 
-    def get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
+    def _get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
         """Fetch assignments across all enrolled courses organized by course_id -> {cmid: raw_assignment}."""
         raw_courses = self.client.fetch_assignments()
         courses_assignments: dict[int, dict[int, dict]] = {}
@@ -174,7 +174,7 @@ class MoodleAdapter:
     def get_courses_with_contents(self) -> list[Course]:
         """Retrieve all enrolled courses fully populated with sections and modules."""
         courses = self.list_courses()
-        assignments_by_course = self.get_assignments_by_course()
+        assignments_by_course = self._get_assignments_by_course()
 
         for course in courses:
             print(f"\nFetching contents for: {course.name} (id={course.id}) ...")

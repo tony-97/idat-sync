@@ -212,6 +212,10 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(len(module.contents), 1)
         self.assertEqual(module.contents[0].filename, "instructions.pdf")
 
+    def test_moodle_adapter_public_seam_does_not_expose_raw_vendor_assignments(self):
+        self.assertFalse(hasattr(self.adapter, "get_assignments_by_course"))
+        self.assertTrue(hasattr(self.adapter, "_get_assignments_by_course"))
+
 
 if __name__ == "__main__":
     unittest.main()

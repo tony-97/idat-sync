@@ -13,6 +13,7 @@ from idat_sync.domain.content import (
     StringContent,
 )
 from idat_sync.domain.sync import SyncDiff, SyncStatus
+from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
 from idat_sync.infrastructure.downloaders import (
     Downloader,
     MoodleDownloader,
@@ -35,7 +36,8 @@ class TestSyncPipeline(unittest.TestCase):
             [self.sharepoint_downloader, self.recording_downloader],
         ]
         self.downloaders = [d for g in self.groups for d in g]
-        self.manager = DownloadManager(self.downloaders)
+        self.fs = LocalFileSystemAdapter()
+        self.manager = DownloadManager(self.downloaders, file_system=self.fs)
         self.orchestrator = TaskOrchestrator(self.groups)
 
     def test_prepare_download_tasks_creates_and_filters_existing_files(self):
@@ -107,7 +109,9 @@ class TestSyncPipeline(unittest.TestCase):
                 downloaded.append(content)
 
         yt_downloader = YoutubeRecordingDownloader()
-        manager = DownloadManager([self.recording_downloader, yt_downloader])
+        manager = DownloadManager(
+            [self.recording_downloader, yt_downloader], file_system=self.fs
+        )
         orchestrator = TaskOrchestrator([[self.recording_downloader, yt_downloader]])
 
         yt_rec = RecordingContent(
@@ -312,6 +316,10 @@ class TestSyncPipeline(unittest.TestCase):
             [],
             f"Found architectural layer violations in domain/application: {violations}",
         )
+
+    def test_download_manager_requires_filesystem_port(self):
+        with self.assertRaises(TypeError):
+            DownloadManager(self.downloaders)  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":
