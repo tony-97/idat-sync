@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  Vocabulary: GLOSSARY.md at the repo root. Long-lived decisions: docs/adr/.
+  Conventions: agent-os/standards/index.yml. Load only the standards relevant to the files you touch.
+  Modules touched and public test seams were agreed in the grilling session. Record them in the spec and design.
+
+rules:
+  proposal:
+    - 'Keep it under 400 words and include Non-Goals.'
+    - 'List the agent-os standards, from index.yml, that apply to this change.'
+  specs:
+    - 'Requirements use an H3 heading (### Requirement: Title). Scenarios use an H4 heading (#### Scenario: Name) with WHEN and THEN steps. Never use another heading depth.'
+    - 'If openspec/specs/ has no spec for a capability, write its requirements under ADDED only and open with a Purpose of at least 50 characters. Use MODIFIED only for requirements that already exist, with their full updated text.'
+    - 'Name the public seam where each requirement is verified.'
+    - 'Copy exact numbers, ordering guarantees and must-not requirements from the grilling session verbatim.'
+  design:
+    - 'Link to ADRs for long-lived decisions instead of restating them. Write a new ADR only if the decision is hard to reverse, surprising without context, and a real trade-off.'
+  tasks:
+    - 'Each task is one vertical slice: one seam, one failing test, minimal code. No horizontal layers.'
+    - 'Final task: run the full test suite, typecheck and lint.'
+
+operations:
+  apply:
+    guidance:
+      - 'Before coding, read agent-os/standards/index.yml and load the standards relevant to the files you will touch.'
+      - 'Implement each task with the tdd skill at the seams named in the spec. Confirm the seams with the user once at the start.'
+      - 'Run typecheck and the touched tests after each task. Tick the checkbox only when they pass.'
+      - 'When every task is done, stop and remind the user to commit before running code-review.'
+  archive:
+    guidance:
+      - 'Confirm code-review ran on the committed diff and the full test suite passes before archiving.'

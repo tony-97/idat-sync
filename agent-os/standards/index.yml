@@ -1,0 +1,15 @@
+# Agent OS Standards Index
+
+backend:
+  client-adapter-acl:
+    description: Two-tier *Client transport and *Adapter anti-corruption layer mapping raw vendor payloads to domain models
+  content-strategy-dispatch:
+    description: URL strategy routing (can_handle), bottom-up Content.in_folder path composition, and generic Downloader[C] rate-limit groups
+
+global:
+  layer-boundaries:
+    description: Four-layer package boundaries (domain, application, infrastructure, ui), dependency direction, and filesystem I/O rules
+
+testing:
+  composition-and-seams:
+    description: IDATSync composition root, constructor injection rules, and confirmed I/O test seams
