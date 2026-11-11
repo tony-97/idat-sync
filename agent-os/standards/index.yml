@@ -8,8 +8,8 @@ backend:
 
 global:
   layer-boundaries:
-    description: Four-layer package boundaries (domain, application, infrastructure, ui), dependency direction, and filesystem I/O rules
+    description: Four-layer package boundaries (domain, application, infrastructure, ui), hexagonal dependency inversion, and FileSystemPort rules
 
 testing:
   composition-and-seams:
-    description: IDATSync composition root, constructor injection rules, and confirmed I/O test seams
+    description: bootstrap.py composition root, constructor injection rules, and confirmed I/O and architectural test seams

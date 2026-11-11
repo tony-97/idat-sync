@@ -1,14 +1,19 @@
 from pathlib import Path
 from typing import Sequence
 
+from idat_sync.application.ports import DownloadTask, Downloader, FileSystemPort
 from idat_sync.domain.content import Content
 from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
-from idat_sync.infrastructure.downloaders import DownloadTask, Downloader
 
 
 class DownloadManager:
-    def __init__(self, strategies: Sequence[Downloader]) -> None:
+    def __init__(
+        self,
+        strategies: Sequence[Downloader],
+        file_system: FileSystemPort | None = None,
+    ) -> None:
         self.strategies = list(strategies)
+        self.file_system = file_system
 
     def create_download_task(self, content: Content) -> DownloadTask | None:
         for downloader in self.strategies:
@@ -19,58 +24,29 @@ class DownloadManager:
     def diff_trees(
         self, root_dir: str | Path, remote_contents: Sequence[Content]
     ) -> SyncDiff:
-        root_path = Path(root_dir)
-        remote_map: dict[Path, Content] = {c.path: c for c in remote_contents}
+        if self.file_system is not None:
+            local_map = dict(self.file_system.scan_mtimes(Path(root_dir)))
+        else:
+            root_path = Path(root_dir)
+            local_map = {}
+            if root_path.exists():
+                for p in root_path.rglob("*"):
+                    if p.is_file():
+                        local_map[p] = int(p.stat().st_mtime)
 
-        local_map: dict[Path, int] = {}
-        if root_path.exists():
-            for p in root_path.rglob("*"):
-                if p.is_file():
-                    local_map[p] = int(p.stat().st_mtime)
-
-        remote_keys = remote_map.keys()
-        local_keys = local_map.keys()
-
-        missing_paths: set[Path] = remote_keys - local_keys
-        common_paths: set[Path] = remote_keys & local_keys
-        local_only_paths: set[Path] = local_keys - remote_keys
-
-        outdated_paths: set[Path] = {
-            path
-            for path in common_paths
-            if remote_map[path].last_modified > 0
-            and remote_map[path].last_modified > local_map[path]
-        }
-        synced_paths: set[Path] = common_paths - outdated_paths
-
-        entries: list[SyncEntry] = []
-        for path in missing_paths:
-            entries.append(
-                SyncEntry(path, SyncStatus.MISSING, remote_map[path])
-            )
-        for path in outdated_paths:
-            entries.append(
-                SyncEntry(path, SyncStatus.OUTDATED, remote_map[path])
-            )
-        for path in synced_paths:
-            entries.append(
-                SyncEntry(path, SyncStatus.SYNCED, remote_map[path])
-            )
-        for path in local_only_paths:
-            entries.append(SyncEntry(path, SyncStatus.LOCAL_ONLY, None))
-
-        entries.sort(key=lambda e: e.path)
-
-        return SyncDiff(
-            entries=entries,
-            missing_paths=missing_paths,
-            outdated_paths=outdated_paths,
-            synced_paths=synced_paths,
-            local_only_paths=local_only_paths,
-        )
+        return SyncDiff.from_trees(remote_contents, local_map)
 
     def should_download(self, task: DownloadTask) -> bool:
         local_path = Path(task.path)
+        if self.file_system is not None:
+            if not self.file_system.exists(local_path):
+                return True
+            if task.last_modified > 0:
+                return self.file_system.get_mtime(local_path) < int(
+                    task.last_modified
+                )
+            return False
+
         if not local_path.exists():
             return True
         if task.last_modified > 0:

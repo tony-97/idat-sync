@@ -14,6 +14,7 @@ from playwright._impl._api_structures import StorageStateCookie
 import requests
 import yt_dlp
 
+from idat_sync.application.ports import DownloadTask, Downloader
 from idat_sync.domain.content import (
     Content,
     MoodleContent,
@@ -26,38 +27,6 @@ from idat_sync.utils import REQUEST_DELAY, RQ_HEADER
 if TYPE_CHECKING:
     from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
     from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
-
-
-@dataclass
-class DownloadTask[C: Content]:
-    content: C
-    downloader: Downloader[C]
-
-    @property
-    def path(self) -> Path:
-        return self.content.path
-
-    @property
-    def last_modified(self) -> int:
-        return self.content.last_modified
-
-    def download(self) -> None:
-        self.downloader.download(self.content)
-
-
-class Downloader[C: Content](ABC):
-    content_type: type[C]
-
-    def can_handle(self, content: C) -> bool:
-        return True
-
-    def create_task(self, content: Content) -> DownloadTask[C] | None:
-        if isinstance(content, self.content_type) and self.can_handle(content):
-            return DownloadTask(content=content, downloader=self)
-        return None
-
-    @abstractmethod
-    def download(self, content: C) -> None: ...
 
 
 class MoodleDownloader(Downloader[MoodleContent]):

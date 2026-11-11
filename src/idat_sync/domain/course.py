@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+from idat_sync.domain.content import StringContent
+
 
 @dataclass
 class ModuleContent:
@@ -12,24 +14,12 @@ class ModuleContent:
 
 
 @dataclass
-class Assignment:
-    """Represents a Moodle assignment."""
-
-    id: int
-    cmid: int
-    name: str
-    intro: str = ""
-    introattachments: list[ModuleContent] = field(default_factory=list)
-
-
-@dataclass
 class CourseModule:
-    """Represents a module / activity within a course section (e.g. resource, assign, url, label)."""
+    """Represents a module / activity within a course section."""
 
     id: int
     name: str
-    modname: str
-    description: str = ""
+    inline_contents: list[StringContent] = field(default_factory=list)
     contents: list[ModuleContent] = field(default_factory=list)
 
 
@@ -39,15 +29,22 @@ class CourseSection:
 
     id: int
     name: str
-    summary: str = ""
+    inline_contents: list[StringContent] = field(default_factory=list)
     modules: list[CourseModule] = field(default_factory=list)
 
 
 @dataclass
 class Course:
-    """Domain model representing a course, including its sections and assignments."""
+    """Domain model representing a course, including its sections."""
 
     id: int
     name: str
     sections: list[CourseSection] = field(default_factory=list)
-    assignments: dict[int, Assignment] = field(default_factory=dict)
+
+
+__all__ = [
+    "Course",
+    "CourseModule",
+    "CourseSection",
+    "ModuleContent",
+]

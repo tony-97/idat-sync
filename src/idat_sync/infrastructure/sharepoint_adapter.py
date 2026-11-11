@@ -1,9 +1,10 @@
+from datetime import date
 import pathlib
 from pathlib import Path
 import re
 import time
 import urllib.parse
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from office365.runtime.client_result import ClientResult
 from office365.sharepoint.client_context import ClientContext
@@ -11,21 +12,20 @@ from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
-from playwright._impl._api_structures import StorageStateCookie
 
-from idat_sync.domain.content import SharepointContent
+from idat_sync.domain.content import RecordingContent, SharepointContent
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 from idat_sync.utils import REQUEST_DELAY
 
 
 class SharepointApiAdapter:
     def __init__(
-        self, client_or_cookies: SharepointClient | list[StorageStateCookie]
+        self,
+        client: SharepointClient,
+        semester_start: date = date(2025, 9, 22),
     ) -> None:
-        if isinstance(client_or_cookies, SharepointClient):
-            self.sp_client = client_or_cookies
-        else:
-            self.sp_client = SharepointClient(client_or_cookies)
+        self.sp_client = client
+        self.semester_start = semester_start
         self.properties_to_retrieve = self.sp_client.properties_to_retrieve
         self.client = self.sp_client.client
         self.search_client = self.sp_client.search_client
@@ -128,10 +128,10 @@ class SharepointApiAdapter:
         self.sp_client.load_entity(file, ctx)
         return file
 
-    def fetch_recordings(self, course_name: str) -> list[File]:
+    def fetch_recordings(self, course_name: str) -> list[RecordingContent]:
         search_result = self.sp_client.search_for_recordings(course_name)
         recording_site = self.__find_recordings_site(course_name, search_result)
-        onedrive_recordings = list[File]()
+        recordings = list[RecordingContent]()
         if recording_site:
             items = self.sp_client.fetch_document_library_items(recording_site)
 
@@ -143,7 +143,22 @@ class SharepointApiAdapter:
                     and course_name in relative_url
                 )
 
-            onedrive_recordings = [
-                item.file for item in filter(is_course_recording, items)
-            ]
-        return onedrive_recordings
+            for item in filter(is_course_recording, items):
+                file = item.file
+                if not file.time_created or not file.serverRelativeUrl:
+                    continue
+
+                week = (
+                    1
+                    + (file.time_created.date() - self.semester_start).days
+                    // 7
+                )
+                name = self.get_name(file)
+                last_mod = self.get_last_modified(file)
+                share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
+                rec_path = Path(f"Semana {week}") / name
+                recordings.append(
+                    RecordingContent(rec_path, last_mod, share_url)
+                )
+
+        return recordings

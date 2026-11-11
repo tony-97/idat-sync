@@ -8,6 +8,7 @@ from typing import cast
 from async_tkinter_loop import async_handler
 
 from idat_sync.application.sync_service import IDATSync
+from idat_sync.bootstrap import create_sync_service
 from idat_sync.infrastructure.auth import Credentials
 from idat_sync.ui.app import AppFrame, MainApp, ProgressInterceptor
 
@@ -98,7 +99,9 @@ class SyncFrame(AppFrame):
 
     async def load_idat_sync(self, credentials: Credentials):
         self.is_syncing.set(True)
-        self.idat_sync = await asyncio.to_thread(IDATSync, credentials)
+        self.idat_sync = await asyncio.to_thread(
+            create_sync_service, credentials
+        )
         self.is_syncing.set(False)
 
     async def update_progress(self):

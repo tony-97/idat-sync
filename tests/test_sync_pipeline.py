@@ -12,7 +12,7 @@ from idat_sync.domain.content import (
     SharepointContent,
     StringContent,
 )
-from idat_sync.domain.sync import SyncStatus
+from idat_sync.domain.sync import SyncDiff, SyncStatus
 from idat_sync.infrastructure.downloaders import (
     Downloader,
     MoodleDownloader,
@@ -164,6 +164,154 @@ class TestSyncPipeline(unittest.TestCase):
             self.assertEqual(
                 status_by_path[local_only_file], SyncStatus.LOCAL_ONLY
             )
+
+    def test_safe_filename_at_domain_path_utils_seam(self):
+        from idat_sync.domain.path_utils import WINDOWS_RESERVED, safe_filename
+
+        self.assertIn("CON", WINDOWS_RESERVED)
+        self.assertIn("NUL", WINDOWS_RESERVED)
+
+        # Accents normalized and forbidden chars replaced
+        sanitized = safe_filename("Lección 1: Diseño & Programación?*")
+        self.assertEqual(sanitized, "Leccion 1 Diseno & Programacion")
+
+        # Windows reserved device names prefixed
+        self.assertEqual(safe_filename("con"), "_con")
+        self.assertEqual(safe_filename("NUL"), "_NUL")
+
+        # Default fallback for empty/whitespace
+        self.assertEqual(safe_filename("   "), "untitled")
+
+        # Max length enforcement
+        self.assertEqual(safe_filename("very_long_file_name", max_len=9), "very_long")
+
+    def test_sync_diff_from_trees_pure_in_memory(self):
+        p_missing = Path("semana1/missing.pdf")
+        p_outdated = Path("semana1/outdated.pdf")
+        p_synced = Path("semana1/synced.pdf")
+        p_local_only = Path("semana1/notes.txt")
+
+        c_missing = MoodleContent(p_missing, 1800000000, "http://a/missing")
+        c_outdated = MoodleContent(p_outdated, 1900000000, "http://a/outdated")
+        c_synced = MoodleContent(p_synced, 1700000000, "http://a/synced")
+
+        remote_contents = [c_synced, c_missing, c_outdated]
+        local_mtimes = {
+            p_outdated: 1850000000,
+            p_synced: 1750000000,
+            p_local_only: 1600000000,
+        }
+
+        diff = SyncDiff.from_trees(remote_contents, local_mtimes)
+
+        self.assertEqual(diff.missing_paths, {p_missing})
+        self.assertEqual(diff.outdated_paths, {p_outdated})
+        self.assertEqual(diff.synced_paths, {p_synced})
+        self.assertEqual(diff.local_only_paths, {p_local_only})
+        self.assertEqual(diff.to_download_paths, {p_missing, p_outdated})
+        self.assertEqual(diff.pending_contents, [c_missing, c_outdated])
+        self.assertEqual([e.path for e in diff.entries], sorted([p_missing, p_outdated, p_synced, p_local_only]))
+
+    def test_local_filesystem_adapter_and_download_manager_seam(self):
+        from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
+
+        fs = LocalFileSystemAdapter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            test_sub = tmp_path / "nested" / "dir"
+            fs.ensure_dir(test_sub)
+            self.assertTrue(fs.exists(test_sub))
+
+            test_file = test_sub / "test.txt"
+            test_file.write_text("content", encoding="utf-8")
+            os.utime(test_file, (1234567890, 1234567890))
+
+            self.assertTrue(fs.exists(test_file))
+            self.assertEqual(fs.get_mtime(test_file), 1234567890)
+
+            mtimes = fs.scan_mtimes(tmp_path)
+            self.assertEqual(mtimes.get(test_file), 1234567890)
+
+            mgr = DownloadManager(self.downloaders, file_system=fs)
+            content = MoodleContent(test_file, 1234567890, "http://a")
+            diff = mgr.diff_trees(tmp_path, [content])
+            self.assertEqual(diff.synced_paths, {test_file})
+
+    def test_idat_sync_orchestration_with_injected_collaborators(self):
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.ports import FileSystemPort
+        from idat_sync.domain.course import Course
+
+        mock_repo = MagicMock(spec=CourseRepository)
+        mock_mgr = MagicMock(spec=DownloadManager)
+        mock_orch = MagicMock(spec=TaskOrchestrator)
+        mock_fs = MagicMock(spec=FileSystemPort)
+
+        sync = IDATSync(
+            course_repository=mock_repo,
+            download_manager=mock_mgr,
+            task_orchestrator=mock_orch,
+            file_system=mock_fs,
+        )
+
+        course = Course(id=1, name="Algorithms")
+        mock_repo.get_course_content.return_value = []
+        mock_repo.get_recordings.return_value = []
+        fake_diff = MagicMock()
+        fake_diff.pending_contents = []
+        mock_mgr.diff_trees.return_value = fake_diff
+        mock_mgr.prepare_download_tasks.return_value = []
+
+        result_diff = sync.sync_course(course, Path("target_dir"))
+
+        self.assertIs(result_diff, fake_diff)
+        mock_fs.ensure_dir.assert_any_call(Path("target_dir"))
+        mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Grabaciones")
+        mock_orch.run.assert_called_once_with([])
+
+        # sync_courses
+        mock_repo.get_courses.return_value = [course]
+        sync.sync_courses(Path("root_folder"))
+        mock_fs.ensure_dir.assert_any_call(Path("root_folder") / "Algorithms")
+
+    def test_hexagonal_architecture_import_boundaries_ast(self):
+        import ast
+
+        disallowed_prefixes = (
+            "idat_sync.infrastructure",
+            "idat_sync.ui",
+            "requests",
+            "office365",
+            "yt_dlp",
+            "playwright",
+        )
+
+        project_root = Path(__file__).resolve().parent.parent
+        src_root = project_root / "src" / "idat_sync"
+        target_dirs = [src_root / "domain", src_root / "application"]
+
+        violations: list[str] = []
+        for target_dir in target_dirs:
+            for py_file in target_dir.rglob("*.py"):
+                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            for dis in disallowed_prefixes:
+                                if alias.name == dis or alias.name.startswith(dis + "."):
+                                    violations.append(f"{py_file.name}:{node.lineno} imports {alias.name}")
+                    elif isinstance(node, ast.ImportFrom):
+                        module_name = node.module or ""
+                        for dis in disallowed_prefixes:
+                            if module_name == dis or module_name.startswith(dis + "."):
+                                violations.append(f"{py_file.name}:{node.lineno} imports from {module_name}")
+
+        self.assertEqual(
+            violations,
+            [],
+            f"Found architectural layer violations in domain/application: {violations}",
+        )
 
 
 if __name__ == "__main__":

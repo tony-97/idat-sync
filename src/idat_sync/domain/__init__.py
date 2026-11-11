@@ -6,16 +6,15 @@ from idat_sync.domain.content import (
     StringContent,
 )
 from idat_sync.domain.course import (
-    Assignment,
     Course,
     CourseModule,
     CourseSection,
     ModuleContent,
 )
+from idat_sync.domain.path_utils import WINDOWS_RESERVED, safe_filename
 from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
 
 __all__ = [
-    "Assignment",
     "Content",
     "Course",
     "CourseModule",
@@ -28,4 +27,6 @@ __all__ = [
     "SyncDiff",
     "SyncEntry",
     "SyncStatus",
+    "WINDOWS_RESERVED",
+    "safe_filename",
 ]

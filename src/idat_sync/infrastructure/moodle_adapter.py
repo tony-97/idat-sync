@@ -1,9 +1,9 @@
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
-from idat_sync.domain.content import MoodleContent
+from idat_sync.domain.content import MoodleContent, StringContent
 from idat_sync.domain.course import (
-    Assignment,
     Course,
     CourseModule,
     CourseSection,
@@ -46,44 +46,82 @@ class MoodleAdapter:
             filesize=int(raw_content.get("filesize", 0) or 0),
         )
 
-    def _to_assignment(self, raw_assign: dict) -> Assignment:
-        intro_attachments = [
-            self._to_module_content(att)
-            for att in raw_assign.get("introattachments", [])
-            if isinstance(att, dict)
-        ]
-        return Assignment(
-            id=int(raw_assign.get("id", 0)),
-            cmid=int(raw_assign.get("cmid", 0)),
-            name=raw_assign.get("name", ""),
-            intro=raw_assign.get("intro", ""),
-            introattachments=intro_attachments,
-        )
+    def _to_course_module(
+        self, raw_module: dict, assignments: dict[int, Any] | None = None
+    ) -> CourseModule:
+        modname = raw_module.get("modname", "")
+        module_name = raw_module.get("name", "")
+        module_id = int(raw_module.get("id", 0))
 
-    def _to_course_module(self, raw_module: dict) -> CourseModule:
-        contents = [
-            self._to_module_content(item)
-            for item in raw_module.get("contents", [])
-            if isinstance(item, dict)
-        ]
+        inline_contents: list[StringContent] = []
+        contents: list[ModuleContent] = []
+
+        if modname == "label":
+            description = raw_module.get("description", "")
+            if description:
+                inline_contents = [
+                    StringContent(
+                        Path(f"{module_name}.html"),
+                        0,
+                        [description],
+                    )
+                ]
+        elif modname == "assign":
+            assign = (assignments or {}).get(module_id)
+            if assign:
+                assign_name = assign.get("name") or module_name
+                assign_id = int(assign.get("id", 0))
+                assign_intro = assign.get("intro", "")
+                inline_contents = [
+                    StringContent(
+                        Path(f"{assign_name}-[{assign_id}]-intro.html"),
+                        0,
+                        [assign_intro],
+                    )
+                ]
+                contents = [
+                    self._to_module_content(att)
+                    for att in assign.get("introattachments", [])
+                    if isinstance(att, dict)
+                ]
+        else:
+            contents = [
+                self._to_module_content(item)
+                for item in raw_module.get("contents", [])
+                if isinstance(item, dict)
+            ]
+
         return CourseModule(
-            id=int(raw_module.get("id", 0)),
-            name=raw_module.get("name", ""),
-            modname=raw_module.get("modname", ""),
-            description=raw_module.get("description", ""),
+            id=module_id,
+            name=module_name,
+            inline_contents=inline_contents,
             contents=contents,
         )
 
-    def _to_course_section(self, raw_section: dict) -> CourseSection:
+    def _to_course_section(
+        self, raw_section: dict, assignments: dict[int, Any] | None = None
+    ) -> CourseSection:
+        sec_id = int(raw_section.get("id", 0))
+        sec_name = raw_section.get("name", "")
+        inline_contents: list[StringContent] = []
+        if "summary" in raw_section:
+            inline_contents = [
+                StringContent(
+                    Path(f"{sec_name}-[{sec_id}]-resumen.html"),
+                    0,
+                    [raw_section.get("summary", "")],
+                )
+            ]
+
         modules = [
-            self._to_course_module(module)
+            self._to_course_module(module, assignments)
             for module in raw_section.get("modules", [])
             if isinstance(module, dict)
         ]
         return CourseSection(
-            id=int(raw_section.get("id", 0)),
-            name=raw_section.get("name", ""),
-            summary=raw_section.get("summary", ""),
+            id=sec_id,
+            name=sec_name,
+            inline_contents=inline_contents,
             modules=modules,
         )
 
@@ -104,41 +142,45 @@ class MoodleAdapter:
                 courses.append(Course(id=int(course_id), name=str(course_name)))
         return courses
 
-    def get_assignments_by_course(self) -> dict[int, dict[int, Assignment]]:
-        """Fetch assignments across all enrolled courses organized by course_id -> {cmid: Assignment}."""
+    def get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
+        """Fetch assignments across all enrolled courses organized by course_id -> {cmid: raw_assignment}."""
         raw_courses = self.client.fetch_assignments()
-        courses_assignments: dict[int, dict[int, Assignment]] = {}
+        courses_assignments: dict[int, dict[int, dict]] = {}
         for raw_course in raw_courses:
             if not isinstance(raw_course, dict):
                 continue
             cid = raw_course.get("id")
             if not cid:
                 continue
-            module_assignments: dict[int, Assignment] = {}
+            module_assignments: dict[int, dict] = {}
             for raw_assign in raw_course.get("assignments", []):
                 if isinstance(raw_assign, dict):
-                    assignment = self._to_assignment(raw_assign)
-                    module_assignments[assignment.cmid] = assignment
+                    cmid = int(raw_assign.get("cmid", 0))
+                    module_assignments[cmid] = raw_assign
             courses_assignments[int(cid)] = module_assignments
         return courses_assignments
 
-    def get_course_sections(self, course_id: int) -> list[CourseSection]:
+    def get_course_sections(
+        self, course_id: int, assignments: dict[int, Any] | None = None
+    ) -> list[CourseSection]:
         """Retrieve sections and modules for a specific course as domain models."""
         raw_sections = self.client.fetch_course_contents(course_id)
         return [
-            self._to_course_section(raw_sec)
+            self._to_course_section(raw_sec, assignments)
             for raw_sec in raw_sections
             if isinstance(raw_sec, dict)
         ]
 
     def get_courses_with_contents(self) -> list[Course]:
-        """Retrieve all enrolled courses fully populated with sections, modules, and assignments."""
+        """Retrieve all enrolled courses fully populated with sections and modules."""
         courses = self.list_courses()
         assignments_by_course = self.get_assignments_by_course()
 
         for course in courses:
             print(f"\nFetching contents for: {course.name} (id={course.id}) ...")
-            course.sections = self.get_course_sections(course.id)
-            course.assignments = assignments_by_course.get(course.id, {})
+            course_assignments = assignments_by_course.get(course.id, {})
+            course.sections = self.get_course_sections(
+                course.id, assignments=course_assignments
+            )
 
         return courses

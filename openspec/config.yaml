@@ -7,7 +7,7 @@ context: |
 
 rules:
   proposal:
-    - 'Keep it under 400 words and include Non-Goals.'
+    - 'Keep it under 600 words and include Non-Goals.'
     - 'List the agent-os standards, from index.yml, that apply to this change.'
   specs:
     - 'Requirements use an H3 heading (### Requirement: Title). Scenarios use an H4 heading (#### Scenario: Name) with WHEN and THEN steps. Never use another heading depth.'

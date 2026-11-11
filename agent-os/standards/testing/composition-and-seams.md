@@ -1,22 +1,25 @@
 # Composition Root & Testable Seams
 
-Wire the production object graph solely in `IDATSync` (`application/sync_service.py`). All other application and adapter classes must receive collaborators via constructor injection.
+Wire the production object graph solely in `bootstrap.py` (`create_sync_service`). All application, domain, and adapter classes must receive collaborators via constructor injection.
 
 ```python
-# Production wiring in IDATSync.__init__
-self.moodle_client = MoodleClient(credentials.get("token"))
-self.moodle_adapter = MoodleAdapter(self.moodle_client)
-self.course_repository = CourseRepository(self.moodle_adapter, self.sharepoint_client)
+# Production wiring in bootstrap.py
+def create_sync_service(credentials: Credentials) -> IDATSync:
+    moodle_client = MoodleClient(credentials.get("token"))
+    moodle_adapter = MoodleAdapter(moodle_client)
+    ...
+    return IDATSync(course_repository, download_manager, task_orchestrator, file_system)
 
 # Seam testing with spec-constrained mocks + real domain objects
-mock_moodle = MagicMock(spec=MoodleAdapter)
-repo = CourseRepository(moodle_adapter=mock_moodle, sharepoint_adapter=mock_sp)
+mock_gw = MagicMock(spec=CourseGateway)
+repo = CourseRepository(course_gateway=mock_gw, recording_gateway=mock_rec, url_strategies=[mock_strat])
 ```
 
-- **Single composition root**: Only `IDATSync` instantiates concrete clients, adapters, and downloader groups from `Credentials`.
-- **Pure constructors**: `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, and `*Adapter` classes must only store injected dependencies in `__init__` — never instantiate clients from raw tokens/cookies or perform network I/O in `__init__`.
+- **Single composition root**: Only `create_sync_service(credentials: Credentials) -> IDATSync` in `bootstrap.py` instantiates concrete clients, adapters, filesystem adapter, and downloader groups from `Credentials`.
+- **Pure constructors**: `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync`, and `*Adapter` classes must only store injected dependencies in `__init__` — never instantiate clients from raw tokens/cookies or perform network/disk I/O in `__init__`.
 - **Confirmed test seams**:
   - `*Client` tests: patch HTTP/SDK transport (`requests.post`, `time.sleep`).
-  - `*Adapter` tests: inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (not `dict`).
-  - `CourseRepository` tests: inject `MagicMock(spec=*Adapter)` and pass real `Course` trees.
-  - Sync pipeline tests (`DownloadManager`, `TaskOrchestrator`): use real instances, real `Content` objects, and `tempfile.TemporaryDirectory()` — never mock internal application logic or domain models.
+  - `*Adapter` tests: inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (`Course`, `CourseSection`, `CourseModule`, `RecordingContent`), never raw dicts or SDK objects.
+  - Domain seam: `SyncDiff.from_trees`, `safe_filename`, `Content.in_folder` tested purely in memory without disk I/O.
+  - Application orchestration seam: `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync` tested with mock ports and stubs.
+  - Architecture boundary seam: AST inspection verifying zero imports from `idat_sync.infrastructure`, `idat_sync.ui`, `requests`, `office365`, `yt_dlp`, or `playwright` across `domain/` and `application/`.
