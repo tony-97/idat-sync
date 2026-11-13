@@ -73,10 +73,10 @@ class LoginFrame(AppFrame):
 
     # TODO add loading dialog until MFA auth
     async def do_login(self, event=None):
-        self.is_login.set(True)
         if (user := self.user_entry.get()) and (
             password := self.pass_entry.get()
         ):
+            self.is_login.set(True)
             try:
                 login_task = asyncio.create_task(
                     self.auth.login(user, password, self.get_mfa_code)
@@ -84,10 +84,11 @@ class LoginFrame(AppFrame):
                 if await login_task:
                     cast(MainApp, self.master).switch_to_sync()
                 # loading_dialog.remove()
-                self.is_login.set(False)
             except Exception as e:
                 errors = e.exceptions if isinstance(e, ExceptionGroup) else (e,)
                 for err in errors:
                     print(f"Error: {err}", file=sys.stderr)
+            finally:
+                self.is_login.set(False)
         else:
             ...

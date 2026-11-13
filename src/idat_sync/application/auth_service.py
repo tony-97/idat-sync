@@ -46,7 +46,7 @@ class AuthService:
             )
         token = moodle_task.result()
         sharepoint_storage_state = sharepoint_task.result()
-        if sharepoint_storage_state is None or not token:
+        if not sharepoint_storage_state or not token:
             return False
 
         credentials = Credentials(

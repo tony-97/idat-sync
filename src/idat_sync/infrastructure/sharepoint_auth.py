@@ -36,6 +36,7 @@ class SharepointBrowserAuth:
         login_email = (
             username if "@" in username else f"{username}@{self.email_domain}"
         )
+        cancelled = False
         storage_state: StorageStateData | None = None
         try:
             async with async_playwright() as p:
@@ -90,13 +91,24 @@ class SharepointBrowserAuth:
                     storage_state = cast(
                         StorageStateData, await context.storage_state()
                     )
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
                 finally:
+                    cleanup_error: Exception | None = None
                     try:
                         if context is not None:
                             await context.close()
+                    except Exception as exc:
+                        cleanup_error = exc
                     finally:
-                        if browser is not None:
-                            await browser.close()
+                        try:
+                            if browser is not None:
+                                await browser.close()
+                        except Exception as exc:
+                            cleanup_error = cleanup_error or exc
+                    if cleanup_error is not None and not cancelled:
+                        raise cleanup_error
         except Exception:
             storage_state = None
         return storage_state

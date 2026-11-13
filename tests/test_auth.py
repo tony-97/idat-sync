@@ -135,7 +135,7 @@ class TestAuthService(unittest.TestCase):
     def test_login_returns_false_without_saving_when_either_provider_fails(self):
         state: StorageStateData = {"cookies": []}
 
-        for token, sp_state in [(None, state), ("", state), ("tok", None)]:
+        for token, sp_state in [(None, state), ("", state), ("tok", None), ("tok", {})]:
             with self.subTest(token=token, sp_state=sp_state):
                 store = InMemoryCredentialStore()
                 service = AuthService(
@@ -474,6 +474,18 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             lambda _cm, _b, _c, p: setattr(
                 p, "goto", AsyncMock(side_effect=asyncio.CancelledError())
             ),
+            expected_exception=asyncio.CancelledError,
+            expect_context_close=True,
+            expect_browser_close=True,
+        )
+
+        # Cancellation still propagates if context.close() raises during cleanup
+        def cancel_with_close_failure(_cm, _b, c, p) -> None:
+            p.goto = AsyncMock(side_effect=asyncio.CancelledError())
+            c.close = AsyncMock(side_effect=RuntimeError("context close failed"))
+
+        run_failure_case(
+            cancel_with_close_failure,
             expected_exception=asyncio.CancelledError,
             expect_context_close=True,
             expect_browser_close=True,
