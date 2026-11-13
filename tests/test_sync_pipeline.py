@@ -776,43 +776,87 @@ class TestSyncPipeline(unittest.TestCase):
 
     def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
         from idat_sync.application.course_repository import CourseRepository
-        from idat_sync.application.ports import CredentialsExpiredError, FileSystemPort
+        from idat_sync.application.ports import (
+            CourseGateway,
+            CredentialsExpiredError,
+            RecordingGateway,
+        )
         from idat_sync.application.sync_service import IDATSync
-        from idat_sync.domain.course import Course
+        from idat_sync.domain.course import Course, CourseSection
 
-        c1 = Course(id=1, name="Course One", sections=[])
-        c2 = Course(id=2, name="Course Two", sections=[])
+        c1 = Course(
+            id=1,
+            name="Course One",
+            sections=[
+                CourseSection(
+                    id=1,
+                    name="S1",
+                    inline_contents=[StringContent(Path("c1.html"), 1, ["a"])],
+                    modules=[],
+                )
+            ],
+        )
+        c2 = Course(
+            id=2,
+            name="Course Two",
+            sections=[
+                CourseSection(
+                    id=2,
+                    name="S2",
+                    inline_contents=[StringContent(Path("c2.html"), 1, ["b"])],
+                    modules=[],
+                )
+            ],
+        )
 
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_repo.get_courses.return_value = [c1, c2]
-        mock_repo.get_course_content.side_effect = [
+        class StubFileSystem:
+            def ensure_dir(self, path: Path) -> None:
+                pass
+
+            def scan_mtimes(self, root: Path) -> dict[Path, int]:
+                return {}
+
+        class StubStringDownloader(Downloader[StringContent]):
+            content_type = StringContent
+
+            def __init__(self) -> None:
+                self.downloaded: list[Path] = []
+
+            def download(self, content: StringContent) -> None:
+                self.downloaded.append(content.path)
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.get_courses_with_contents.return_value = [c1, c2]
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings.side_effect = [
             RuntimeError("course 1 transient failure"),
             [],
         ]
-        mock_repo.get_recordings.return_value = []
 
-        mock_dm = MagicMock(spec=DownloadManager)
-        mock_dm.diff_trees.return_value = SyncDiff.from_trees([], {})
-        mock_dm.prepare_download_tasks.return_value = []
-        mock_orch = MagicMock(spec=TaskOrchestrator)
-        mock_fs = MagicMock(spec=FileSystemPort)
+        str_dl = StubStringDownloader()
+        repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
+        dm = DownloadManager([str_dl], StubFileSystem())  # type: ignore[arg-type]
+        orch = TaskOrchestrator([[str_dl]])
+        sync = IDATSync(repo, dm, orch, StubFileSystem(), "Grabaciones")  # type: ignore[arg-type]
 
-        sync = IDATSync(mock_repo, mock_dm, mock_orch, mock_fs, "Grabaciones")
         with tempfile.TemporaryDirectory() as tmpdir:
             sync.sync_courses(tmpdir)
-        # Course Two still synced despite Course One failure
-        self.assertEqual(mock_repo.get_course_content.call_count, 2)
+            self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 2)
+            self.assertEqual(
+                str_dl.downloaded,
+                [Path(tmpdir) / "Course Two" / "S2" / "c2.html"],
+            )
 
-        # CredentialsExpiredError aborts remaining courses immediately
-        mock_repo.get_course_content.reset_mock()
-        mock_repo.get_course_content.side_effect = [
-            CredentialsExpiredError("token expired"),
-            [],
-        ]
-        with tempfile.TemporaryDirectory() as tmpdir:
+            str_dl.downloaded.clear()
+            mock_rec_gw.fetch_recordings.reset_mock()
+            mock_rec_gw.fetch_recordings.side_effect = [
+                CredentialsExpiredError("token expired"),
+                [],
+            ]
             with self.assertRaises(CredentialsExpiredError):
                 sync.sync_courses(tmpdir)
-        self.assertEqual(mock_repo.get_course_content.call_count, 1)
+            self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 1)
+            self.assertEqual(str_dl.downloaded, [])
 
 
 if __name__ == "__main__":

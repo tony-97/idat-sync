@@ -432,6 +432,8 @@ class TestSharepointAdapter(unittest.TestCase):
         recs = self.adapter.fetch_recordings("Algebra")
         self.assertEqual(recs[0].path, Path("Semana 1") / "Sesión 01 Parte.mp4")
 
+
+class TestSharepointClient(unittest.TestCase):
     @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
     def test_sharepoint_client_maps_empty_personal_site_and_http_401_403_to_credentials_expired(
