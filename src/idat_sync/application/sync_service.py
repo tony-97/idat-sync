@@ -2,7 +2,7 @@ from pathlib import Path
 
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
-from idat_sync.application.ports import FileSystemPort
+from idat_sync.application.ports import CredentialsExpiredError, FileSystemPort
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
@@ -63,7 +63,12 @@ class IDATSync:
         courses = self.course_repository.get_courses()
         for course in courses:
             course_dir = root_path / safe_filename(course.name)
-            self.sync_course(course, course_dir)
+            try:
+                self.sync_course(course, course_dir)
+            except CredentialsExpiredError:
+                raise
+            except Exception as exc:
+                print(f"[!] Failed syncing course '{course.name}': {exc}")
 
 
 __all__ = ["IDATSync"]

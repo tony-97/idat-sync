@@ -13,6 +13,7 @@ from idat_sync.domain.course import (
     CourseSection,
     ModuleContent,
 )
+from idat_sync.domain.path_utils import safe_path_segment
 
 
 class CourseRepository:
@@ -68,14 +69,16 @@ class CourseRepository:
     def _get_module_content(self, module: CourseModule) -> list[Content]:
         items: list[Content] = list(module.inline_contents)
         items.extend(self.list_url_content(module.contents))
-        return [item.in_folder(module.name) for item in items]
+        safe_name = safe_path_segment(module.name)
+        return [item.in_folder(safe_name) for item in items]
 
     def _get_section_content(self, section: CourseSection) -> list[Content]:
         items: list[Content] = list(section.inline_contents)
         for module in section.modules:
             if module.name:
                 items.extend(self._get_module_content(module))
-        return [item.in_folder(section.name) for item in items]
+        safe_name = safe_path_segment(section.name)
+        return [item.in_folder(safe_name) for item in items]
 
     def get_course_content(
         self, course: Course, course_dir: str | Path = ""

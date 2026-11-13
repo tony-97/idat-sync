@@ -622,6 +622,118 @@ class TestLoginFrame(unittest.TestCase):
 
         asyncio.run(exercise_do_login())
 
+    def test_credentials_expired_error_exported_without_vendor_imports(self):
+        import ast
+        from idat_sync.application import ports
+
+        err_cls = getattr(ports, "CredentialsExpiredError")
+        self.assertTrue(issubclass(err_cls, RuntimeError))
+        self.assertIn("CredentialsExpiredError", ports.__all__)
+
+        tree = ast.parse(Path(ports.__file__).read_text(encoding="utf-8"))
+        imported = {
+            node.module.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        } | {
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertEqual(
+            imported & {"requests", "office365", "yt_dlp", "playwright", "tkinter"},
+            set(),
+        )
+
+
+class TestSyncFrame(unittest.TestCase):
+    def test_sync_frame_recovers_from_startup_and_sync_errors_without_wiping_credentials(self):
+        from idat_sync.application.ports import CredentialsExpiredError
+        from idat_sync.config import SyncConfig
+        from idat_sync.ui.sync_frame import SyncFrame
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds_file = Path(tmpdir) / "session.json"
+            creds_file.write_text('{"token": "tok"}', encoding="utf-8")
+            config = SyncConfig(session_file=creds_file)
+            creds: Credentials = {
+                "token": "tok",
+                "sharepoint_storage_state": {"cookies": [], "origins": []},
+            }
+
+            async def exercise():
+                class StubMaster(tk.Tk):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self.withdraw()
+                        self.loop = asyncio.get_running_loop()
+                        self.switched_to_login = 0
+
+                    def center_window(self, w: int, h: int) -> None:
+                        pass
+
+                    def switch_to_login(self) -> None:
+                        self.switched_to_login += 1
+
+                master = StubMaster()
+                try:
+                    frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
+                    try:
+                        mock_sync = MagicMock()
+                        with patch(
+                            "idat_sync.ui.sync_frame.create_sync_service",
+                            side_effect=[RuntimeError("network offline"), mock_sync],
+                        ) as mock_factory:
+                            # 1. Startup failure recovers controls and preserves credentials
+                            await frame.load_idat_sync(creds)
+                            self.assertIsNone(frame.idat_sync)
+                            self.assertFalse(frame.is_syncing.get())
+                            self.assertEqual(str(frame.browse_button["state"]), "normal")
+                            self.assertEqual(str(frame.logout_button["state"]), "normal")
+                            self.assertEqual(master.switched_to_login, 0)
+                            self.assertTrue(creds_file.exists())
+
+                            # Drain queued startup error message
+                            startup_msgs = []
+                            while not frame.progress_queue.empty():
+                                startup_msgs.append(frame.progress_queue.get_nowait())
+                            self.assertTrue(
+                                any("network offline" in m for m in startup_msgs if m)
+                            )
+
+                            # 2. Selecting folder and calling do_sync retries create_sync_service
+                            frame.folder_path.set(tmpdir)
+                            self.assertEqual(str(frame.sync_button["state"]), "normal")
+                            await frame.do_sync()
+                            self.assertEqual(mock_factory.call_count, 2)
+                            mock_sync.sync_courses.assert_called_once_with(tmpdir)
+                            self.assertFalse(frame.is_syncing.get())
+
+                            # 3. CredentialsExpiredError during sync prompts Logout without wiping file
+                            while not frame.progress_queue.empty():
+                                frame.progress_queue.get_nowait()
+                            mock_sync.sync_courses.side_effect = CredentialsExpiredError(
+                                "401 expired"
+                            )
+                            await frame.do_sync()
+                            self.assertFalse(frame.is_syncing.get())
+                            self.assertEqual(master.switched_to_login, 0)
+                            self.assertTrue(creds_file.exists())
+                            err_msgs = []
+                            while not frame.progress_queue.empty():
+                                err_msgs.append(frame.progress_queue.get_nowait())
+                            self.assertTrue(
+                                any("Logout" in m for m in err_msgs if m)
+                            )
+                    finally:
+                        frame.exit()
+                        await asyncio.sleep(0)
+                finally:
+                    master.destroy()
+
+            asyncio.run(exercise())
+
 
 if __name__ == "__main__":
     unittest.main()

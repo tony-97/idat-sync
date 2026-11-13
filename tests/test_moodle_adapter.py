@@ -228,6 +228,63 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertFalse(hasattr(self.adapter, "get_assignments_by_course"))
         self.assertTrue(hasattr(self.adapter, "_get_assignments_by_course"))
 
+    def test_sanitizes_unsafe_inline_and_resource_filenames_preserving_accents_and_suffixes(self):
+        long_title = "Tema " + "a" * 120
+        self.mock_client.fetch_enrolled_courses.return_value = [
+            {"id": 10, "fullname": "Curso"}
+        ]
+        self.mock_client.fetch_assignments.return_value = [
+            {
+                "id": 10,
+                "assignments": [
+                    {"id": 99, "cmid": 20, "name": long_title, "intro": "<p>x</p>"}
+                ],
+            }
+        ]
+        self.mock_client.fetch_course_contents.return_value = [
+            {
+                "id": 12,
+                "name": long_title,
+                "summary": "<p>s</p>",
+                "modules": [
+                    {
+                        "id": 1,
+                        "modname": "label",
+                        "name": "Aviso: CON/1",
+                        "description": "<p>l</p>",
+                    },
+                    {
+                        "id": 2,
+                        "modname": "label",
+                        "name": "CON",
+                        "description": "<p>c</p>",
+                    },
+                    {"id": 20, "modname": "assign", "name": "Ignored"},
+                ],
+            }
+        ]
+
+        courses = self.adapter.get_courses_with_contents()
+        sec = courses[0].sections[0]
+        sec_path = sec.inline_contents[0].path.name
+        self.assertLessEqual(len(sec_path), 100)
+        self.assertTrue(sec_path.endswith("-[12]-resumen.html"))
+
+        self.assertEqual(sec.modules[0].inline_contents[0].path, Path("Aviso CON 1.html"))
+        self.assertEqual(sec.modules[1].inline_contents[0].path, Path("_CON.html"))
+        assign_path = sec.modules[2].inline_contents[0].path.name
+        self.assertLessEqual(len(assign_path), 100)
+        self.assertTrue(assign_path.endswith("-[99]-intro.html"))
+
+        resolved = self.adapter.list_url_content(
+            "https://aulavirtual.idat.edu.pe/f.pdf", "Guía: Tema 1/2?.pdf", 123
+        )
+        self.assertEqual(resolved[0].path, Path("Guía Tema 1 2.pdf"))
+        reserved = self.adapter.list_url_content(
+            "https://aulavirtual.idat.edu.pe/c.txt", "CON.txt", 123
+        )
+        self.assertEqual(reserved[0].path, Path("_CON.txt"))
+
     def test_moodle_adapter_does_not_expose_token(self):
         self.assertFalse(hasattr(MoodleAdapter, "token"))
         self.assertFalse(hasattr(self.adapter, "token"))

@@ -4,16 +4,19 @@ import time
 from typing import BinaryIO, TypeVar
 import urllib.parse
 
+from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_result import ClientResult
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
+import requests
 
-from idat_sync.application.ports import CookieData
+from idat_sync.application.ports import CookieData, CredentialsExpiredError
 
 _EntityT = TypeVar("_EntityT", File, Folder)
+_ResultT = TypeVar("_ResultT")
 
 
 class SharepointClient:
@@ -43,14 +46,15 @@ class SharepointClient:
         self.client = self.get_client(academic_site_url.rstrip("/"))
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
-        personal_site = (
-            self.personal_client.web.current_user.get_personal_site().execute_query_with_incremental_retry()
+        personal_site = self._run_query(
+            lambda: self.personal_client.web.current_user.get_personal_site().execute_query_with_incremental_retry(),
+            sleep_after=False,
         )
         if personal_site.url:
             self.search_client = self.get_client(personal_site.url)
             time.sleep(self.request_delay)
         else:
-            raise Exception("login expired")
+            raise CredentialsExpiredError("SharePoint login expired")
 
     def get_client(self, site_url: str) -> ClientContext:
         return ClientContext(site_url).with_cookies(
@@ -90,33 +94,47 @@ class SharepointClient:
                 auth_cookies[name] = cookie.get("value", "")
         return auth_cookies
 
+    def _run_query(
+        self, action: Callable[[], _ResultT], *, sleep_after: bool = True
+    ) -> _ResultT:
+        try:
+            result = action()
+        except (ClientRequestException, requests.HTTPError) as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in (401, 403):
+                raise CredentialsExpiredError(
+                    f"HTTP {status_code}: SharePoint credentials expired."
+                ) from exc
+            raise
+        if sleep_after:
+            time.sleep(self.request_delay)
+        return result
+
     def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
         ctx.load(entity, self.properties_to_retrieve)
-        ctx.execute_query_with_incremental_retry()
-        time.sleep(self.request_delay)
+        self._run_query(ctx.execute_query_with_incremental_retry)
 
     def search_for_recordings(
         self, course_name: str
     ) -> ClientResult[SearchResult]:
-        result = self.search_client.search.query(
-            course_name,
-            row_limit=15,
-        ).execute_query_retry()
-        time.sleep(self.request_delay)
-        return result
+        return self._run_query(
+            lambda: self.search_client.search.query(
+                course_name,
+                row_limit=15,
+            ).execute_query_retry()
+        )
 
     def fetch_document_library_items(self, site_url: str) -> list[ListItem]:
         client = self.get_client(site_url)
         doc_lib = client.web.default_document_library()
         time.sleep(self.request_delay)
-        items = (
-            doc_lib.items.select(["FileSystemObjectType"])
+        items = self._run_query(
+            lambda: doc_lib.items.select(["FileSystemObjectType"])
             .expand(["File"])
             .select(self.properties_to_retrieve)
             .get_all(page_size=50)
             .execute_query_retry()
         )
-        time.sleep(self.request_delay)
         return list(items)
 
     def _load_entity_at_url(
@@ -143,19 +161,20 @@ class SharepointClient:
         )
 
     def fetch_folder_files(self, folder: Folder) -> list[File]:
-        files = (
-            folder.get_files()
+        files = self._run_query(
+            lambda: folder.get_files()
             .select(self.properties_to_retrieve)
             .execute_query_retry()
         )
-        time.sleep(self.request_delay)
         return list(files)
 
     def fetch_subfolders(self, folder: Folder) -> list[Folder]:
-        folders = folder.get_folders().execute_query_retry()
-        time.sleep(self.request_delay)
+        folders = self._run_query(lambda: folder.get_folders().execute_query_retry())
         return list(folders)
 
     def download_file(self, file: File, dest: BinaryIO) -> None:
-        file.download_session(dest).execute_query_with_incremental_retry()
-        time.sleep(self.request_delay)
+        self._run_query(
+            lambda: file.download_session(
+                dest
+            ).execute_query_with_incremental_retry()
+        )

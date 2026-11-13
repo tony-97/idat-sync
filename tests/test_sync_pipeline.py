@@ -241,6 +241,40 @@ class TestSyncPipeline(unittest.TestCase):
         # Max length enforcement
         self.assertEqual(safe_filename("very_long_file_name", max_len=9), "very_long")
 
+        # Reserved stem with extension and trailing dots exposed by truncation
+        self.assertEqual(safe_filename("CON.txt"), "_CON.txt")
+        self.assertEqual(safe_filename("a" * 98 + "...b", max_len=100), "a" * 98)
+        self.assertEqual(safe_filename("." * 105, max_len=100), "untitled")
+
+    def test_safe_path_segment_preserves_utf8_and_extensions(self):
+        from idat_sync.domain.path_utils import safe_path_segment
+
+        self.assertEqual(
+            safe_path_segment("Lección 1: Diseño/Guía?.pdf"),
+            "Lección 1 Diseño Guía.pdf",
+        )
+        self.assertEqual(safe_path_segment("CON.txt"), "_CON.txt")
+        self.assertEqual(safe_path_segment(".."), "untitled")
+        self.assertEqual(safe_path_segment("a\x00\x7fb"), "a b")
+        self.assertEqual(
+            safe_path_segment("a" * 110 + ".mp4", max_len=100),
+            "a" * 96 + ".mp4",
+        )
+
+    def test_content_in_folder_rejects_traversal_and_anchored_paths(self):
+        for unsafe_item in (Path("/etc/passwd"), Path("../secret.txt")):
+            with self.assertRaises(ValueError):
+                StringContent(unsafe_item, 0, ["x"]).in_folder("Course")
+        with self.assertRaises(ValueError):
+            StringContent(Path("../secret.txt"), 0, ["x"]).in_folder("")
+        with self.assertRaises(ValueError):
+            StringContent(Path("file.pdf"), 0, ["x"]).in_folder("../outside")
+
+        wrapped = StringContent(Path("file.pdf"), 0, ["x"]).in_folder(
+            Path("/tmp/Course")
+        )
+        self.assertEqual(wrapped.path, Path("/tmp/Course/file.pdf"))
+
     def test_sync_diff_from_trees_pure_in_memory(self):
         p_missing = Path("semana1/missing.pdf")
         p_outdated = Path("semana1/outdated.pdf")
@@ -653,6 +687,132 @@ class TestSyncPipeline(unittest.TestCase):
             [],
             f"Found forbidden infrastructure imports in ui/: {ui_violations}",
         )
+
+    def test_recording_downloader_maps_http_401_403_download_error_to_credentials_expired(self):
+        from yt_dlp.utils import DownloadError
+        from idat_sync.application.ports import CredentialsExpiredError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "Semana 1" / "video.mp4"
+            content = RecordingContent(
+                target, 1700000000, "https://idat628-my.sharepoint.com/:v:/r/video.mp4"
+            )
+            dl = RecordingDownloader([], "idat628-my.sharepoint.com")
+
+            for msg in ("HTTP Error 401: Unauthorized", "HTTP Error 403: Forbidden"):
+                with patch("idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL") as mock_ydl:
+                    mock_ydl.return_value.__enter__.return_value.download.side_effect = (
+                        DownloadError(msg)
+                    )
+                    with self.assertRaises(CredentialsExpiredError):
+                        dl.download(content)
+
+            with patch("idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL") as mock_ydl:
+                mock_ydl.return_value.__enter__.return_value.download.side_effect = (
+                    DownloadError("HTTP Error 404: Not Found")
+                )
+                with self.assertRaises(DownloadError) as ctx:
+                    dl.download(content)
+                self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
+
+    def test_task_orchestrator_isolates_item_errors_and_aborts_on_credentials_expired(self):
+        import threading
+        from idat_sync.application.ports import CredentialsExpiredError, DownloadTask
+
+        executed: list[str] = []
+
+        class StubDownloader(Downloader[StringContent]):
+            content_type = StringContent
+
+            def __init__(self, label: str, behavior):
+                self.label = label
+                self.behavior = behavior
+
+            def download(self, content: StringContent) -> None:
+                executed.append(f"{self.label}:{content.path.name}")
+                self.behavior(content)
+
+        # Case 1: single-item non-credential error logs and continues
+        d1 = StubDownloader(
+            "g1",
+            lambda c: (_ for _ in ()).throw(OSError("disk hiccup"))
+            if c.path.name == "bad.txt"
+            else None,
+        )
+        d2 = StubDownloader("g2", lambda c: None)
+        orch = TaskOrchestrator([[d1], [d2]])
+        tasks = [
+            DownloadTask(StringContent(Path("bad.txt"), 0, ["x"]), d1),
+            DownloadTask(StringContent(Path("good1.txt"), 0, ["x"]), d1),
+            DownloadTask(StringContent(Path("good2.txt"), 0, ["x"]), d2),
+        ]
+        orch.run(tasks)
+        self.assertEqual(executed, ["g1:bad.txt", "g1:good1.txt", "g2:good2.txt"])
+
+        # Case 2: CredentialsExpiredError aborts remaining tasks across groups
+        executed.clear()
+        g1_failed = threading.Event()
+
+        def fail_auth(_content):
+            g1_failed.set()
+            raise CredentialsExpiredError("401 expired")
+
+        def wait_then_ok(_content):
+            g1_failed.wait(timeout=2.0)
+
+        d_auth = StubDownloader("auth", fail_auth)
+        d_sibling = StubDownloader("sib", wait_then_ok)
+        orch2 = TaskOrchestrator([[d_auth], [d_sibling]])
+        tasks2 = [
+            DownloadTask(StringContent(Path("t1.txt"), 0, ["x"]), d_auth),
+            DownloadTask(StringContent(Path("t2_never.txt"), 0, ["x"]), d_auth),
+            DownloadTask(StringContent(Path("s1.txt"), 0, ["x"]), d_sibling),
+            DownloadTask(StringContent(Path("s2_never.txt"), 0, ["x"]), d_sibling),
+        ]
+        with self.assertRaises(CredentialsExpiredError):
+            orch2.run(tasks2)
+        self.assertNotIn("auth:t2_never.txt", executed)
+        self.assertNotIn("sib:s2_never.txt", executed)
+
+    def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.ports import CredentialsExpiredError, FileSystemPort
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.domain.course import Course
+
+        c1 = Course(id=1, name="Course One", sections=[])
+        c2 = Course(id=2, name="Course Two", sections=[])
+
+        mock_repo = MagicMock(spec=CourseRepository)
+        mock_repo.get_courses.return_value = [c1, c2]
+        mock_repo.get_course_content.side_effect = [
+            RuntimeError("course 1 transient failure"),
+            [],
+        ]
+        mock_repo.get_recordings.return_value = []
+
+        mock_dm = MagicMock(spec=DownloadManager)
+        mock_dm.diff_trees.return_value = SyncDiff.from_trees([], {})
+        mock_dm.prepare_download_tasks.return_value = []
+        mock_orch = MagicMock(spec=TaskOrchestrator)
+        mock_fs = MagicMock(spec=FileSystemPort)
+
+        sync = IDATSync(mock_repo, mock_dm, mock_orch, mock_fs, "Grabaciones")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sync.sync_courses(tmpdir)
+        # Course Two still synced despite Course One failure
+        self.assertEqual(mock_repo.get_course_content.call_count, 2)
+
+        # CredentialsExpiredError aborts remaining courses immediately
+        mock_repo.get_course_content.reset_mock()
+        mock_repo.get_course_content.side_effect = [
+            CredentialsExpiredError("token expired"),
+            [],
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(CredentialsExpiredError):
+                sync.sync_courses(tmpdir)
+        self.assertEqual(mock_repo.get_course_content.call_count, 1)
 
 
 if __name__ == "__main__":

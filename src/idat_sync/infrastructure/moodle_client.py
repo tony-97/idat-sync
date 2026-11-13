@@ -2,6 +2,8 @@ import time
 from typing import Any, BinaryIO
 import requests
 
+from idat_sync.application.ports import CredentialsExpiredError
+
 REQUEST_HEADER = {
     "User-Agent": (
         "Mozilla/5.0 (Linux; Android 7.1.1; Moto G Play Build/NPIS26.48-43-2; wv) AppleWebKit/537.36"
@@ -60,10 +62,18 @@ class MoodleClient:
             **kwargs,
         }
         response = requests.post(url, data=payload, timeout=45)
+        if response.status_code in (401, 403):
+            raise CredentialsExpiredError(
+                f"HTTP {response.status_code}: Moodle credentials expired."
+            )
         response.raise_for_status()
         result = response.json()
         if isinstance(result, dict) and result.get("exception"):
-            raise RuntimeError(f"{result.get('errorcode')}: {result.get('message')}")
+            error_code = result.get("errorcode")
+            msg = f"{error_code}: {result.get('message')}"
+            if error_code == "invalidtoken":
+                raise CredentialsExpiredError(msg)
+            raise RuntimeError(msg)
         time.sleep(self.request_delay)
         return result
 
@@ -108,8 +118,12 @@ class MoodleClient:
             timeout=60,
             headers=REQUEST_HEADER,
         ) as response:
+            if response.status_code == 401:
+                raise CredentialsExpiredError(
+                    "401 Unauthorized: your session cookie/token is missing/expired."
+                )
             if response.status_code == 403:
-                raise RuntimeError(
+                raise CredentialsExpiredError(
                     "403 Forbidden: your session cookie is missing/expired."
                 )
             response.raise_for_status()

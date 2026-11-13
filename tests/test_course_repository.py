@@ -296,6 +296,41 @@ class TestCourseRepository(unittest.TestCase):
         self.assertIsInstance(all_contents[0], StringContent)
         self.assertEqual(all_contents[0].path, Path("S1/S1-[10]-resumen.html"))
 
+    def test_get_course_content_sanitizes_section_and_module_names_and_skips_empty(self):
+        course = Course(
+            id=1,
+            name="C1",
+            sections=[
+                CourseSection(
+                    id=1,
+                    name="",
+                    inline_contents=[StringContent(Path("skip.html"), 0, ["x"])],
+                    modules=[],
+                ),
+                CourseSection(
+                    id=2,
+                    name="Sesión: 1/2?",
+                    inline_contents=[],
+                    modules=[
+                        CourseModule(
+                            id=10,
+                            name="",
+                            inline_contents=[StringContent(Path("skip2.html"), 0, ["x"])],
+                        ),
+                        CourseModule(
+                            id=11,
+                            name="CON",
+                            inline_contents=[StringContent(Path("nota.html"), 0, ["ok"])],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        items = self.repo.get_course_content(course, Path("CourseDir"))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].path, Path("CourseDir/Sesión 1 2/_CON/nota.html"))
+
 
 if __name__ == "__main__":
     unittest.main()

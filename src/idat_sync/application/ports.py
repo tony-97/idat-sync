@@ -102,6 +102,10 @@ class SharepointAuthPort(Protocol):
         ...
 
 
+class CredentialsExpiredError(RuntimeError):
+    """Raised when stored Moodle or SharePoint Credentials are rejected or expired."""
+
+
 class CredentialStorePort(Protocol):
     def load(self) -> Credentials | None:
         ...
@@ -118,6 +122,7 @@ __all__ = [
     "CourseGateway",
     "CredentialStorePort",
     "Credentials",
+    "CredentialsExpiredError",
     "DownloadTask",
     "Downloader",
     "FileSystemPort",

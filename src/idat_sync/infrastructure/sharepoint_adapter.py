@@ -12,6 +12,7 @@ from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
 
 from idat_sync.domain.content import RecordingContent, SharepointContent
+from idat_sync.domain.path_utils import safe_path_segment
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
@@ -69,7 +70,7 @@ class SharepointApiAdapter:
         self, f: File, file_name: str = "", last_modified: int = 0
     ):
         return SharepointContent(
-            Path(self.__get_name(f, file_name)),
+            Path(safe_path_segment(self.__get_name(f, file_name))),
             self.__get_last_modified(f, last_modified),
             f,
         )
@@ -96,8 +97,9 @@ class SharepointApiAdapter:
             contents.append(self.__file_to_content(file))
         for sub_folder in self.sp_client.fetch_subfolders(folder):
             if save_name := self.__get_name(sub_folder):
+                safe_sub = safe_path_segment(save_name)
                 for item in self.fetch_folder_contents(sub_folder):
-                    contents.append(item.in_folder(save_name))
+                    contents.append(item.in_folder(safe_sub))
         return contents
 
     def fetch_file_from_direct_link(self, link: str):
@@ -138,10 +140,13 @@ class SharepointApiAdapter:
                     + (file.time_created.date() - self.semester_start).days
                     // 7
                 )
-                name = self.get_name(file)
+                name = safe_path_segment(self.get_name(file))
                 last_mod = self.get_last_modified(file)
                 share_url = f"https://{self.sharepoint_personal_host}/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
-                rec_path = Path(f"{self.week_folder_prefix} {week}") / name
+                rec_path = (
+                    Path(safe_path_segment(f"{self.week_folder_prefix} {week}"))
+                    / name
+                )
                 recordings.append(
                     RecordingContent(rec_path, last_mod, share_url)
                 )

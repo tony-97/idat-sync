@@ -1,0 +1,3 @@
+# Path Sanitization Compatibility Split
+
+We preserve ASCII normalization via `safe_filename` for top-level `Course` directories while applying an OS-safe, UTF-8-preserving, extension-preserving segment sanitizer to `CourseSection`, `CourseModule`, and file names. Normalizing accents inside nested paths would rename existing local folders and files for users who have already synced, forcing `SyncDiff` to treat valid materials as `MISSING` and re-download them, whereas stripping only OS-forbidden characters, traversal segments (`..`, leading slashes), Windows reserved stems, and post-truncation trailing dots prevents crashes and path escape without breaking existing local trees.

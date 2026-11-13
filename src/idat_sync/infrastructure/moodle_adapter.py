@@ -9,6 +9,7 @@ from idat_sync.domain.course import (
     CourseSection,
     ModuleContent,
 )
+from idat_sync.domain.path_utils import safe_path_segment
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 
 
@@ -54,7 +55,13 @@ class MoodleAdapter:
         self, url: str, filename: str, last_modified: int
     ) -> list[MoodleContent]:
         # TODO: list recursive moodle folder url
-        return [MoodleContent(Path(filename), last_modified, url)]
+        return [MoodleContent(Path(safe_path_segment(filename)), last_modified, url)]
+
+    @staticmethod
+    def _safe_suffixed_html(prefix: str, suffix: str) -> str:
+        budget = max(1, 100 - len(suffix))
+        bounded = safe_path_segment(prefix, max_len=budget) if prefix else ""
+        return safe_path_segment(f"{bounded}{suffix}")
 
     # -------------------------------------------------------------------------
     # Internal Vendor-to-Domain Mappers
@@ -83,7 +90,7 @@ class MoodleAdapter:
             if description:
                 inline_contents = [
                     StringContent(
-                        Path(f"{module_name}.html"),
+                        Path(safe_path_segment(f"{module_name}.html")),
                         0,
                         [description],
                     )
@@ -96,7 +103,11 @@ class MoodleAdapter:
                 assign_intro = assign.get("intro", "")
                 inline_contents = [
                     StringContent(
-                        Path(f"{assign_name}-[{assign_id}]-intro.html"),
+                        Path(
+                            self._safe_suffixed_html(
+                                assign_name, f"-[{assign_id}]-intro.html"
+                            )
+                        ),
                         0,
                         [assign_intro],
                     )
@@ -129,7 +140,11 @@ class MoodleAdapter:
         if "summary" in raw_section:
             inline_contents = [
                 StringContent(
-                    Path(f"{sec_name}-[{sec_id}]-resumen.html"),
+                    Path(
+                        self._safe_suffixed_html(
+                            sec_name, f"-[{sec_id}]-resumen.html"
+                        )
+                    ),
                     0,
                     [raw_section.get("summary", "")],
                 )

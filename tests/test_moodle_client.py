@@ -165,6 +165,52 @@ class TestMoodleClient(unittest.TestCase):
 
         mock_sleep.assert_not_called()
 
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.get")
+    @patch("idat_sync.infrastructure.moodle_client.requests.post")
+    def test_call_ws_and_download_file_map_auth_failures_to_credentials_expired_error(
+        self, mock_post, mock_get, mock_sleep
+    ):
+        from idat_sync.application.ports import CredentialsExpiredError
+
+        for status in (401, 403):
+            mock_resp = MagicMock()
+            mock_resp.status_code = status
+            mock_post.return_value = mock_resp
+            with self.assertRaises(CredentialsExpiredError):
+                self.client.call_ws("core_course_get_contents")
+
+            mock_dl = MagicMock()
+            mock_dl.status_code = status
+            mock_get.return_value.__enter__.return_value = mock_dl
+            with self.assertRaises(CredentialsExpiredError):
+                self.client.download_file("https://aulavirtual.idat.edu.pe/f", io.BytesIO())
+
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.json.return_value = {
+            "exception": "moodle_exception",
+            "errorcode": "invalidtoken",
+            "message": "Invalid token",
+        }
+        mock_post.return_value = token_resp
+        with self.assertRaises(CredentialsExpiredError):
+            self.client.call_ws("core_course_get_contents")
+
+        other_resp = MagicMock()
+        other_resp.status_code = 200
+        other_resp.json.return_value = {
+            "exception": "moodle_exception",
+            "errorcode": "dmlreadexception",
+            "message": "DB error",
+        }
+        mock_post.return_value = other_resp
+        with self.assertRaises(RuntimeError) as ctx:
+            self.client.call_ws("core_course_get_contents")
+        self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
+
+        mock_sleep.assert_not_called()
+
 
 class TestMoodleTokenClient(unittest.TestCase):
     def test_requires_base_url_and_rejects_request_delay(self):

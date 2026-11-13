@@ -16,9 +16,18 @@ class Content(ABC):
         return self.path.name
 
     def in_folder(self, folder: str | Path) -> Self:
+        if (
+            self.path.is_absolute()
+            or bool(self.path.anchor)
+            or ".." in self.path.parts
+        ):
+            raise ValueError(f"Unsafe content path: {self.path}")
         if not folder:
             return self
-        return replace(self, path=Path(folder) / self.path)
+        folder_path = Path(folder)
+        if ".." in folder_path.parts:
+            raise ValueError(f"Unsafe folder path: {folder}")
+        return replace(self, path=folder_path / self.path)
 
 
 @dataclass

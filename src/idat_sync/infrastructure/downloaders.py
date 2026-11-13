@@ -6,12 +6,20 @@ import io
 import os
 from pathlib import Path
 import platform
+import re
 import sys
 from typing import TYPE_CHECKING
+import urllib.error
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
-from idat_sync.application.ports import CookieData, DownloadTask, Downloader
+from idat_sync.application.ports import (
+    CookieData,
+    CredentialsExpiredError,
+    DownloadTask,
+    Downloader,
+)
 from idat_sync.domain.content import (
     Content,
     MoodleContent,
@@ -128,8 +136,16 @@ class RecordingDownloader(Downloader[RecordingContent]):
         }
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
             ydl_opts["ffmpeg_location"] = sys._MEIPASS  # type: ignore
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
-            ydl.download([content.url])
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore
+                ydl.download([content.url])
+        except DownloadError as exc:
+            cause = exc.exc_info[1] if exc.exc_info and len(exc.exc_info) > 1 else None
+            if (
+                isinstance(cause, urllib.error.HTTPError) and cause.code in (401, 403)
+            ) or re.search(r"\b(?:HTTP Error 40[13]|401 Unauthorized|403 Forbidden)\b", str(exc)):
+                raise CredentialsExpiredError(str(exc)) from exc
+            raise
 
 
 __all__ = [

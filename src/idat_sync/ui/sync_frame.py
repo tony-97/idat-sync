@@ -7,7 +7,7 @@ from typing import cast
 
 from async_tkinter_loop import async_handler
 
-from idat_sync.application.ports import Credentials
+from idat_sync.application.ports import Credentials, CredentialsExpiredError
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.bootstrap import create_sync_service
 from idat_sync.config import SyncConfig
@@ -23,6 +23,7 @@ class SyncFrame(AppFrame):
         **kwargs,
     ):
         tk.Frame.__init__(self, master, **kwargs)
+        self.credentials = credentials
         self.config = config
         window_width = 700
         window_height = 500
@@ -105,12 +106,25 @@ class SyncFrame(AppFrame):
         self.logout_button.config(state=action_state)
         self.sync_button.config(state=sync_state)
 
+    async def _queue_error(self, exc: Exception) -> None:
+        if isinstance(exc, CredentialsExpiredError):
+            await self.progress_queue.put(
+                f"[!] Credentials expired: {exc}. Click Logout to sign in again.\n"
+            )
+        else:
+            await self.progress_queue.put(f"[!] Sync error: {exc}\n")
+
     async def load_idat_sync(self, credentials: Credentials):
         self.is_syncing.set(True)
-        self.idat_sync = await asyncio.to_thread(
-            create_sync_service, credentials, self.config
-        )
-        self.is_syncing.set(False)
+        try:
+            self.idat_sync = await asyncio.to_thread(
+                create_sync_service, credentials, self.config
+            )
+        except Exception as exc:
+            self.idat_sync = None
+            await self._queue_error(exc)
+        finally:
+            self.is_syncing.set(False)
 
     async def update_progress(self):
         while True:
@@ -130,11 +144,18 @@ class SyncFrame(AppFrame):
             self.progress_queue.task_done()
 
     async def do_sync(self):
-        if path := self.folder_path.get():
-            self.is_syncing.set(True)
-            self.output_text.config(state="normal")
-            self.output_text.delete("1.0", tk.END)
-            self.output_text.config(state="disabled")
+        path = self.folder_path.get().strip()
+        if not path or self.is_syncing.get():
+            return
+        self.is_syncing.set(True)
+        self.output_text.config(state="normal")
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.config(state="disabled")
+        try:
+            if self.idat_sync is None:
+                self.idat_sync = await asyncio.to_thread(
+                    create_sync_service, self.credentials, self.config
+                )
 
             def sync_task():
                 with redirect_stdout(self.progress_interceptor):  # type: ignore
@@ -142,6 +163,9 @@ class SyncFrame(AppFrame):
 
             await asyncio.to_thread(sync_task)
             await self.progress_queue.put("Sync done...")
+        except Exception as exc:
+            await self._queue_error(exc)
+        finally:
             self.is_syncing.set(False)
 
     def browse_folder(self):

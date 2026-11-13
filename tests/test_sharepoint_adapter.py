@@ -390,6 +390,100 @@ class TestSharepointAdapter(unittest.TestCase):
         self.assertEqual(self.adapter.list_url_content(no_id_url, "Home.aspx", 50), [])
         self.mock_client.fetch_file_by_id.assert_not_called()
 
+    def test_sanitizes_unsafe_sharepoint_folder_file_and_recording_segments(self):
+        from datetime import datetime
+
+        # Shared folder + file sanitization preserving UTF-8
+        root_folder = MagicMock()
+        sub_folder = MagicMock()
+        sub_folder.name = "CON"
+        sub_folder.serverRelativeUrl = "/sites/C/CON"
+        shared_file = MagicMock()
+        shared_file.name = "Sesión: 01/Parte?.pdf"
+        shared_file.serverRelativeUrl = "/sites/C/CON/Sesión.pdf"
+        shared_file.time_last_modified = None
+
+        self.mock_client.fetch_folder_by_guest_url.return_value = root_folder
+        self.mock_client.fetch_folder_files.side_effect = [[], [shared_file]]
+        self.mock_client.fetch_subfolders.side_effect = [[sub_folder], []]
+
+        folder_url = "https://idat628.sharepoint.com/:f:/s/Course/folder"
+        items = self.adapter.list_url_content(folder_url, "folder", 100)
+        self.assertEqual(items[0].path, Path("_CON") / "Sesión 01 Parte.pdf")
+
+        # Recording filename sanitization
+        row = MagicMock()
+        row.Cells = {
+            "Title": "Algebra",
+            "ParentLink": "https://idat628.sharepoint.com/sites/A/Grabaciones",
+            "SiteName": "https://idat628.sharepoint.com/sites/A",
+        }
+        search_res = MagicMock()
+        search_res.value.PrimaryQueryResult.RelevantResults.Table.Rows = [row]
+        self.mock_client.search_for_recordings.return_value = search_res
+
+        rec_item = MagicMock()
+        rec_item.file.serverRelativeUrl = "/sites/Algebra/Grabaciones/video.mp4"
+        rec_item.file.time_created = datetime(2025, 9, 22, 10, 0, 0)
+        rec_item.file.time_last_modified = datetime(2025, 9, 22, 11, 0, 0)
+        rec_item.file.name = "Sesión: 01/Parte?.mp4"
+        self.mock_client.fetch_document_library_items.return_value = [rec_item]
+
+        recs = self.adapter.fetch_recordings("Algebra")
+        self.assertEqual(recs[0].path, Path("Semana 1") / "Sesión 01 Parte.mp4")
+
+    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_sharepoint_client_maps_empty_personal_site_and_http_401_403_to_credentials_expired(
+        self, mock_ctx_cls, _mock_sleep
+    ):
+        from office365.runtime.client_request_exception import ClientRequestException
+        from idat_sync.application.ports import CredentialsExpiredError
+        from idat_sync.infrastructure.sharepoint_client import SharepointClient
+
+        # Empty personal_site.url -> CredentialsExpiredError
+        personal_site_empty = MagicMock()
+        personal_site_empty.url = ""
+        ctx_empty = MagicMock()
+        ctx_empty.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = personal_site_empty
+        mock_ctx_cls.return_value.with_cookies.return_value = ctx_empty
+
+        with self.assertRaises(CredentialsExpiredError):
+            SharepointClient(
+                cookies=[],
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+                request_delay=0.0,
+            )
+
+        # Valid init for query tests
+        personal_site_ok = MagicMock()
+        personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
+        ctx_ok = MagicMock()
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = personal_site_ok
+        mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
+
+        client = SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+            request_delay=0.0,
+        )
+
+        for status in (401, 403):
+            resp = MagicMock(status_code=status)
+            err = ClientRequestException(response=resp)
+            ctx_ok.search.query.return_value.execute_query_retry.side_effect = err
+            with self.assertRaises(CredentialsExpiredError):
+                client.search_for_recordings("Algebra")
+
+        resp_404 = MagicMock(status_code=404)
+        err_404 = ClientRequestException(response=resp_404)
+        ctx_ok.search.query.return_value.execute_query_retry.side_effect = err_404
+        with self.assertRaises(ClientRequestException) as ctx:
+            client.search_for_recordings("Algebra")
+        self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
+
 
 if __name__ == "__main__":
     unittest.main()
