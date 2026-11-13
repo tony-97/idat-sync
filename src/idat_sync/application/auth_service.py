@@ -31,14 +31,21 @@ class AuthService:
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> bool:
         clean_username = username.split("@", 1)[0]
-        token, sharepoint_storage_state = await asyncio.gather(
-            asyncio.to_thread(
-                self.moodle_auth.fetch_token, clean_username, password
-            ),
-            self.sharepoint_auth.fetch_storage_state(
-                username, password, get_mfa_code
-            ),
-        )
+        async with asyncio.TaskGroup() as tg:
+            moodle_task = tg.create_task(
+                asyncio.to_thread(
+                    self.moodle_auth.fetch_token, clean_username, password
+                ),
+                name="moodle_auth",
+            )
+            sharepoint_task = tg.create_task(
+                self.sharepoint_auth.fetch_storage_state(
+                    username, password, get_mfa_code
+                ),
+                name="sharepoint_auth",
+            )
+        token = moodle_task.result()
+        sharepoint_storage_state = sharepoint_task.result()
         if sharepoint_storage_state is None or not token:
             return False
 

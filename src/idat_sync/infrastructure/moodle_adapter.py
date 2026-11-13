@@ -20,16 +20,17 @@ class MoodleTokenAdapter:
 
     def fetch_token(self, username: str, password: str) -> str | None:
         payload = self.client.request_token(username, password)
-        if "error" in payload:
-            print(f"[!] Token error: {payload.get('error')}")
-            return None
-        token = payload.get("token")
-        if not isinstance(token, str) or not token:
-            print(
-                "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
-            )
-            return None
-        return token
+        if isinstance(payload, dict):
+            if "error" in payload:
+                print(f"[!] Token error: {payload.get('error')}")
+                return None
+            token = payload.get("token")
+            if isinstance(token, str) and token:
+                return token
+        print(
+            "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
+        )
+        return None
 
 
 class MoodleAdapter:

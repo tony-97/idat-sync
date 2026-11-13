@@ -258,6 +258,9 @@ class TestMoodleTokenAdapter(unittest.TestCase):
             {},
             {"token": ""},
             {"token": 123},
+            None,
+            [],
+            "unexpected",
         ]:
             with self.subTest(payload=payload):
                 mock_client = MagicMock(spec=MoodleTokenClient)

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
+from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from idat_sync.domain.content import Content
 
@@ -19,14 +19,11 @@ class CookieData(TypedDict, total=False):
     domain: str
     path: str
     expires: float
-    httpOnly: bool
     secure: bool
-    sameSite: Literal["Lax", "None", "Strict"]
 
 
 class StorageStateData(TypedDict, total=False):
     cookies: list[CookieData]
-    origins: list[dict[str, Any]]
 
 
 class Credentials(TypedDict):

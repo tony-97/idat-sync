@@ -184,6 +184,51 @@ class TestAuthService(unittest.TestCase):
                 list(sig.parameters), ["self", "username", "password", "get_mfa_code"]
             )
 
+    def test_login_cancels_sharepoint_task_and_raises_exception_group_on_moodle_error(self):
+        sp_started = threading.Event()
+        sp_cancelled: list[bool] = []
+        sp_cleaned_up: list[bool] = []
+
+        class FailingMoodlePort:
+            def fetch_token(self, username: str, password: str) -> str | None:
+                if not sp_started.wait(timeout=2.0):
+                    raise TimeoutError("SharePoint login did not start")
+                raise RuntimeError("moodle HTTP 500")
+
+        class HangingSharepointPort:
+            async def fetch_storage_state(
+                self, username: str, password: str, get_mfa_code
+            ) -> StorageStateData | None:
+                sp_started.set()
+                try:
+                    await asyncio.get_running_loop().create_future()
+                except asyncio.CancelledError:
+                    sp_cancelled.append(True)
+                    raise
+                finally:
+                    sp_cleaned_up.append(True)
+                return None
+
+        store = InMemoryCredentialStore()
+        service = AuthService(
+            moodle_auth=FailingMoodlePort(),
+            sharepoint_auth=HangingSharepointPort(),
+            credential_store=store,
+        )
+
+        async def exercise() -> None:
+            with self.assertRaises(ExceptionGroup) as ctx:
+                await service.login("jdoe", "secret", _mfa_code)
+            self.assertEqual(sp_cancelled, [True])
+            self.assertEqual(sp_cleaned_up, [True])
+            self.assertEqual(
+                [str(exc) for exc in ctx.exception.exceptions],
+                ["moodle HTTP 500"],
+            )
+
+        asyncio.run(exercise())
+        self.assertIsNone(store.stored)
+
 
 class TestJsonCredentialStore(unittest.TestCase):
     def test_save_creates_parent_dir_load_roundtrips_and_clear_deletes(self):

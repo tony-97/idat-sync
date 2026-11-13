@@ -86,6 +86,8 @@ class LoginFrame(AppFrame):
                 # loading_dialog.remove()
                 self.is_login.set(False)
             except Exception as e:
-                print(f"Error: {e}", file=sys.stderr)
+                errors = e.exceptions if isinstance(e, ExceptionGroup) else (e,)
+                for err in errors:
+                    print(f"Error: {err}", file=sys.stderr)
         else:
             ...
