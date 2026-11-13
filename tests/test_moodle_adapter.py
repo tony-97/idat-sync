@@ -1,11 +1,13 @@
+import inspect
 from pathlib import Path
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+import requests
 
 from idat_sync.domain.content import MoodleContent, StringContent
 from idat_sync.domain.course import Course, CourseModule, CourseSection, ModuleContent
-from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
-from idat_sync.infrastructure.moodle_client import MoodleClient
+from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
+from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 
 
 class TestMoodleAdapter(unittest.TestCase):
@@ -229,6 +231,49 @@ class TestMoodleAdapter(unittest.TestCase):
     def test_moodle_adapter_does_not_expose_token(self):
         self.assertFalse(hasattr(MoodleAdapter, "token"))
         self.assertFalse(hasattr(self.adapter, "token"))
+
+
+class TestMoodleTokenAdapter(unittest.TestCase):
+    def test_requires_client_without_base_url(self):
+        with self.assertRaises(TypeError):
+            MoodleTokenAdapter()  # type: ignore[call-arg]
+        self.assertNotIn(
+            "base_url", inspect.signature(MoodleTokenAdapter.__init__).parameters
+        )
+
+    def test_fetch_token_delegates_to_client_and_returns_token(self):
+        mock_client = MagicMock(spec=MoodleTokenClient)
+        mock_client.request_token.return_value = {"token": "tok123"}
+
+        adapter = MoodleTokenAdapter(mock_client)
+        token = adapter.fetch_token("jdoe", "pw")
+
+        self.assertEqual(token, "tok123")
+        mock_client.request_token.assert_called_once_with("jdoe", "pw")
+
+    def test_fetch_token_returns_none_and_prints_diagnostic_on_error_or_missing_token(self):
+        for payload in [{"error": "Invalid login"}, {}, {"token": ""}]:
+            with self.subTest(payload=payload):
+                mock_client = MagicMock(spec=MoodleTokenClient)
+                mock_client.request_token.return_value = payload
+                adapter = MoodleTokenAdapter(mock_client)
+
+                with patch("builtins.print") as mock_print:
+                    token = adapter.fetch_token("jdoe", "bad")
+
+                self.assertIsNone(token)
+                printed = " ".join(
+                    str(call.args[0]) for call in mock_print.call_args_list
+                )
+                self.assertIn("[!]", printed)
+
+    def test_fetch_token_propagates_client_http_error(self):
+        mock_client = MagicMock(spec=MoodleTokenClient)
+        mock_client.request_token.side_effect = requests.HTTPError("500 Server Error")
+        adapter = MoodleTokenAdapter(mock_client)
+
+        with self.assertRaises(requests.HTTPError):
+            adapter.fetch_token("jdoe", "pw")
 
 
 if __name__ == "__main__":

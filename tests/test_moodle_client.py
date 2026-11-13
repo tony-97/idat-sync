@@ -4,9 +4,9 @@ from unittest.mock import MagicMock, patch
 import requests
 
 from idat_sync.infrastructure.moodle_client import (
-    RQ_HEADER,
+    REQUEST_HEADER,
     MoodleClient,
-    MoodleTokenAdapter,
+    MoodleTokenClient,
 )
 
 
@@ -129,7 +129,7 @@ class TestMoodleClient(unittest.TestCase):
             stream=True,
             allow_redirects=True,
             timeout=60,
-            headers=RQ_HEADER,
+            headers=REQUEST_HEADER,
         )
         mock_response.raise_for_status.assert_called_once_with()
         mock_response.iter_content.assert_called_once_with(chunk_size=1024 * 256)
@@ -166,21 +166,23 @@ class TestMoodleClient(unittest.TestCase):
         mock_sleep.assert_not_called()
 
 
-class TestMoodleTokenAdapter(unittest.TestCase):
-    def test_requires_base_url(self):
+class TestMoodleTokenClient(unittest.TestCase):
+    def test_requires_base_url_and_rejects_request_delay(self):
         with self.assertRaises(TypeError):
-            MoodleTokenAdapter()  # type: ignore[call-arg]
+            MoodleTokenClient()  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            MoodleTokenClient("https://lms.example.edu", request_delay=1.0)  # type: ignore[call-arg]
 
     @patch("idat_sync.infrastructure.moodle_client.requests.post")
-    def test_fetch_token_posts_mobile_service_with_rq_header(self, mock_post):
+    def test_request_token_posts_mobile_service_with_request_header(self, mock_post):
         mock_response = MagicMock()
         mock_response.json.return_value = {"token": "tok123"}
         mock_post.return_value = mock_response
 
-        adapter = MoodleTokenAdapter(base_url="https://lms.example.edu/")
-        token = adapter.fetch_token("jdoe", "pw")
+        client = MoodleTokenClient(base_url="https://lms.example.edu/")
+        payload = client.request_token("jdoe", "pw")
 
-        self.assertEqual(token, "tok123")
+        self.assertEqual(payload, {"token": "tok123"})
         mock_post.assert_called_once_with(
             "https://lms.example.edu/login/token.php",
             data={
@@ -189,33 +191,19 @@ class TestMoodleTokenAdapter(unittest.TestCase):
                 "service": "moodle_mobile_app",
             },
             timeout=120,
-            headers=RQ_HEADER,
+            headers=REQUEST_HEADER,
         )
         mock_response.raise_for_status.assert_called_once_with()
 
     @patch("idat_sync.infrastructure.moodle_client.requests.post")
-    def test_fetch_token_returns_none_and_prints_diagnostic_on_error_payload(self, mock_post):
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"error": "Invalid login"}
-        mock_post.return_value = mock_response
-
-        adapter = MoodleTokenAdapter(base_url="https://lms.example.edu")
-        with patch("builtins.print") as mock_print:
-            token = adapter.fetch_token("jdoe", "bad")
-
-        self.assertIsNone(token)
-        printed = " ".join(str(call.args[0]) for call in mock_print.call_args_list)
-        self.assertIn("[!]", printed)
-
-    @patch("idat_sync.infrastructure.moodle_client.requests.post")
-    def test_fetch_token_propagates_http_error(self, mock_post):
+    def test_request_token_propagates_http_error(self, mock_post):
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
         mock_post.return_value = mock_response
 
-        adapter = MoodleTokenAdapter(base_url="https://lms.example.edu")
+        client = MoodleTokenClient(base_url="https://lms.example.edu")
         with self.assertRaises(requests.HTTPError):
-            adapter.fetch_token("jdoe", "pw")
+            client.request_token("jdoe", "pw")
 
 
 if __name__ == "__main__":

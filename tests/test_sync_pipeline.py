@@ -1,3 +1,5 @@
+import ast
+import inspect
 from pathlib import Path
 import tempfile
 import os
@@ -21,6 +23,22 @@ from idat_sync.infrastructure.downloaders import (
     SharepointDownloader,
     StringDownloader,
 )
+
+
+def _iter_module_imports(py_file: Path) -> list[tuple[int, str]]:
+    """Return (lineno, module_name) pairs from AST Import and ImportFrom nodes."""
+    tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+    imports: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend((node.lineno, alias.name) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append((node.lineno, node.module))
+    return imports
+
+
+def _matches_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
+    return any(name == p or name.startswith(f"{p}.") for p in prefixes)
 
 
 class TestSyncPipeline(unittest.TestCase):
@@ -318,8 +336,6 @@ class TestSyncPipeline(unittest.TestCase):
         mock_fs.ensure_dir.assert_any_call(Path("root_folder") / "Algorithms")
 
     def test_hexagonal_architecture_import_boundaries_ast(self):
-        import ast
-
         disallowed_prefixes = (
             "idat_sync.config",
             "idat_sync.infrastructure",
@@ -334,21 +350,13 @@ class TestSyncPipeline(unittest.TestCase):
         src_root = project_root / "src" / "idat_sync"
         target_dirs = [src_root / "domain", src_root / "application"]
 
-        violations: list[str] = []
-        for target_dir in target_dirs:
-            for py_file in target_dir.rglob("*.py"):
-                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-                for node in ast.walk(tree):
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
-                            for dis in disallowed_prefixes:
-                                if alias.name == dis or alias.name.startswith(dis + "."):
-                                    violations.append(f"{py_file.name}:{node.lineno} imports {alias.name}")
-                    elif isinstance(node, ast.ImportFrom):
-                        module_name = node.module or ""
-                        for dis in disallowed_prefixes:
-                            if module_name == dis or module_name.startswith(dis + "."):
-                                violations.append(f"{py_file.name}:{node.lineno} imports from {module_name}")
+        violations = [
+            f"{py_file.name}:{lineno} imports {name}"
+            for target_dir in target_dirs
+            for py_file in target_dir.rglob("*.py")
+            for lineno, name in _iter_module_imports(py_file)
+            if _matches_prefix(name, disallowed_prefixes)
+        ]
 
         self.assertEqual(
             violations,
@@ -365,19 +373,11 @@ class TestSyncPipeline(unittest.TestCase):
         playwright_importers: set[str] = set()
         for py_file in src_root.rglob("*.py"):
             rel_path = py_file.relative_to(src_root).as_posix()
-            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    names = [node.module]
-                else:
-                    continue
-                for name in names:
-                    if name == "idat_sync.utils" or name.startswith("idat_sync.utils."):
-                        utils_imports.append(f"{rel_path}:{node.lineno} imports {name}")
-                    if name == "playwright" or name.startswith("playwright."):
-                        playwright_importers.add(rel_path)
+            for lineno, name in _iter_module_imports(py_file):
+                if _matches_prefix(name, ("idat_sync.utils",)):
+                    utils_imports.append(f"{rel_path}:{lineno} imports {name}")
+                if _matches_prefix(name, ("playwright",)):
+                    playwright_importers.add(rel_path)
 
         self.assertEqual(
             utils_imports,
@@ -406,6 +406,7 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertNotIn("requests", downloader_imports)
         self.assertNotIn("time", downloader_imports)
         self.assertNotIn("RQ_HEADER", downloader_imports)
+        self.assertNotIn("REQUEST_HEADER", downloader_imports)
 
     def test_download_manager_requires_filesystem_port(self):
         with self.assertRaises(TypeError):
@@ -587,8 +588,6 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertEqual(rec_dl.sharepoint_personal_host, "contoso-my.sharepoint.com")
 
     def test_create_auth_service_wires_sync_config_and_ui_avoids_infrastructure(self):
-        import ast
-        import inspect
         from idat_sync.application.auth_service import AuthService
         from idat_sync.bootstrap import create_auth_service
         from idat_sync.config import SyncConfig
@@ -596,7 +595,8 @@ class TestSyncPipeline(unittest.TestCase):
             JsonCredentialStore,
             SharepointBrowserAuth,
         )
-        from idat_sync.infrastructure.moodle_client import MoodleTokenAdapter
+        from idat_sync.infrastructure.moodle_adapter import MoodleTokenAdapter
+        from idat_sync.infrastructure.moodle_client import MoodleTokenClient
         from idat_sync.ui.app import MainApp
         from idat_sync.ui.login_frame import LoginFrame
         from idat_sync.ui.sync_frame import SyncFrame
@@ -614,7 +614,10 @@ class TestSyncPipeline(unittest.TestCase):
 
         self.assertIsInstance(auth_service, AuthService)
         self.assertIsInstance(auth_service.moodle_auth, MoodleTokenAdapter)
-        self.assertEqual(auth_service.moodle_auth.base_url, "https://lms.example.edu")
+        self.assertIsInstance(auth_service.moodle_auth.client, MoodleTokenClient)
+        self.assertEqual(
+            auth_service.moodle_auth.client.base_url, "https://lms.example.edu"
+        )
         self.assertIsInstance(auth_service.sharepoint_auth, SharepointBrowserAuth)
         self.assertEqual(
             auth_service.sharepoint_auth.sharepoint_host, "contoso.sharepoint.com"
@@ -632,25 +635,12 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertIn("auth", inspect.signature(LoginFrame.__init__).parameters)
 
         ui_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync" / "ui"
-        ui_violations: list[str] = []
-        for py_file in ui_root.rglob("*.py"):
-            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name == "idat_sync.infrastructure" or alias.name.startswith(
-                            "idat_sync.infrastructure."
-                        ):
-                            ui_violations.append(
-                                f"{py_file.name}:{node.lineno} imports {alias.name}"
-                            )
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module == "idat_sync.infrastructure" or node.module.startswith(
-                        "idat_sync.infrastructure."
-                    ):
-                        ui_violations.append(
-                            f"{py_file.name}:{node.lineno} imports from {node.module}"
-                        )
+        ui_violations = [
+            f"{py_file.name}:{lineno} imports {name}"
+            for py_file in ui_root.rglob("*.py")
+            for lineno, name in _iter_module_imports(py_file)
+            if _matches_prefix(name, ("idat_sync.infrastructure",))
+        ]
 
         self.assertEqual(
             ui_violations,

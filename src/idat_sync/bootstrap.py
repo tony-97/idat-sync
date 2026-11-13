@@ -13,8 +13,8 @@ from idat_sync.infrastructure.downloaders import (
     StringDownloader,
 )
 from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
-from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
-from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenAdapter
+from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
+from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
@@ -92,7 +92,7 @@ def create_sync_service(
 
 def create_auth_service(config: SyncConfig) -> AuthService:
     return AuthService(
-        moodle_auth=MoodleTokenAdapter(config.moodle_base_url),
+        moodle_auth=MoodleTokenAdapter(MoodleTokenClient(config.moodle_base_url)),
         sharepoint_auth=SharepointBrowserAuth(
             sharepoint_host=config.sharepoint_host,
             sharepoint_personal_host=config.sharepoint_personal_host,

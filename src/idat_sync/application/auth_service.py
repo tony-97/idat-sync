@@ -36,7 +36,7 @@ class AuthService:
                 self.moodle_auth.fetch_token, clean_username, password
             ),
             self.sharepoint_auth.fetch_storage_state(
-                clean_username, password, get_mfa_code
+                username, password, get_mfa_code
             ),
         )
         if sharepoint_storage_state is None or not token:

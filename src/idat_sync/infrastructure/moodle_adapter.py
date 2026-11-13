@@ -9,7 +9,26 @@ from idat_sync.domain.course import (
     CourseSection,
     ModuleContent,
 )
-from idat_sync.infrastructure.moodle_client import MoodleClient
+from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
+
+
+class MoodleTokenAdapter:
+    """Adapter implementing MoodleTokenPort over MoodleTokenClient."""
+
+    def __init__(self, client: MoodleTokenClient) -> None:
+        self.client = client
+
+    def fetch_token(self, username: str, password: str) -> str | None:
+        login = self.client.request_token(username, password)
+        if "error" in login:
+            print(f"[!] Token error: {login.get('error')}")
+        token = login.get("token")
+        if not token:
+            print(
+                "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
+            )
+            return None
+        return token
 
 
 class MoodleAdapter:

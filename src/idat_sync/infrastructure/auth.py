@@ -35,63 +35,71 @@ class SharepointBrowserAuth:
         elif os_name == "Darwin":
             channel = "webkit"
 
+        login_email = (
+            username if "@" in username else f"{username}@{self.email_domain}"
+        )
         storage_state: StorageStateData | None = None
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, channel=channel)
-            context = await browser.new_context(**p.devices["Galaxy A55 landscape"])
-            try:
-                timeout = 60000 * 3
-                page = await context.new_page()
-                await page.goto(site_url)
-                await page.wait_for_load_state("networkidle", timeout=timeout)
-                await page.wait_for_url(
-                    "https://login.microsoftonline.com/**",
-                    timeout=timeout,
-                )
-                await page.wait_for_load_state("networkidle", timeout=timeout)
-                await page.fill(
-                    "#i0116", f"{username}@{self.email_domain}", force=True
-                )
-                await page.click("#idSIButton9")
+        try:
+            async with async_playwright() as p:
+                browser = None
+                context = None
+                try:
+                    browser = await p.chromium.launch(headless=True, channel=channel)
+                    context = await browser.new_context(
+                        **p.devices["Galaxy A55 landscape"]
+                    )
+                    timeout = 60000 * 3
+                    page = await context.new_page()
+                    await page.goto(site_url)
+                    await page.wait_for_load_state("networkidle", timeout=timeout)
+                    await page.wait_for_url(
+                        "https://login.microsoftonline.com/**",
+                        timeout=timeout,
+                    )
+                    await page.wait_for_load_state("networkidle", timeout=timeout)
+                    await page.fill("#i0116", login_email, force=True)
+                    await page.click("#idSIButton9")
 
-                await page.fill("#i0118", password)
-                await page.click("#idSIButton9")
-                await page.wait_for_url(
-                    "https://login.microsoftonline.com/*/login",
-                    timeout=timeout,
-                )
-                await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(1)")
-                mfa_code = await get_mfa_code()
-                await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
-                await page.click("#idChkBx_SAOTCC_TD")
-                await page.click("#idSubmit_SAOTCC_Continue")
+                    await page.fill("#i0118", password)
+                    await page.click("#idSIButton9")
+                    await page.wait_for_url(
+                        "https://login.microsoftonline.com/*/login",
+                        timeout=timeout,
+                    )
+                    await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(1)")
+                    mfa_code = await get_mfa_code()
+                    await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
+                    await page.click("#idChkBx_SAOTCC_TD")
+                    await page.click("#idSubmit_SAOTCC_Continue")
 
-                await page.wait_for_url(
-                    "https://login.microsoftonline.com/common/SAS/ProcessAuth",
-                    timeout=timeout,
-                )
-                await page.click("#KmsiCheckboxField")
-                await page.click("#idSIButton9")
-                await page.wait_for_url(
-                    site_url,
-                    timeout=timeout,
-                )
-                await page.wait_for_load_state("load", timeout=timeout)
-                await asyncio.sleep(3)
-                await page.goto(
-                    f"https://{self.sharepoint_personal_host}/shared",
-                )
-                await page.wait_for_load_state("load", timeout=timeout)
-                await asyncio.sleep(3)
-                storage_state = cast(
-                    StorageStateData, await context.storage_state()
-                )
-            except Exception:
-                storage_state = None
-            finally:
-                await context.close()
-                await browser.close()
-            return storage_state
+                    await page.wait_for_url(
+                        "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+                        timeout=timeout,
+                    )
+                    await page.click("#KmsiCheckboxField")
+                    await page.click("#idSIButton9")
+                    await page.wait_for_url(
+                        site_url,
+                        timeout=timeout,
+                    )
+                    await page.wait_for_load_state("load", timeout=timeout)
+                    await asyncio.sleep(3)
+                    await page.goto(
+                        f"https://{self.sharepoint_personal_host}/shared",
+                    )
+                    await page.wait_for_load_state("load", timeout=timeout)
+                    await asyncio.sleep(3)
+                    storage_state = cast(
+                        StorageStateData, await context.storage_state()
+                    )
+                finally:
+                    if context is not None:
+                        await context.close()
+                    if browser is not None:
+                        await browser.close()
+        except Exception:
+            storage_state = None
+        return storage_state
 
 
 class JsonCredentialStore:
@@ -101,8 +109,6 @@ class JsonCredentialStore:
         self.session_file = Path(session_file)
 
     def load(self) -> Credentials | None:
-        if not self.session_file.exists():
-            return None
         try:
             with open(self.session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -128,7 +134,7 @@ class JsonCredentialStore:
                 json.dump(credentials, f)
             return True
         except OSError as e:
-            print(f"Error: Could not create session file: {e}")
+            print(f"Error: Could not create credentials file: {e}")
             return False
 
     def clear(self) -> None:
@@ -137,6 +143,6 @@ class JsonCredentialStore:
                 self.session_file.unlink()
                 print("Success: User has been logged out.")
             else:
-                print("Info: Already logged out (no session file found).")
+                print("Info: Already logged out (no credentials file found).")
         except OSError as e:
-            print(f"Error: Could not remove session file: {e}")
+            print(f"Error: Could not remove credentials file: {e}")

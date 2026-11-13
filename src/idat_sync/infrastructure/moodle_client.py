@@ -2,7 +2,7 @@ import time
 from typing import Any, BinaryIO
 import requests
 
-RQ_HEADER = {
+REQUEST_HEADER = {
     "User-Agent": (
         "Mozilla/5.0 (Linux; Android 7.1.1; Moto G Play Build/NPIS26.48-43-2; wv) AppleWebKit/537.36"
         + " (KHTML, like Gecko) Version/4.0 Chrome/71.0.3578.99 Mobile Safari/537.36 MoodleMobile"
@@ -11,13 +11,13 @@ RQ_HEADER = {
 }
 
 
-class MoodleTokenAdapter:
-    """HTTP adapter for obtaining Moodle mobile authentication tokens."""
+class MoodleTokenClient:
+    """Low-level HTTP client for obtaining raw Moodle mobile login payloads."""
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
 
-    def fetch_token(self, username: str, password: str) -> str | None:
+    def request_token(self, username: str, password: str) -> dict[str, Any]:
         payload = {
             "username": username,
             "password": password,
@@ -27,19 +27,10 @@ class MoodleTokenAdapter:
             f"{self.base_url}/login/token.php",
             data=payload,
             timeout=120,
-            headers=RQ_HEADER,
+            headers=REQUEST_HEADER,
         )
         response.raise_for_status()
-        login = response.json()
-        if "error" in login:
-            print(f"[!] Token error: {login.get('error')}")
-        token = login.get("token")
-        if not token:
-            print(
-                "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
-            )
-            return None
-        return token
+        return response.json()
 
 
 class MoodleClient:
@@ -115,7 +106,7 @@ class MoodleClient:
             stream=True,
             allow_redirects=True,
             timeout=60,
-            headers=RQ_HEADER,
+            headers=REQUEST_HEADER,
         ) as response:
             if response.status_code == 403:
                 raise RuntimeError(

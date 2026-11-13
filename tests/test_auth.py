@@ -2,11 +2,16 @@ import asyncio
 import inspect
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from idat_sync.application.auth_service import AuthService
-from idat_sync.application.ports import Credentials, StorageStateData
+from idat_sync.application.ports import (
+    Credentials,
+    SharepointAuthPort,
+    StorageStateData,
+)
 from idat_sync.infrastructure.auth import (
     JsonCredentialStore,
     SharepointBrowserAuth,
@@ -64,7 +69,7 @@ async def _mfa_code() -> str:
 
 
 class TestAuthService(unittest.TestCase):
-    def test_login_strips_email_domain_runs_concurrently_and_saves_credentials(self):
+    def test_login_strips_domain_for_moodle_passes_full_username_to_sharepoint_and_saves(self):
         expected_state: StorageStateData = {
             "cookies": [{"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}]
         }
@@ -77,15 +82,57 @@ class TestAuthService(unittest.TestCase):
             credential_store=store,
         )
 
-        ok = asyncio.run(service.login("jdoe@idat.pe", "secret", _mfa_code))
+        ok = asyncio.run(service.login("jdoe@custom.edu", "secret", _mfa_code))
 
         self.assertTrue(ok)
         self.assertEqual(moodle.calls, [("jdoe", "secret")])
-        self.assertEqual(sharepoint.calls, [("jdoe", "secret", "123456")])
+        self.assertEqual(sharepoint.calls, [("jdoe@custom.edu", "secret", "123456")])
         self.assertEqual(
             store.stored,
             {"token": "tok-abc", "sharepoint_storage_state": expected_state},
         )
+
+    def test_login_runs_providers_concurrently_and_offloads_blocking_calls_to_threads(self):
+        main_thread_id = threading.get_ident()
+        sp_started = threading.Event()
+        fetch_token_threads: list[int] = []
+        save_threads: list[int] = []
+
+        class ConcurrentMoodlePort:
+            def fetch_token(self, username: str, password: str) -> str | None:
+                fetch_token_threads.append(threading.get_ident())
+                if not sp_started.wait(timeout=2.0):
+                    raise TimeoutError("SharePoint login did not start concurrently")
+                return "tok-concurrent"
+
+        class ConcurrentSharepointPort:
+            async def fetch_storage_state(
+                self, username: str, password: str, get_mfa_code
+            ) -> StorageStateData | None:
+                await asyncio.sleep(0)
+                sp_started.set()
+                await get_mfa_code()
+                return {"cookies": []}
+
+        class ThreadCheckingStore(InMemoryCredentialStore):
+            def save(self, credentials: Credentials) -> bool:
+                save_threads.append(threading.get_ident())
+                return super().save(credentials)
+
+        store = ThreadCheckingStore()
+        service = AuthService(
+            moodle_auth=ConcurrentMoodlePort(),
+            sharepoint_auth=ConcurrentSharepointPort(),
+            credential_store=store,
+        )
+
+        ok = asyncio.run(service.login("jdoe@idat.pe", "secret", _mfa_code))
+
+        self.assertTrue(ok)
+        self.assertEqual(len(fetch_token_threads), 1)
+        self.assertNotEqual(fetch_token_threads[0], main_thread_id)
+        self.assertEqual(len(save_threads), 1)
+        self.assertNotEqual(save_threads[0], main_thread_id)
 
     def test_login_returns_false_without_saving_when_either_provider_fails(self):
         state: StorageStateData = {"cookies": []}
@@ -132,21 +179,27 @@ class TestAuthService(unittest.TestCase):
         self.assertIsNone(service.get_credentials())
 
     def test_login_omits_login_flow_ended_parameter(self):
-        sig = inspect.signature(AuthService.login)
-        self.assertNotIn("login_flow_ended", sig.parameters)
-        self.assertEqual(
-            list(sig.parameters), ["self", "username", "password", "get_mfa_code"]
-        )
+        for fn in (AuthService.login, SharepointAuthPort.fetch_storage_state):
+            sig = inspect.signature(fn)
+            self.assertNotIn("login_flow_ended", sig.parameters)
+            self.assertEqual(
+                list(sig.parameters), ["self", "username", "password", "get_mfa_code"]
+            )
 
 
 class TestJsonCredentialStore(unittest.TestCase):
     def test_save_creates_parent_dir_load_roundtrips_and_clear_deletes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            session_path = Path(tmpdir) / "nested" / "session.json"
-            store = JsonCredentialStore(session_path)
+            credentials_path = Path(tmpdir) / "nested" / "credentials.json"
+            store = JsonCredentialStore(credentials_path)
 
             self.assertIsNone(store.load())
-            store.clear()  # No-op when absent
+            with patch("builtins.print") as mock_print:
+                store.clear()  # No-op when absent
+            self.assertIn(
+                "credentials file",
+                " ".join(str(call.args[0]) for call in mock_print.call_args_list),
+            )
 
             creds: Credentials = {
                 "token": "tok123",
@@ -157,14 +210,14 @@ class TestJsonCredentialStore(unittest.TestCase):
                 },
             }
             self.assertTrue(store.save(creds))
-            self.assertTrue(session_path.exists())
+            self.assertTrue(credentials_path.exists())
             self.assertEqual(store.load(), creds)
 
             store.clear()
-            self.assertFalse(session_path.exists())
+            self.assertFalse(credentials_path.exists())
             self.assertIsNone(store.load())
 
-    def test_load_returns_none_for_corrupt_or_incomplete_files(self):
+    def test_load_returns_none_for_corrupt_unreadable_or_incomplete_files(self):
         bad_payloads = [
             "{not valid json",
             "[]",
@@ -176,10 +229,23 @@ class TestJsonCredentialStore(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             for idx, payload in enumerate(bad_payloads):
-                session_path = Path(tmpdir) / f"bad_{idx}.json"
-                session_path.write_text(payload, encoding="utf-8")
+                credentials_path = Path(tmpdir) / f"bad_{idx}.json"
+                credentials_path.write_text(payload, encoding="utf-8")
                 with self.subTest(payload=payload):
-                    self.assertIsNone(JsonCredentialStore(session_path).load())
+                    self.assertIsNone(JsonCredentialStore(credentials_path).load())
+
+            # Unreadable directory/file and PermissionError (including Python 3.10-3.11 stat/exists)
+            self.assertIsNone(JsonCredentialStore(Path(tmpdir)).load())
+            valid_path = Path(tmpdir) / "valid.json"
+            valid_path.write_text(
+                '{"token": "tok", "sharepoint_storage_state": {"cookies": []}}',
+                encoding="utf-8",
+            )
+            with patch("builtins.open", side_effect=PermissionError("unreadable")):
+                self.assertIsNone(JsonCredentialStore(valid_path).load())
+            missing_path = Path(tmpdir) / "missing.json"
+            with patch.object(Path, "exists", side_effect=PermissionError("unreadable parent")):
+                self.assertIsNone(JsonCredentialStore(missing_path).load())
 
     def test_save_returns_false_on_os_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -188,7 +254,12 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
-            self.assertFalse(store.save(creds))
+            with patch("builtins.print") as mock_print:
+                self.assertFalse(store.save(creds))
+            self.assertIn(
+                "credentials file",
+                " ".join(str(call.args[0]) for call in mock_print.call_args_list),
+            )
 
 
 def _make_mock_playwright():
@@ -232,48 +303,85 @@ class TestSharepointBrowserAuth(unittest.TestCase):
         )
 
     def test_fetch_storage_state_runs_playwright_sso_and_mfa_flow(self):
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
         auth = SharepointBrowserAuth(
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
         )
 
-        with patch(
-            "idat_sync.infrastructure.auth.async_playwright",
-            return_value=mock_pw_cm,
-        ), patch("idat_sync.infrastructure.auth.asyncio.sleep", new=AsyncMock()):
-            state = asyncio.run(
-                auth.fetch_storage_state("jdoe", "pw", _mfa_code)
-            )
+        for input_user, expected_email in [
+            ("jdoe", "jdoe@example.edu"),
+            ("jdoe@other.edu", "jdoe@other.edu"),
+        ]:
+            with self.subTest(input_user=input_user):
+                mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+                with patch(
+                    "idat_sync.infrastructure.auth.async_playwright",
+                    return_value=mock_pw_cm,
+                ), patch("idat_sync.infrastructure.auth.asyncio.sleep", new=AsyncMock()):
+                    state = asyncio.run(
+                        auth.fetch_storage_state(input_user, "pw", _mfa_code)
+                    )
 
-        self.assertEqual(
-            state,
-            {"cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]},
-        )
-        goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
-        self.assertEqual(
-            goto_urls,
-            [
-                "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-                "https://contoso-my.sharepoint.com/shared",
-            ],
-        )
-        mock_page.fill.assert_any_call("#i0116", "jdoe@example.edu", force=True)
-        mock_page.fill.assert_any_call("#i0118", "pw")
-        mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
-        mock_context.close.assert_awaited_once()
-        mock_browser.close.assert_awaited_once()
+                self.assertEqual(
+                    state,
+                    {"cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]},
+                )
+                goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
+                self.assertEqual(
+                    goto_urls,
+                    [
+                        "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+                        "https://contoso-my.sharepoint.com/shared",
+                    ],
+                )
+                mock_page.fill.assert_any_call("#i0116", expected_email, force=True)
+                mock_page.fill.assert_any_call("#i0118", "pw")
+                mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
+                mock_context.close.assert_awaited_once()
+                mock_browser.close.assert_awaited_once()
 
     def test_fetch_storage_state_returns_none_on_exception_and_propagates_cancelled(self):
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-        mock_page.goto = AsyncMock(side_effect=RuntimeError("network timeout"))
         auth = SharepointBrowserAuth(
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
         )
 
+        # Startup failure in async_playwright().__aenter__
+        mock_pw_cm_start, _, _, _ = _make_mock_playwright()
+        mock_pw_cm_start.__aenter__ = AsyncMock(side_effect=RuntimeError("driver failed"))
+        with patch(
+            "idat_sync.infrastructure.auth.async_playwright",
+            return_value=mock_pw_cm_start,
+        ):
+            self.assertIsNone(asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code)))
+
+        # Launch failure
+        mock_pw_cm_launch, mock_browser_launch, _, _ = _make_mock_playwright()
+        mock_pw_launch = mock_pw_cm_launch.__aenter__.return_value
+        mock_pw_launch.chromium.launch = AsyncMock(side_effect=RuntimeError("launch failed"))
+        with patch(
+            "idat_sync.infrastructure.auth.async_playwright",
+            return_value=mock_pw_cm_launch,
+        ):
+            self.assertIsNone(asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code)))
+        mock_browser_launch.close.assert_not_awaited()
+
+        # Context creation failure must still close launched browser
+        mock_pw_cm_ctx, mock_browser_ctx, mock_context_ctx, _ = _make_mock_playwright()
+        mock_browser_ctx.new_context = AsyncMock(side_effect=RuntimeError("context failed"))
+        with patch(
+            "idat_sync.infrastructure.auth.async_playwright",
+            return_value=mock_pw_cm_ctx,
+        ):
+            self.assertIsNone(asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code)))
+        mock_context_ctx.close.assert_not_awaited()
+        mock_browser_ctx.close.assert_awaited_once()
+
+        # Page navigation failure closes context and browser
+        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+        mock_page.goto = AsyncMock(side_effect=RuntimeError("network timeout"))
         with patch(
             "idat_sync.infrastructure.auth.async_playwright",
             return_value=mock_pw_cm,
@@ -284,6 +392,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
         mock_context.close.assert_awaited_once()
         mock_browser.close.assert_awaited_once()
 
+        # Cancellation closes context and browser and propagates CancelledError
         mock_pw_cm2, mock_browser2, mock_context2, mock_page2 = _make_mock_playwright()
         mock_page2.goto = AsyncMock(side_effect=asyncio.CancelledError())
         with patch(
