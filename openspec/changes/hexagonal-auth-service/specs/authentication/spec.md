@@ -22,36 +22,36 @@ Authenticates users against Moodle and SharePoint/Microsoft SSO, orchestrates co
 - **THEN** neither accepts `login_flow_ended`
 
 ### Requirement: Moodle token retrieval in MoodleTokenClient and MoodleTokenAdapter
-`MoodleTokenClient(base_url: str)` in `src/idat_sync/infrastructure/moodle_client.py` SHALL normalize trailing slashes, own `REQUEST_HEADER`, and expose `request_token(username, password) -> dict[str, Any]` without `request_delay`, POSTing to `{base_url}/login/token.php` with `service="moodle_mobile_app"`, `REQUEST_HEADER`, and `timeout=120`, calling `raise_for_status()`, and returning the raw vendor JSON payload. `MoodleTokenAdapter(client: MoodleTokenClient)` in `src/idat_sync/infrastructure/moodle_adapter.py` SHALL implement `MoodleTokenPort` without `base_url`, delegate to `client.request_token(username, password)`, print `[!]` diagnostics when `"error"` is present or `"token"` is absent, and return `str | None`. Verified at the `MoodleTokenClient` and `MoodleTokenAdapter` seams.
+`MoodleTokenClient(base_url: str)` in `src/idat_sync/infrastructure/moodle_client.py` SHALL normalize trailing slashes, own `REQUEST_HEADER`, and expose `request_token(username, password) -> dict[str, Any]` without `request_delay`, POSTing to `{base_url}/login/token.php` with `service="moodle_mobile_app"`, `REQUEST_HEADER`, and `timeout=120`, calling `raise_for_status()`, and returning the raw vendor JSON payload. `MoodleTokenAdapter(client: MoodleTokenClient)` in `src/idat_sync/infrastructure/moodle_adapter.py` SHALL implement `MoodleTokenPort` without `base_url`, delegate to `client.request_token(username, password)`, print `[!]` and return `None` immediately when `"error"` is present (even if `"token"` is also present), otherwise require a non-empty `str` `"token"` (printing `[!]` and returning `None` when missing, empty, or non-`str`). Verified at the `MoodleTokenClient` and `MoodleTokenAdapter` seams.
 
 #### Scenario: Fetching a Moodle mobile token with injected base URL
 - **WHEN** `MoodleTokenClient("https://lms.example.edu/").request_token("jdoe", "pw")` receives `{"token": "tok123"}` and is wrapped by `MoodleTokenAdapter`
 - **THEN** `MoodleTokenClient` posts `{"username": "jdoe", "password": "pw", "service": "moodle_mobile_app"}` to `"https://lms.example.edu/login/token.php"` with `headers=REQUEST_HEADER` and `timeout=120`, calls `raise_for_status()`, returns the raw dict, and `MoodleTokenAdapter.fetch_token("jdoe", "pw")` returns `"tok123"`
 
-#### Scenario: Returning None on Moodle error or missing token and propagating HTTP errors
-- **WHEN** `MoodleTokenClient.request_token` returns `{"error": "Invalid login"}` or `{}` (missing `"token"`), or `/login/token.php` returns HTTP 500
-- **THEN** `MoodleTokenAdapter.fetch_token` prints `[!]` and returns `None` for the error or missing-token payload, and `requests.HTTPError` from `raise_for_status()` propagates on HTTP failure
+#### Scenario: Returning None on Moodle error or missing/invalid token and propagating HTTP errors
+- **WHEN** `MoodleTokenClient.request_token` returns `{"error": "Invalid login"}`, `{"error": "Invalid login", "token": "ignored"}`, `{}`, `{"token": ""}`, or `{"token": 123}`, or `/login/token.php` returns HTTP 500
+- **THEN** `MoodleTokenAdapter.fetch_token` prints `[!]` and returns `None` for any error or missing/empty/non-`str` token payload, and `requests.HTTPError` from `raise_for_status()` propagates on HTTP failure
 
 ### Requirement: Browser-based SharePoint SSO and MFA capture
-`SharepointBrowserAuth` in `src/idat_sync/infrastructure/auth.py` SHALL accept `(sharepoint_host: str, sharepoint_personal_host: str, email_domain: str)` without defaults. `fetch_storage_state(username, password, get_mfa_code)` SHALL drive `async_playwright` through SharePoint, Microsoft SSO, and MFA, fill `#i0116` with `username` verbatim when `"@"` is present or `f"{username}@{email_domain}"` when `"@"` is absent, wrap `async_playwright()` startup, `launch()`, `new_context()`, and page actions inside `try ... except Exception:` returning `None` while cleaning up any created `context`/`browser` in `finally` without swallowing `asyncio.CancelledError`, and return `StorageStateData | None`. Verified at the `SharepointBrowserAuth` seam.
+`SharepointBrowserAuth` in `src/idat_sync/infrastructure/sharepoint_auth.py` SHALL accept `(sharepoint_host: str, sharepoint_personal_host: str, email_domain: str)` without defaults. `fetch_storage_state(username, password, get_mfa_code)` SHALL drive `async_playwright` through SharePoint, Microsoft SSO, and MFA, fill `#i0116` with `username` verbatim when `"@"` is present or `f"{username}@{email_domain}"` when `"@"` is absent, wrap `async_playwright()` startup, `launch()`, `new_context()`, and page actions inside `try ... except Exception:` returning `None` while cleaning up any created `context` and `browser` in nested `try ... finally:` (so `browser.close()` runs even if `context.close()` raises) without swallowing `asyncio.CancelledError`, and return `StorageStateData | None`. Verified at the `SharepointBrowserAuth` seam.
 
 #### Scenario: Completing Playwright SharePoint SSO and MFA flow
 - **WHEN** `SharepointBrowserAuth(...).fetch_storage_state("jdoe", "pw", get_mfa_code)` runs vs `fetch_storage_state("jdoe@other.edu", "pw", get_mfa_code)`
 - **THEN** it visits `https://{sharepoint_host}/_layouts/15/sharepoint.aspx`, fills `"jdoe@{email_domain}"` when `"@"` is absent or `"jdoe@other.edu"` verbatim when `"@"` is present, fills password, submits the code from `await get_mfa_code()`, visits `https://{sharepoint_personal_host}/shared`, and returns `await context.storage_state()`
 
-#### Scenario: Swallowing browser startup and runtime exceptions while preserving cancellation
-- **WHEN** `async_playwright()`, `launch()`, `new_context()`, or page interactions raise a runtime `Exception` vs `asyncio.CancelledError`
-- **THEN** `fetch_storage_state` closes any created `context` and `browser`, returns `None` on `Exception`, and propagates `asyncio.CancelledError`
+#### Scenario: Swallowing browser startup and runtime exceptions while preserving cleanup and cancellation
+- **WHEN** `async_playwright()`, `launch()`, `new_context()`, `context.close()`, or page interactions raise a runtime `Exception` vs `asyncio.CancelledError`
+- **THEN** `fetch_storage_state` closes any created `context` and still closes any created `browser` even if `context.close()` raises, returns `None` on `Exception`, and propagates `asyncio.CancelledError`
 
 ### Requirement: JSON credential persistence and corrupt-file safety
-`JsonCredentialStore` in `src/idat_sync/infrastructure/auth.py` SHALL accept `session_file: str | Path` and log `"credentials file"` in status/error messages. `save(credentials)` SHALL ensure `Path(session_file).parent` exists and write JSON returning `bool`; `load()` SHALL open `session_file` directly inside `try:` (without a pre-`try` `.exists()` check) and return `None` when the file is missing, unreadable, invalid JSON, or missing valid non-empty `token` (`str`) and `sharepoint_storage_state` (`dict`); `clear()` SHALL remove the file if present. Verified at the `JsonCredentialStore` seam.
+`JsonCredentialStore` in `src/idat_sync/infrastructure/credential_store.py` SHALL accept `credentials_file: str | Path` (storing `self.credentials_file`) and log `"credentials file"` in status/error messages. `save(credentials)` SHALL ensure `Path(credentials_file).parent` exists and write JSON returning `bool`; `load()` SHALL open `credentials_file` directly inside `try:` (without a pre-`try` `.exists()` check) and return `None` when the file is missing, unreadable, invalid JSON, or missing valid non-empty `token` (`str`) and `sharepoint_storage_state` (`dict`); `clear()` SHALL remove the file if present. Verified at the `JsonCredentialStore` seam.
 
 #### Scenario: Saving, loading, and clearing valid Credentials on disk
 - **WHEN** `JsonCredentialStore(path)` saves valid `Credentials`, calls `load()`, and calls `clear()`
 - **THEN** `save` creates parent directories and returns `True`, `load()` returns the matching `Credentials`, and `clear()` deletes the file so subsequent `load()` returns `None`
 
 #### Scenario: Returning None for corrupt, unreadable, or incomplete credential files
-- **WHEN** `session_file` is unreadable (`OSError`/`PermissionError`), contains invalid JSON, `"{}"`, or an empty/non-string `"token"` or non-dict `"sharepoint_storage_state"`
+- **WHEN** `credentials_file` is unreadable (`OSError`/`PermissionError`), contains invalid JSON, `"{}"`, or an empty/non-string `"token"` or non-dict `"sharepoint_storage_state"`
 - **THEN** `JsonCredentialStore.load()` catches `(OSError, json.JSONDecodeError)` and returns `None` without raising
 
 ### Requirement: Composition root wiring and UI decoupling for authentication

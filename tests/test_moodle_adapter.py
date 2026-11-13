@@ -252,7 +252,13 @@ class TestMoodleTokenAdapter(unittest.TestCase):
         mock_client.request_token.assert_called_once_with("jdoe", "pw")
 
     def test_fetch_token_returns_none_and_prints_diagnostic_on_error_or_missing_token(self):
-        for payload in [{"error": "Invalid login"}, {}, {"token": ""}]:
+        for payload in [
+            {"error": "Invalid login"},
+            {"error": "Invalid login", "token": "ignored"},
+            {},
+            {"token": ""},
+            {"token": 123},
+        ]:
             with self.subTest(payload=payload):
                 mock_client = MagicMock(spec=MoodleTokenClient)
                 mock_client.request_token.return_value = payload

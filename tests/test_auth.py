@@ -12,10 +12,8 @@ from idat_sync.application.ports import (
     SharepointAuthPort,
     StorageStateData,
 )
-from idat_sync.infrastructure.auth import (
-    JsonCredentialStore,
-    SharepointBrowserAuth,
-)
+from idat_sync.infrastructure.credential_store import JsonCredentialStore
+from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 
 
 class FakeMoodleTokenPort:
@@ -191,7 +189,8 @@ class TestJsonCredentialStore(unittest.TestCase):
     def test_save_creates_parent_dir_load_roundtrips_and_clear_deletes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             credentials_path = Path(tmpdir) / "nested" / "credentials.json"
-            store = JsonCredentialStore(credentials_path)
+            store = JsonCredentialStore(credentials_file=credentials_path)
+            self.assertEqual(store.credentials_file, credentials_path)
 
             self.assertIsNone(store.load())
             with patch("builtins.print") as mock_print:
@@ -316,9 +315,12 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             with self.subTest(input_user=input_user):
                 mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
                 with patch(
-                    "idat_sync.infrastructure.auth.async_playwright",
+                    "idat_sync.infrastructure.sharepoint_auth.async_playwright",
                     return_value=mock_pw_cm,
-                ), patch("idat_sync.infrastructure.auth.asyncio.sleep", new=AsyncMock()):
+                ), patch(
+                    "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                    new=AsyncMock(),
+                ):
                     state = asyncio.run(
                         auth.fetch_storage_state(input_user, "pw", _mfa_code)
                     )
@@ -348,62 +350,89 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             email_domain="example.edu",
         )
 
+        def run_failure_case(
+            configure_mocks,
+            *,
+            expected_exception: type[BaseException] | None = None,
+            expect_context_close: bool = False,
+            expect_browser_close: bool = False,
+        ) -> None:
+            mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+            configure_mocks(mock_pw_cm, mock_browser, mock_context, mock_page)
+            with patch(
+                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
+                return_value=mock_pw_cm,
+            ), patch(
+                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                if expected_exception is not None:
+                    with self.assertRaises(expected_exception):
+                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+                else:
+                    self.assertIsNone(
+                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+                    )
+            if expect_context_close:
+                mock_context.close.assert_awaited_once()
+            else:
+                mock_context.close.assert_not_awaited()
+            if expect_browser_close:
+                mock_browser.close.assert_awaited_once()
+            else:
+                mock_browser.close.assert_not_awaited()
+
         # Startup failure in async_playwright().__aenter__
-        mock_pw_cm_start, _, _, _ = _make_mock_playwright()
-        mock_pw_cm_start.__aenter__ = AsyncMock(side_effect=RuntimeError("driver failed"))
-        with patch(
-            "idat_sync.infrastructure.auth.async_playwright",
-            return_value=mock_pw_cm_start,
-        ):
-            self.assertIsNone(asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code)))
+        run_failure_case(
+            lambda cm, _b, _c, _p: setattr(
+                cm, "__aenter__", AsyncMock(side_effect=RuntimeError("driver failed"))
+            ),
+        )
 
         # Launch failure
-        mock_pw_cm_launch, mock_browser_launch, _, _ = _make_mock_playwright()
-        mock_pw_launch = mock_pw_cm_launch.__aenter__.return_value
-        mock_pw_launch.chromium.launch = AsyncMock(side_effect=RuntimeError("launch failed"))
-        with patch(
-            "idat_sync.infrastructure.auth.async_playwright",
-            return_value=mock_pw_cm_launch,
-        ):
-            self.assertIsNone(asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code)))
-        mock_browser_launch.close.assert_not_awaited()
+        run_failure_case(
+            lambda cm, _b, _c, _p: setattr(
+                cm.__aenter__.return_value.chromium,
+                "launch",
+                AsyncMock(side_effect=RuntimeError("launch failed")),
+            ),
+        )
 
         # Context creation failure must still close launched browser
-        mock_pw_cm_ctx, mock_browser_ctx, mock_context_ctx, _ = _make_mock_playwright()
-        mock_browser_ctx.new_context = AsyncMock(side_effect=RuntimeError("context failed"))
-        with patch(
-            "idat_sync.infrastructure.auth.async_playwright",
-            return_value=mock_pw_cm_ctx,
-        ):
-            self.assertIsNone(asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code)))
-        mock_context_ctx.close.assert_not_awaited()
-        mock_browser_ctx.close.assert_awaited_once()
+        run_failure_case(
+            lambda _cm, b, _c, _p: setattr(
+                b, "new_context", AsyncMock(side_effect=RuntimeError("context failed"))
+            ),
+            expect_browser_close=True,
+        )
 
         # Page navigation failure closes context and browser
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-        mock_page.goto = AsyncMock(side_effect=RuntimeError("network timeout"))
-        with patch(
-            "idat_sync.infrastructure.auth.async_playwright",
-            return_value=mock_pw_cm,
-        ):
-            state = asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+        run_failure_case(
+            lambda _cm, _b, _c, p: setattr(
+                p, "goto", AsyncMock(side_effect=RuntimeError("network timeout"))
+            ),
+            expect_context_close=True,
+            expect_browser_close=True,
+        )
 
-        self.assertIsNone(state)
-        mock_context.close.assert_awaited_once()
-        mock_browser.close.assert_awaited_once()
+        # Context cleanup failure still closes browser
+        run_failure_case(
+            lambda _cm, _b, c, _p: setattr(
+                c, "close", AsyncMock(side_effect=RuntimeError("context close failed"))
+            ),
+            expect_context_close=True,
+            expect_browser_close=True,
+        )
 
         # Cancellation closes context and browser and propagates CancelledError
-        mock_pw_cm2, mock_browser2, mock_context2, mock_page2 = _make_mock_playwright()
-        mock_page2.goto = AsyncMock(side_effect=asyncio.CancelledError())
-        with patch(
-            "idat_sync.infrastructure.auth.async_playwright",
-            return_value=mock_pw_cm2,
-        ):
-            with self.assertRaises(asyncio.CancelledError):
-                asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-
-        mock_context2.close.assert_awaited_once()
-        mock_browser2.close.assert_awaited_once()
+        run_failure_case(
+            lambda _cm, _b, _c, p: setattr(
+                p, "goto", AsyncMock(side_effect=asyncio.CancelledError())
+            ),
+            expected_exception=asyncio.CancelledError,
+            expect_context_close=True,
+            expect_browser_close=True,
+        )
 
 
 if __name__ == "__main__":

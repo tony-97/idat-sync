@@ -5,7 +5,8 @@ from idat_sync.application.ports import Credentials, Downloader
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.config import SyncConfig
-from idat_sync.infrastructure.auth import JsonCredentialStore, SharepointBrowserAuth
+from idat_sync.infrastructure.credential_store import JsonCredentialStore
+from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.downloaders import (
     MoodleDownloader,
     RecordingDownloader,

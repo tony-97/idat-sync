@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Strict inward package dependency boundary
-The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have zero imports from `idat_sync.config`, `idat_sync.infrastructure`, `idat_sync.ui`, `requests`, `office365`, `yt_dlp`, or `playwright`. `src/idat_sync/ui/` MUST NOT import `idat_sync.infrastructure`, `src/idat_sync/infrastructure/auth.py` SHALL be the sole module importing `playwright`, `src/idat_sync/utils.py` MUST NOT exist, and `safe_filename` and `WINDOWS_RESERVED` SHALL reside in `src/idat_sync/domain/path_utils.py`. Verified at the architecture boundary and `domain.path_utils` seams.
+The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have zero imports from `idat_sync.config`, `idat_sync.infrastructure`, `idat_sync.ui`, `requests`, `office365`, `yt_dlp`, or `playwright`. `src/idat_sync/ui/` MUST NOT import `idat_sync.infrastructure`, `src/idat_sync/infrastructure/sharepoint_auth.py` SHALL be the sole module importing `playwright`, `src/idat_sync/infrastructure/auth.py` MUST NOT exist, `src/idat_sync/utils.py` MUST NOT exist, and `safe_filename` and `WINDOWS_RESERVED` SHALL reside in `src/idat_sync/domain/path_utils.py`. Verified at the architecture boundary and `domain.path_utils` seams.
 
 #### Scenario: Inspecting domain and application imports
 - **WHEN** all Python modules under `src/idat_sync/domain/` and `src/idat_sync/application/` are parsed for import statements
@@ -13,9 +13,9 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 - **WHEN** `safe_filename(s, replacement=" ", max_len=100)` in `src/idat_sync/domain/path_utils.py` is called with accents, forbidden characters, or Windows reserved names (`WINDOWS_RESERVED`)
 - **THEN** it returns the normalized, safe ASCII filename of at most `max_len` characters
 
-#### Scenario: Enforcing ui and playwright isolation and utils removal
-- **WHEN** all Python modules under `src/idat_sync/` are parsed for imports and `src/idat_sync/utils.py` is checked
-- **THEN** `src/idat_sync/utils.py` does not exist, no module imports `idat_sync.utils`, no module under `src/idat_sync/ui/` imports `idat_sync.infrastructure`, and `src/idat_sync/infrastructure/auth.py` is the only module importing `playwright`
+#### Scenario: Enforcing ui and playwright isolation and legacy auth/utils removal
+- **WHEN** all Python modules under `src/idat_sync/` are parsed for imports and `src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` are checked
+- **THEN** `src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` do not exist, no module imports `idat_sync.utils` or `idat_sync.infrastructure.auth`, no module under `src/idat_sync/ui/` imports `idat_sync.infrastructure`, and `src/idat_sync/infrastructure/sharepoint_auth.py` is the only module importing `playwright`
 
 ### Requirement: Configurable tenant endpoints and throttling across clients, adapters, and downloaders
 `MoodleClient`, `MoodleTokenClient`, `MoodleAdapter`, `SharepointClient`, `RecordingDownloader`, and `SharepointBrowserAuth` SHALL require injected tenant URL/host parameters without hardcoded defaults, and `MoodleClient` and `SharepointClient` SHALL require `request_delay` without hardcoded defaults as the sole owners of `time.sleep(self.request_delay)`. `MoodleTokenClient`, `MoodleDownloader`, `SharepointDownloader`, and `SharepointApiAdapter` MUST NOT accept `request_delay`. `src/idat_sync/infrastructure/downloaders.py` MUST NOT import `requests`, `REQUEST_HEADER`, `RQ_HEADER`, or `time`, `REQUEST_HEADER` SHALL reside in `src/idat_sync/infrastructure/moodle_client.py`, and `src/idat_sync/utils.py` MUST NOT exist. Verified at client, adapter, downloader, and AST seams.

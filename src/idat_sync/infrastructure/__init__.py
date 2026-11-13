@@ -1,4 +1,5 @@
-from idat_sync.infrastructure.auth import JsonCredentialStore, SharepointBrowserAuth
+from idat_sync.infrastructure.credential_store import JsonCredentialStore
+from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.downloaders import (
     DownloadTask,
     Downloader,

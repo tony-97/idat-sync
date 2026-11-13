@@ -368,26 +368,32 @@ class TestSyncPipeline(unittest.TestCase):
             (src_root / "utils.py").exists(),
             "src/idat_sync/utils.py should be deleted",
         )
+        self.assertFalse(
+            (src_root / "infrastructure" / "auth.py").exists(),
+            "src/idat_sync/infrastructure/auth.py should be deleted",
+        )
 
-        utils_imports: list[str] = []
+        legacy_imports: list[str] = []
         playwright_importers: set[str] = set()
         for py_file in src_root.rglob("*.py"):
             rel_path = py_file.relative_to(src_root).as_posix()
             for lineno, name in _iter_module_imports(py_file):
-                if _matches_prefix(name, ("idat_sync.utils",)):
-                    utils_imports.append(f"{rel_path}:{lineno} imports {name}")
+                if _matches_prefix(
+                    name, ("idat_sync.utils", "idat_sync.infrastructure.auth")
+                ):
+                    legacy_imports.append(f"{rel_path}:{lineno} imports {name}")
                 if _matches_prefix(name, ("playwright",)):
                     playwright_importers.add(rel_path)
 
         self.assertEqual(
-            utils_imports,
+            legacy_imports,
             [],
-            f"Found forbidden idat_sync.utils imports: {utils_imports}",
+            f"Found forbidden legacy imports: {legacy_imports}",
         )
         self.assertEqual(
             playwright_importers,
-            {"infrastructure/auth.py"},
-            f"Playwright imports must be confined to infrastructure/auth.py, got: {sorted(playwright_importers)}",
+            {"infrastructure/sharepoint_auth.py"},
+            f"Playwright imports must be confined to infrastructure/sharepoint_auth.py, got: {sorted(playwright_importers)}",
         )
 
         downloaders_path = src_root / "infrastructure" / "downloaders.py"
@@ -591,10 +597,8 @@ class TestSyncPipeline(unittest.TestCase):
         from idat_sync.application.auth_service import AuthService
         from idat_sync.bootstrap import create_auth_service
         from idat_sync.config import SyncConfig
-        from idat_sync.infrastructure.auth import (
-            JsonCredentialStore,
-            SharepointBrowserAuth,
-        )
+        from idat_sync.infrastructure.credential_store import JsonCredentialStore
+        from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
         from idat_sync.infrastructure.moodle_adapter import MoodleTokenAdapter
         from idat_sync.infrastructure.moodle_client import MoodleTokenClient
         from idat_sync.ui.app import MainApp
@@ -602,9 +606,9 @@ class TestSyncPipeline(unittest.TestCase):
         from idat_sync.ui.sync_frame import SyncFrame
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            session_path = Path(tmpdir) / "sess.json"
+            credentials_path = Path(tmpdir) / "credentials.json"
             custom_config = SyncConfig(
-                session_file=session_path,
+                session_file=credentials_path,
                 moodle_base_url="https://lms.example.edu/",
                 sharepoint_host="contoso.sharepoint.com",
                 sharepoint_personal_host="contoso-my.sharepoint.com",
@@ -628,7 +632,9 @@ class TestSyncPipeline(unittest.TestCase):
         )
         self.assertEqual(auth_service.sharepoint_auth.email_domain, "example.edu")
         self.assertIsInstance(auth_service.credential_store, JsonCredentialStore)
-        self.assertEqual(auth_service.credential_store.session_file, session_path)
+        self.assertEqual(
+            auth_service.credential_store.credentials_file, credentials_path
+        )
 
         self.assertIn("config", inspect.signature(MainApp.__init__).parameters)
         self.assertIn("config", inspect.signature(SyncFrame.__init__).parameters)
