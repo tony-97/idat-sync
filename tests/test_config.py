@@ -139,6 +139,7 @@ class TestLoadConfig(unittest.TestCase):
             '{"semester_start": "2026/03/16"}',
             '{"semester_start": "20260316"}',
             '{"semester_start": "2026-W11-1"}',
+            '{"semester_start": "2026-3-5"}',
             '{"semester_start": 20260316}',
         ]
         with tempfile.TemporaryDirectory() as tmpdir:

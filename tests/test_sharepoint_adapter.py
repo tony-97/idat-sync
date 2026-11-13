@@ -234,6 +234,39 @@ class TestSharepointAdapter(unittest.TestCase):
 
         self.assertEqual(client.sharepoint_cookies, {"rtFa": "exact"})
 
+    def test_list_url_content_matches_guest_urls_case_insensitively(self):
+        custom_adapter = SharepointApiAdapter(
+            client=self.mock_client,
+            semester_start=self.semester_start,
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            recordings_folder_name="Videos",
+            week_folder_prefix="Week",
+            request_delay=0.0,
+        )
+        mock_ctx = MagicMock()
+        mock_file = MagicMock()
+        mock_file.name = "slides.pdf"
+        mock_file.time_last_modified = None
+        mock_ctx.web.get_file_by_guest_url.return_value = mock_file
+        self.mock_client.get_client_from_url.return_value = mock_ctx
+
+        guest_url = "https://CONTOSO.SHAREPOINT.COM/:b:/s/Course/abc"
+        self.assertTrue(custom_adapter.can_handle(guest_url))
+        items = custom_adapter.list_url_content(guest_url, "slides.pdf", 100)
+
+        self.assertEqual(len(items), 1)
+        mock_ctx.web.get_file_by_guest_url.assert_called_once_with(guest_url)
+
+        mock_folder = MagicMock()
+        mock_folder.get_files.return_value.select.return_value.execute_query_retry.return_value = []
+        mock_folder.get_folders.return_value.execute_query_retry.return_value = []
+        mock_ctx.web.get_folder_by_guest_url.return_value = mock_folder
+
+        folder_url = "https://CONTOSO.SHAREPOINT.COM/:f:/s/Course/folder"
+        custom_adapter.list_url_content(folder_url, "folder", 100)
+        mock_ctx.web.get_folder_by_guest_url.assert_called_once_with(folder_url)
+
 
 if __name__ == "__main__":
     unittest.main()

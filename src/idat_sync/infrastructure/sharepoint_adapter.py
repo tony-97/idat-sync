@@ -87,9 +87,9 @@ class SharepointApiAdapter:
     def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[SharepointContent]:
-        if re.search(rf"https://{re.escape(self.sharepoint_host)}/:(\w+):", url):
+        if re.search(rf"https://{re.escape(self.sharepoint_host)}/:(\w+):", url, re.IGNORECASE):
             ctx: ClientContext = self.sp_client.get_client_from_url(url)
-            if url.startswith(f"https://{self.sharepoint_host}/:f:"):
+            if url.lower().startswith(f"https://{self.sharepoint_host}/:f:"):
                 folder: Folder = ctx.web.get_folder_by_guest_url(url)
                 self.sp_client.load_entity(folder, ctx)
                 return self.fetch_folder_contents(folder)

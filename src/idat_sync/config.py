@@ -4,6 +4,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePath
+import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -122,7 +123,10 @@ class SyncConfig:
 def _coerce_field(name: str, value: Any) -> Any:
     if name == "semester_start":
         if isinstance(value, str):
-            return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+            cleaned = value.strip()
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+                raise ValueError(f"semester_start must use YYYY-MM-DD format: {value!r}")
+            return date.fromisoformat(cleaned)
         if isinstance(value, date) and not isinstance(value, datetime):
             return value
         raise ValueError(f"semester_start must be an ISO YYYY-MM-DD date string: {value!r}")
