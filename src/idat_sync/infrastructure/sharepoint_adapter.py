@@ -2,12 +2,10 @@ from datetime import date
 import pathlib
 from pathlib import Path
 import re
-import time
 import urllib.parse
 from urllib.parse import quote, urlparse
 
 from office365.runtime.client_result import ClientResult
-from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
@@ -26,7 +24,6 @@ class SharepointApiAdapter:
         sharepoint_personal_host: str,
         recordings_folder_name: str,
         week_folder_prefix: str,
-        request_delay: float,
     ) -> None:
         self.sp_client = client
         self.semester_start = semester_start
@@ -34,10 +31,6 @@ class SharepointApiAdapter:
         self.sharepoint_personal_host = sharepoint_personal_host.lower()
         self.recordings_folder_name = recordings_folder_name
         self.week_folder_prefix = week_folder_prefix
-        self.request_delay = request_delay
-        self.properties_to_retrieve = self.sp_client.properties_to_retrieve
-        self.client = self.sp_client.client
-        self.search_client = self.sp_client.search_client
 
     def __find_recordings_site(
         self, course_name: str, search_result: ClientResult[SearchResult]
@@ -88,41 +81,26 @@ class SharepointApiAdapter:
         self, url: str, filename: str, last_modified: int
     ) -> list[SharepointContent]:
         if re.search(rf"https://{re.escape(self.sharepoint_host)}/:(\w+):", url, re.IGNORECASE):
-            ctx: ClientContext = self.sp_client.get_client_from_url(url)
             if url.lower().startswith(f"https://{self.sharepoint_host}/:f:"):
-                folder: Folder = ctx.web.get_folder_by_guest_url(url)
-                self.sp_client.load_entity(folder, ctx)
+                folder = self.sp_client.fetch_folder_by_guest_url(url)
                 return self.fetch_folder_contents(folder)
-            else:
-                file = ctx.web.get_file_by_guest_url(url)
-                self.sp_client.load_entity(file, ctx)
-                return [self.__file_to_content(file, filename, last_modified)]
-        else:
-            if file := self.fetch_file_from_direct_link(url):
-                return [self.__file_to_content(file, filename, last_modified)]
+            file = self.sp_client.fetch_file_by_guest_url(url)
+            return [self.__file_to_content(file, filename, last_modified)]
+        if file := self.fetch_file_from_direct_link(url):
+            return [self.__file_to_content(file, filename, last_modified)]
         return []
 
     def fetch_folder_contents(self, folder: Folder) -> list[SharepointContent]:
         contents = list[SharepointContent]()
-        files = (
-            folder.get_files()
-            .select(self.properties_to_retrieve)
-            .execute_query_retry()
-        )
-        for file in files:
+        for file in self.sp_client.fetch_folder_files(folder):
             contents.append(self.__file_to_content(file))
-        time.sleep(self.request_delay)
-        folders = folder.get_folders().execute_query_retry()
-        time.sleep(self.request_delay)
-        for sub_folder in folders:
+        for sub_folder in self.sp_client.fetch_subfolders(folder):
             if save_name := self.__get_name(sub_folder):
                 for item in self.fetch_folder_contents(sub_folder):
                     contents.append(item.in_folder(save_name))
         return contents
 
     def fetch_file_from_direct_link(self, link: str):
-        ctx = self.sp_client.get_client_from_url(link)
-        file_id = None
         query_params = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
         lower_query_keys = {k.lower(): v for k, v in query_params.items()}
 
@@ -131,11 +109,9 @@ class SharepointApiAdapter:
         elif "sourcedoc" in lower_query_keys:
             file_id = lower_query_keys["sourcedoc"][0].strip("{}")
         else:
-            return
+            return None
 
-        file = ctx.web.get_file_by_id(file_id)
-        self.sp_client.load_entity(file, ctx)
-        return file
+        return self.sp_client.fetch_file_by_id(link, file_id)
 
     def fetch_recordings(self, course_name: str) -> list[RecordingContent]:
         search_result = self.sp_client.search_for_recordings(course_name)

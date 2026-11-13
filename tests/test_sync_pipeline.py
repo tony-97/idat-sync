@@ -25,13 +25,9 @@ from idat_sync.infrastructure.downloaders import (
 
 class TestSyncPipeline(unittest.TestCase):
     def setUp(self):
-        self.moodle_downloader = MoodleDownloader(
-            client=MagicMock(), request_delay=30.0
-        )
+        self.moodle_downloader = MoodleDownloader(client=MagicMock())
         self.string_downloader = StringDownloader()
-        self.sharepoint_downloader = SharepointDownloader(
-            client=MagicMock(), request_delay=30.0
-        )
+        self.sharepoint_downloader = SharepointDownloader(client=MagicMock())
         self.recording_downloader = RecordingDownloader(
             cookies=[], sharepoint_personal_host="idat628-my.sharepoint.com"
         )
@@ -398,24 +394,46 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertNotIn("MOODLE_IDAT", defined_names)
         self.assertNotIn("REQUEST_DELAY", defined_names)
 
+        downloaders_path = src_root / "infrastructure" / "downloaders.py"
+        downloaders_tree = ast.parse(
+            downloaders_path.read_text(encoding="utf-8"),
+            filename=str(downloaders_path),
+        )
+        downloader_imports: set[str] = set()
+        for node in ast.walk(downloaders_tree):
+            if isinstance(node, ast.Import):
+                downloader_imports.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    downloader_imports.add(node.module.split(".")[0])
+                downloader_imports.update(alias.name for alias in node.names)
+        self.assertNotIn("requests", downloader_imports)
+        self.assertNotIn("time", downloader_imports)
+        self.assertNotIn("RQ_HEADER", downloader_imports)
+
     def test_download_manager_requires_filesystem_port(self):
         with self.assertRaises(TypeError):
             DownloadManager(self.downloaders)  # type: ignore[call-arg]
 
-    def test_downloaders_use_injected_request_delay_and_personal_host(self):
+    def test_downloaders_delegate_to_clients_and_use_injected_personal_host(self):
         from idat_sync.domain.content import RecordingContent, SharepointContent
         from idat_sync.infrastructure.downloaders import (
             MoodleDownloader,
             RecordingDownloader,
             SharepointDownloader,
         )
+        from idat_sync.infrastructure.moodle_client import MoodleClient
+        from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
-        mock_moodle = MagicMock()
-        mock_moodle.token = "tok"
-        moodle_dl = MoodleDownloader(mock_moodle, request_delay=0.75)
+        mock_moodle = MagicMock(spec=MoodleClient)
+        moodle_dl = MoodleDownloader(mock_moodle)
+        with self.assertRaises(TypeError):
+            MoodleDownloader(mock_moodle, request_delay=0.75)  # type: ignore[call-arg]
 
-        mock_sp = MagicMock()
-        sp_dl = SharepointDownloader(mock_sp, request_delay=1.25)
+        mock_sp = MagicMock(spec=SharepointClient)
+        sp_dl = SharepointDownloader(mock_sp)
+        with self.assertRaises(TypeError):
+            SharepointDownloader(mock_sp, request_delay=1.25)  # type: ignore[call-arg]
 
         rec_dl = RecordingDownloader(
             cookies=[],
@@ -451,20 +469,22 @@ class TestSyncPipeline(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            with patch("idat_sync.infrastructure.downloaders.time.sleep") as mock_sleep, patch(
-                "idat_sync.infrastructure.downloaders.requests.get"
-            ) as mock_get:
-                mock_resp = MagicMock()
-                mock_resp.status_code = 200
-                mock_resp.iter_content.return_value = [b"data"]
-                mock_get.return_value.__enter__.return_value = mock_resp
-                moodle_dl.download(MoodleContent(tmp / "a.pdf", 0, "https://moodle/a.pdf"))
-                mock_sleep.assert_called_once_with(0.75)
+            mock_moodle.download_file.side_effect = lambda _url, dest: dest.write(b"moodle-bytes")
+            moodle_target = tmp / "nested" / "a.pdf"
+            moodle_dl.download(MoodleContent(moodle_target, 0, "https://moodle/a.pdf"))
+            self.assertEqual(moodle_target.read_bytes(), b"moodle-bytes")
+            mock_moodle.download_file.assert_called_once()
+            self.assertEqual(mock_moodle.download_file.call_args.args[0], "https://moodle/a.pdf")
+            self.assertTrue(mock_moodle.download_file.call_args.args[1].closed)
 
-            with patch("idat_sync.infrastructure.downloaders.time.sleep") as mock_sleep:
-                mock_file = MagicMock()
-                sp_dl.download(SharepointContent(tmp / "b.pdf", 0, mock_file))
-                mock_sleep.assert_called_once_with(1.25)
+            mock_file = MagicMock()
+            mock_sp.download_file.side_effect = lambda _file, dest: dest.write(b"sp-bytes")
+            sp_target = tmp / "nested_sp" / "b.pdf"
+            sp_dl.download(SharepointContent(sp_target, 0, mock_file))
+            self.assertEqual(sp_target.read_bytes(), b"sp-bytes")
+            mock_sp.download_file.assert_called_once()
+            self.assertIs(mock_sp.download_file.call_args.args[0], mock_file)
+            self.assertTrue(mock_sp.download_file.call_args.args[1].closed)
 
     def test_idat_sync_uses_injected_recordings_folder_name(self):
         from idat_sync.application.course_repository import CourseRepository
@@ -557,15 +577,17 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertEqual(sp_adapter.sharepoint_personal_host, "contoso-my.sharepoint.com")
         self.assertEqual(sp_adapter.recordings_folder_name, "Videos")
         self.assertEqual(sp_adapter.week_folder_prefix, "Week")
-        self.assertEqual(sp_adapter.request_delay, 1.5)
+        self.assertFalse(hasattr(sp_adapter, "request_delay"))
         self.assertEqual(sp_adapter.sp_client.request_delay, 1.5)
 
         downloaders = service.download_manager.strategies
         moodle_dl = next(d for d in downloaders if isinstance(d, MoodleDownloader))
         sp_dl = next(d for d in downloaders if isinstance(d, SharepointDownloader))
         rec_dl = next(d for d in downloaders if isinstance(d, RecordingDownloader))
-        self.assertEqual(moodle_dl.request_delay, 1.5)
-        self.assertEqual(sp_dl.request_delay, 1.5)
+        self.assertIs(moodle_dl.moodle_client, moodle_adapter.client)
+        self.assertIs(sp_dl.sharepoint_client, sp_adapter.sp_client)
+        self.assertFalse(hasattr(moodle_dl, "request_delay"))
+        self.assertFalse(hasattr(sp_dl, "request_delay"))
         self.assertEqual(rec_dl.sharepoint_personal_host, "contoso-my.sharepoint.com")
 
     def test_auth_provider_and_ui_accept_configured_paths_and_hosts(self):

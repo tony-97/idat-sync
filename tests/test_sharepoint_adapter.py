@@ -1,10 +1,12 @@
+import ast
 from datetime import date, datetime
+import io
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
-from idat_sync.domain.content import RecordingContent
+from idat_sync.domain.content import RecordingContent, SharepointContent
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
@@ -12,9 +14,6 @@ from idat_sync.infrastructure.sharepoint_client import SharepointClient
 class TestSharepointAdapter(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock(spec=SharepointClient)
-        self.mock_client.properties_to_retrieve = []
-        self.mock_client.client = MagicMock()
-        self.mock_client.search_client = MagicMock()
         self.semester_start = date(2025, 9, 22)
         self.adapter = SharepointApiAdapter(
             client=self.mock_client,
@@ -23,7 +22,6 @@ class TestSharepointAdapter(unittest.TestCase):
             sharepoint_personal_host="idat628-my.sharepoint.com",
             recordings_folder_name="Grabaciones",
             week_folder_prefix="Semana",
-            request_delay=30.0,
         )
 
     def _create_mock_search_result(self, course_name: str, site_name: str):
@@ -133,7 +131,6 @@ class TestSharepointAdapter(unittest.TestCase):
             sharepoint_personal_host="contoso-my.sharepoint.com",
             recordings_folder_name="Videos",
             week_folder_prefix="Week",
-            request_delay=1.25,
         )
         self.assertTrue(custom_adapter.can_handle("https://contoso.sharepoint.com/sites/Course"))
         self.assertFalse(custom_adapter.can_handle("https://idat628.sharepoint.com/sites/Course"))
@@ -168,25 +165,73 @@ class TestSharepointAdapter(unittest.TestCase):
             f"https://contoso-my.sharepoint.com/:v:/r{quote(rel_url)}?csf=1&web=1",
         )
 
-    @patch("idat_sync.infrastructure.sharepoint_adapter.time.sleep")
-    def test_fetch_folder_contents_uses_injected_request_delay(self, mock_sleep):
-        custom_adapter = SharepointApiAdapter(
-            client=self.mock_client,
-            semester_start=self.semester_start,
-            sharepoint_host="idat628.sharepoint.com",
-            sharepoint_personal_host="idat628-my.sharepoint.com",
-            recordings_folder_name="Grabaciones",
-            week_folder_prefix="Semana",
-            request_delay=1.25,
+    def test_adapter_does_not_accept_request_delay_or_import_time_or_client_context(self):
+        with self.assertRaises(TypeError):
+            SharepointApiAdapter(
+                client=self.mock_client,
+                semester_start=self.semester_start,
+                sharepoint_host="idat628.sharepoint.com",
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                recordings_folder_name="Grabaciones",
+                week_folder_prefix="Semana",
+                request_delay=1.25,  # type: ignore[call-arg]
+            )
+
+        for attr in ("request_delay", "properties_to_retrieve", "client", "search_client"):
+            self.assertFalse(hasattr(self.adapter, attr), f"Unexpected attribute {attr}")
+
+        adapter_path = (
+            Path(__file__).resolve().parent.parent
+            / "src"
+            / "idat_sync"
+            / "infrastructure"
+            / "sharepoint_adapter.py"
         )
-        mock_folder = MagicMock()
-        mock_folder.get_files.return_value.select.return_value.execute_query_retry.return_value = []
-        mock_folder.get_folders.return_value.execute_query_retry.return_value = []
+        tree = ast.parse(adapter_path.read_text(encoding="utf-8"), filename=str(adapter_path))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported.add(node.module)
+                imported.update(alias.name for alias in node.names)
+        self.assertNotIn("time", imported)
+        self.assertNotIn("ClientContext", imported)
+        self.assertNotIn("office365.sharepoint.client_context", imported)
 
-        custom_adapter.fetch_folder_contents(mock_folder)
+    def test_fetch_folder_contents_delegates_files_then_subfolders_to_client(self):
+        root_folder = MagicMock()
+        sub_folder = MagicMock()
+        sub_folder.name = "Week 1"
 
-        self.assertEqual(mock_sleep.call_count, 2)
-        mock_sleep.assert_called_with(1.25)
+        root_file = MagicMock()
+        root_file.name = "syllabus.pdf"
+        root_file.time_last_modified = None
+
+        nested_file = MagicMock()
+        nested_file.name = "notes.docx"
+        nested_file.time_last_modified = None
+
+        call_order: list[str] = []
+
+        def fake_files(folder):
+            call_order.append("files")
+            return [root_file] if folder is root_folder else [nested_file]
+
+        def fake_subfolders(folder):
+            call_order.append("subfolders")
+            return [sub_folder] if folder is root_folder else []
+
+        self.mock_client.fetch_folder_files.side_effect = fake_files
+        self.mock_client.fetch_subfolders.side_effect = fake_subfolders
+
+        contents = self.adapter.fetch_folder_contents(root_folder)
+
+        self.assertEqual(call_order, ["files", "subfolders", "files", "subfolders"])
+        self.assertEqual(len(contents), 2)
+        self.assertTrue(all(isinstance(c, SharepointContent) for c in contents))
+        self.assertEqual([c.path for c in contents], [Path("syllabus.pdf"), Path("Week 1") / "notes.docx"])
 
     @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -234,6 +279,62 @@ class TestSharepointAdapter(unittest.TestCase):
 
         self.assertEqual(client.sharepoint_cookies, {"rtFa": "exact"})
 
+    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_sharepoint_client_sdk_queries_and_download_file_sleep_request_delay(
+        self, mock_ctx_cls, mock_sleep
+    ):
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_personal_site = MagicMock()
+        mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/user"
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = mock_personal_site
+        mock_ctx_cls.return_value = mock_ctx
+
+        client = SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
+            request_delay=1.75,
+        )
+        mock_sleep.reset_mock()
+
+        mock_folder = MagicMock()
+        mock_ctx.web.get_folder_by_guest_url.return_value = mock_folder
+        folder_url = "https://contoso.sharepoint.com/:f:/s/Course/folder"
+        self.assertIs(client.fetch_folder_by_guest_url(folder_url), mock_folder)
+        mock_ctx.web.get_folder_by_guest_url.assert_called_once_with(folder_url)
+        mock_ctx.load.assert_called_with(mock_folder, client.properties_to_retrieve)
+
+        mock_guest_file = MagicMock()
+        mock_ctx.web.get_file_by_guest_url.return_value = mock_guest_file
+        file_url = "https://contoso.sharepoint.com/:b:/s/Course/file"
+        self.assertIs(client.fetch_file_by_guest_url(file_url), mock_guest_file)
+        mock_ctx.web.get_file_by_guest_url.assert_called_once_with(file_url)
+
+        mock_id_file = MagicMock()
+        mock_ctx.web.get_file_by_id.return_value = mock_id_file
+        direct_url = "https://contoso.sharepoint.com/sites/Course/doc.aspx?sourcedoc=%7BABC-123%7D"
+        self.assertIs(client.fetch_file_by_id(direct_url, "ABC-123"), mock_id_file)
+        mock_ctx.web.get_file_by_id.assert_called_once_with("ABC-123")
+
+        child_file = MagicMock()
+        mock_folder.get_files.return_value.select.return_value.execute_query_retry.return_value = [child_file]
+        self.assertEqual(client.fetch_folder_files(mock_folder), [child_file])
+        mock_folder.get_files.return_value.select.assert_called_once_with(client.properties_to_retrieve)
+
+        sub_folder = MagicMock()
+        mock_folder.get_folders.return_value.execute_query_retry.return_value = [sub_folder]
+        self.assertEqual(client.fetch_subfolders(mock_folder), [sub_folder])
+
+        dest = io.BytesIO()
+        client.download_file(mock_guest_file, dest)
+        mock_guest_file.download_session.assert_called_once_with(dest)
+        mock_guest_file.download_session.return_value.execute_query_with_incremental_retry.assert_called_once_with()
+
+        self.assertEqual(mock_sleep.call_count, 6)
+        mock_sleep.assert_called_with(1.75)
+
     def test_list_url_content_matches_guest_urls_case_insensitively(self):
         custom_adapter = SharepointApiAdapter(
             client=self.mock_client,
@@ -242,30 +343,52 @@ class TestSharepointAdapter(unittest.TestCase):
             sharepoint_personal_host="contoso-my.sharepoint.com",
             recordings_folder_name="Videos",
             week_folder_prefix="Week",
-            request_delay=0.0,
         )
-        mock_ctx = MagicMock()
         mock_file = MagicMock()
         mock_file.name = "slides.pdf"
         mock_file.time_last_modified = None
-        mock_ctx.web.get_file_by_guest_url.return_value = mock_file
-        self.mock_client.get_client_from_url.return_value = mock_ctx
+        self.mock_client.fetch_file_by_guest_url.return_value = mock_file
 
         guest_url = "https://CONTOSO.SHAREPOINT.COM/:b:/s/Course/abc"
         self.assertTrue(custom_adapter.can_handle(guest_url))
         items = custom_adapter.list_url_content(guest_url, "slides.pdf", 100)
 
         self.assertEqual(len(items), 1)
-        mock_ctx.web.get_file_by_guest_url.assert_called_once_with(guest_url)
+        self.assertEqual(items[0].path, Path("slides.pdf"))
+        self.mock_client.fetch_file_by_guest_url.assert_called_once_with(guest_url)
 
         mock_folder = MagicMock()
-        mock_folder.get_files.return_value.select.return_value.execute_query_retry.return_value = []
-        mock_folder.get_folders.return_value.execute_query_retry.return_value = []
-        mock_ctx.web.get_folder_by_guest_url.return_value = mock_folder
+        self.mock_client.fetch_folder_by_guest_url.return_value = mock_folder
+        self.mock_client.fetch_folder_files.return_value = []
+        self.mock_client.fetch_subfolders.return_value = []
 
         folder_url = "https://CONTOSO.SHAREPOINT.COM/:f:/s/Course/folder"
         custom_adapter.list_url_content(folder_url, "folder", 100)
-        mock_ctx.web.get_folder_by_guest_url.assert_called_once_with(folder_url)
+        self.mock_client.fetch_folder_by_guest_url.assert_called_once_with(folder_url)
+
+    def test_list_url_content_direct_links_extract_id_or_skip_without_calling_client(self):
+        mock_file = MagicMock()
+        mock_file.name = "handout.docx"
+        mock_file.time_last_modified = None
+        self.mock_client.fetch_file_by_id.return_value = mock_file
+
+        uniqueid_url = "https://idat628.sharepoint.com/sites/C/Doc.aspx?UniqueId=%7B111-222%7D"
+        items_uid = self.adapter.list_url_content(uniqueid_url, "fallback.docx", 50)
+        self.assertEqual(len(items_uid), 1)
+        self.assertEqual(items_uid[0].path, Path("handout.docx"))
+        self.mock_client.fetch_file_by_id.assert_called_once_with(uniqueid_url, "111-222")
+
+        self.mock_client.fetch_file_by_id.reset_mock()
+        sourcedoc_url = "https://idat628.sharepoint.com/sites/C/Doc.aspx?sourcedoc=%7B333-444%7D"
+        items_src = self.adapter.list_url_content(sourcedoc_url, "fallback.docx", 50)
+        self.assertEqual(len(items_src), 1)
+        self.mock_client.fetch_file_by_id.assert_called_once_with(sourcedoc_url, "333-444")
+
+        self.mock_client.fetch_file_by_id.reset_mock()
+        no_id_url = "https://idat628.sharepoint.com/sites/C/SitePages/Home.aspx"
+        self.assertIsNone(self.adapter.fetch_file_from_direct_link(no_id_url))
+        self.assertEqual(self.adapter.list_url_content(no_id_url, "Home.aspx", 50), [])
+        self.mock_client.fetch_file_by_id.assert_not_called()
 
 
 if __name__ == "__main__":

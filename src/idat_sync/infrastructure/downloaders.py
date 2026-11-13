@@ -7,11 +7,9 @@ import os
 from pathlib import Path
 import platform
 import sys
-import time
 from typing import TYPE_CHECKING
 
 from playwright._impl._api_structures import StorageStateCookie
-import requests
 import yt_dlp
 
 from idat_sync.application.ports import DownloadTask, Downloader
@@ -22,63 +20,34 @@ from idat_sync.domain.content import (
     SharepointContent,
     StringContent,
 )
-from idat_sync.utils import RQ_HEADER
 
 if TYPE_CHECKING:
-    from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
-    from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
+    from idat_sync.infrastructure.moodle_client import MoodleClient
+    from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
 class MoodleDownloader(Downloader[MoodleContent]):
     content_type = MoodleContent
 
-    def __init__(
-        self, client: MoodleAdapter, request_delay: float
-    ) -> None:
+    def __init__(self, client: MoodleClient) -> None:
         self.moodle_client = client
-        self.request_delay = request_delay
 
     def download(self, content: MoodleContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(
-            content.url,
-            params={
-                "wstoken": self.moodle_client.token,
-                "token": self.moodle_client.token,
-            },
-            stream=True,
-            allow_redirects=True,
-            timeout=60,
-            headers=RQ_HEADER,
-        ) as r:
-            if r.status_code == 403:
-                raise RuntimeError(
-                    "403 Forbidden: your session cookie is missing/expired."
-                )
-            r.raise_for_status()
-            with open(content.path, "wb") as f:
-                for part in r.iter_content(chunk_size=1024 * 256):
-                    if part:
-                        f.write(part)
-            time.sleep(self.request_delay)
+        with open(content.path, "wb") as f:
+            self.moodle_client.download_file(content.url, f)
 
 
 class SharepointDownloader(Downloader[SharepointContent]):
     content_type = SharepointContent
 
-    def __init__(
-        self, client: SharepointApiAdapter, request_delay: float
-    ) -> None:
+    def __init__(self, client: SharepointClient) -> None:
         self.sharepoint_client = client
-        self.request_delay = request_delay
 
     def download(self, content: SharepointContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
         with open(content.path, "wb") as local_file:
-            content.file.download_session(
-                local_file
-            ).execute_query_with_incremental_retry()
-            time.sleep(self.request_delay)
+            self.sharepoint_client.download_file(content.file, local_file)
 
 
 class StringDownloader(Downloader[StringContent]):

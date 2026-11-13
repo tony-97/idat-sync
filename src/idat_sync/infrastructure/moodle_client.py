@@ -1,6 +1,8 @@
 import time
-from typing import Any
+from typing import Any, BinaryIO
 import requests
+
+from idat_sync.utils import RQ_HEADER
 
 
 class MoodleClient:
@@ -67,3 +69,23 @@ class MoodleClient:
         if isinstance(result, list):
             return result
         return []
+
+    def download_file(self, url: str, dest: BinaryIO) -> None:
+        """Stream an authenticated Moodle file into dest and sleep request_delay."""
+        with requests.get(
+            url,
+            params={"wstoken": self.token, "token": self.token},
+            stream=True,
+            allow_redirects=True,
+            timeout=60,
+            headers=RQ_HEADER,
+        ) as response:
+            if response.status_code == 403:
+                raise RuntimeError(
+                    "403 Forbidden: your session cookie is missing/expired."
+                )
+            response.raise_for_status()
+            for part in response.iter_content(chunk_size=1024 * 256):
+                if part:
+                    dest.write(part)
+            time.sleep(self.request_delay)

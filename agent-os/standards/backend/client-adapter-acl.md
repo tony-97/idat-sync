@@ -1,24 +1,27 @@
 # Two-Tier Client & Anti-Corruption Adapter
 
-Split every external service integration in `infrastructure/` into a low-level `*Client` and a domain-facing `*Adapter` implementing application ports.
+Split every external service integration in `infrastructure/` into a low-level `*Client` and domain-facing `*Adapter` / `*Downloader` classes implementing application ports.
 
 ```python
-# 1. *Client: Raw transport, auth, rate-limiting (REQUEST_DELAY), raw payloads
+# 1. *Client: Raw transport, auth, rate-limiting (request_delay), raw payloads & file streams
 class MoodleClient:
     def fetch_enrolled_courses(self) -> list[dict]: ...
+    def download_file(self, url: str, dest: BinaryIO) -> None: ...
 
-# 2. *Adapter: Anti-Corruption Layer mapping raw vendor data -> domain models
+# 2. *Adapter / *Downloader: Anti-Corruption Layer & port implementations
 class MoodleAdapter(CourseGateway, UrlContentStrategy):
-    def __init__(self, client: MoodleClient) -> None:
+    def __init__(self, client: MoodleClient, moodle_base_url: str) -> None:
         self.client = client
+        ...
 
-    def list_courses(self) -> list[Course]:
-        return [self._to_course(raw) for raw in self.client.fetch_enrolled_courses()]
+class MoodleDownloader(Downloader[MoodleContent]):
+    def __init__(self, client: MoodleClient) -> None:
+        self.moodle_client = client
 ```
 
-- **`*Client` responsibilities**: HTTP/SDK transport, auth tokens/cookies, `time.sleep(self.request_delay)` rate-limiting via injected `request_delay`, and raising transport/vendor exceptions. Returns raw vendor dicts or SDK objects; zero `domain` imports.
-- **`*Adapter` responsibilities**: Wraps `*Client` via constructor injection, implements driven ports (`CourseGateway`, `RecordingGateway`, `UrlContentStrategy`), and translates raw payloads into `domain/` dataclasses via private `_to_*` mappers.
+- **`*Client` responsibilities**: HTTP/SDK transport, auth tokens/cookies, file download streaming (`download_file(..., dest: BinaryIO)`), `time.sleep(self.request_delay)` rate-limiting via injected `request_delay`, and raising transport/vendor exceptions. Returns raw vendor dicts or SDK objects; zero `domain` imports.
+- **`*Adapter` & `*Downloader` responsibilities**: Wrap `*Client` via constructor injection (never another `*Adapter`), implement driven ports (`CourseGateway`, `RecordingGateway`, `UrlContentStrategy`, `Downloader[C]`), and delegate all HTTP/SDK queries and `request_delay` throttling to `*Client`. `*Downloader` classes handle local path creation (`mkdir`) and opening the target file stream before calling `*Client.download_file`.
 - **Transformations within Adapters**:
-  - `MoodleAdapter` converts section summaries, label module descriptions, and assignment intros into `inline_contents: list[StringContent]` and merges `introattachments` into `CourseModule.contents: list[ModuleContent]`.
-  - `SharepointApiAdapter` accepts `(client: SharepointClient, semester_start: date, sharepoint_host: str, sharepoint_personal_host: str, recordings_folder_name: str, week_folder_prefix: str, request_delay: float)` without instantiating clients or reading cookies in `__init__`, and `fetch_recordings` returns `list[RecordingContent]` with computed `{week_folder_prefix} {week}` paths.
+  - `MoodleAdapter` converts section summaries, label module descriptions, and assignment intros into `inline_contents: list[StringContent]` and merges `introattachments` into `CourseModule.contents: list[ModuleContent]`. It does not expose raw auth tokens (`token`).
+  - `SharepointApiAdapter` accepts `(client: SharepointClient, semester_start: date, sharepoint_host: str, sharepoint_personal_host: str, recordings_folder_name: str, week_folder_prefix: str)` without `request_delay`, without instantiating clients or reading cookies in `__init__`, and delegates guest URL, direct-link file ID, and folder/subfolder SDK queries to `SharepointClient`. `fetch_recordings` returns `list[RecordingContent]` with computed `{week_folder_prefix} {week}` paths.
 - **No vendor leakage**: Adapter public methods must return `domain/` models (`Course`, `CourseSection`, `CourseModule`, `ModuleContent`, `Content`), never raw dicts or SDK entities. Domain classes must never declare vendor-specific fields (`modname`, `description`, `summary`, or `Assignment`).

@@ -11,7 +11,6 @@ from idat_sync.infrastructure.moodle_client import MoodleClient
 class TestMoodleAdapter(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock(spec=MoodleClient)
-        self.mock_client.token = "test_token_123"
         self.adapter = MoodleAdapter(
             client=self.mock_client,
             moodle_base_url="https://aulavirtual.idat.edu.pe",
@@ -226,6 +225,10 @@ class TestMoodleAdapter(unittest.TestCase):
     def test_moodle_adapter_public_seam_does_not_expose_raw_vendor_assignments(self):
         self.assertFalse(hasattr(self.adapter, "get_assignments_by_course"))
         self.assertTrue(hasattr(self.adapter, "_get_assignments_by_course"))
+
+    def test_moodle_adapter_does_not_expose_token(self):
+        self.assertFalse(hasattr(MoodleAdapter, "token"))
+        self.assertFalse(hasattr(self.adapter, "token"))
 
 
 if __name__ == "__main__":

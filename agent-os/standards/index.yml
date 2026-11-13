@@ -2,7 +2,7 @@
 
 backend:
   client-adapter-acl:
-    description: Two-tier *Client transport and *Adapter anti-corruption layer mapping raw vendor payloads to domain models
+    description: Two-tier *Client transport and *Adapter/*Downloader anti-corruption layer delegating HTTP/SDK calls and rate-limiting to clients
   content-strategy-dispatch:
     description: URL strategy routing (can_handle), bottom-up Content.in_folder path composition, and generic Downloader[C] rate-limit groups
 

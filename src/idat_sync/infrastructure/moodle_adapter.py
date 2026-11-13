@@ -26,10 +26,6 @@ class MoodleAdapter:
         self.client = client
         self.moodle_host = (urlparse(moodle_base_url).hostname or "").lower()
 
-    @property
-    def token(self) -> str:
-        return self.client.token
-
     def can_handle(self, url: str) -> bool:
         return (urlparse(url).hostname or "").lower() == self.moodle_host
 

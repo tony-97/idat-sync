@@ -1,5 +1,7 @@
+from collections.abc import Callable
 import re
 import time
+from typing import BinaryIO, TypeVar
 import urllib.parse
 
 from office365.runtime.client_result import ClientResult
@@ -9,6 +11,8 @@ from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
 from playwright._impl._api_structures import StorageStateCookie
+
+_EntityT = TypeVar("_EntityT", File, Folder)
 
 
 class SharepointClient:
@@ -113,3 +117,44 @@ class SharepointClient:
         )
         time.sleep(self.request_delay)
         return list(items)
+
+    def _load_entity_at_url(
+        self, url: str, resolver: Callable[[ClientContext], _EntityT]
+    ) -> _EntityT:
+        ctx = self.get_client_from_url(url)
+        entity = resolver(ctx)
+        self.load_entity(entity, ctx)
+        return entity
+
+    def fetch_folder_by_guest_url(self, url: str) -> Folder:
+        return self._load_entity_at_url(
+            url, lambda ctx: ctx.web.get_folder_by_guest_url(url)
+        )
+
+    def fetch_file_by_guest_url(self, url: str) -> File:
+        return self._load_entity_at_url(
+            url, lambda ctx: ctx.web.get_file_by_guest_url(url)
+        )
+
+    def fetch_file_by_id(self, url: str, file_id: str) -> File:
+        return self._load_entity_at_url(
+            url, lambda ctx: ctx.web.get_file_by_id(file_id)
+        )
+
+    def fetch_folder_files(self, folder: Folder) -> list[File]:
+        files = (
+            folder.get_files()
+            .select(self.properties_to_retrieve)
+            .execute_query_retry()
+        )
+        time.sleep(self.request_delay)
+        return list(files)
+
+    def fetch_subfolders(self, folder: Folder) -> list[Folder]:
+        folders = folder.get_folders().execute_query_retry()
+        time.sleep(self.request_delay)
+        return list(folders)
+
+    def download_file(self, file: File, dest: BinaryIO) -> None:
+        file.download_session(dest).execute_query_with_incremental_retry()
+        time.sleep(self.request_delay)

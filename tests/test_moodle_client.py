@@ -1,8 +1,10 @@
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 import requests
 
 from idat_sync.infrastructure.moodle_client import MoodleClient
+from idat_sync.utils import RQ_HEADER
 
 
 class TestMoodleClient(unittest.TestCase):
@@ -105,6 +107,60 @@ class TestMoodleClient(unittest.TestCase):
         args, _ = mock_post.call_args
         self.assertEqual(args[0], "https://moodle.example.edu/webservice/rest/server.php")
         mock_sleep.assert_called_once_with(2.5)
+
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.get")
+    def test_download_file_streams_chunks_and_sleeps(self, mock_get, mock_sleep):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.iter_content.return_value = [b"chunk1-", b"", b"chunk2"]
+        mock_get.return_value.__enter__.return_value = mock_response
+
+        dest = io.BytesIO()
+        target_url = "https://aulavirtual.idat.edu.pe/pluginfile.php/123/file.pdf"
+        self.client.download_file(target_url, dest)
+
+        mock_get.assert_called_once_with(
+            target_url,
+            params={"wstoken": self.token, "token": self.token},
+            stream=True,
+            allow_redirects=True,
+            timeout=60,
+            headers=RQ_HEADER,
+        )
+        mock_response.raise_for_status.assert_called_once_with()
+        mock_response.iter_content.assert_called_once_with(chunk_size=1024 * 256)
+        self.assertEqual(dest.getvalue(), b"chunk1-chunk2")
+        mock_sleep.assert_called_once_with(30.0)
+
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.get")
+    def test_download_file_raises_runtime_error_on_403(self, mock_get, mock_sleep):
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_get.return_value.__enter__.return_value = mock_response
+
+        dest = io.BytesIO()
+        with self.assertRaises(RuntimeError) as ctx:
+            self.client.download_file("https://aulavirtual.idat.edu.pe/secret.pdf", dest)
+
+        self.assertIn("403 Forbidden", str(ctx.exception))
+        self.assertEqual(dest.getvalue(), b"")
+        mock_sleep.assert_not_called()
+
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.get")
+    def test_download_file_propagates_http_error_without_sleeping(self, mock_get, mock_sleep):
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
+        mock_get.return_value.__enter__.return_value = mock_response
+
+        dest = io.BytesIO()
+        with self.assertRaises(requests.HTTPError):
+            self.client.download_file("https://aulavirtual.idat.edu.pe/missing.pdf", dest)
+
+        mock_sleep.assert_not_called()
 
 
 if __name__ == "__main__":

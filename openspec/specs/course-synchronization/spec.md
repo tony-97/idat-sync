@@ -33,7 +33,7 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 - **THEN** `CourseModule.inline_contents` is `[StringContent(Path(f"{assign_name}-[{assign_id}]-intro.html"), 0, [assign_intro])]` and `CourseModule.contents` contains the mapped `ModuleContent` items from `introattachments` (or both are `[]` when no matching assignment exists)
 
 ### Requirement: SharePoint adapter projects recordings into weekly domain content
-`SharepointApiAdapter` SHALL accept `(client: SharepointClient, semester_start: date, sharepoint_host: str, sharepoint_personal_host: str, recordings_folder_name: str, week_folder_prefix: str, request_delay: float)` without hardcoded defaults and without instantiating `SharepointClient` in `__init__`. `fetch_recordings(course_name)` SHALL compute `week = 1 + (file.time_created.date() - self.semester_start).days // 7` and return `list[RecordingContent]`. Verified at `SharepointApiAdapter` seam.
+`SharepointApiAdapter` SHALL accept `(client: SharepointClient, semester_start: date, sharepoint_host: str, sharepoint_personal_host: str, recordings_folder_name: str, week_folder_prefix: str)` without `request_delay`, without hardcoded defaults, and without instantiating `SharepointClient` in `__init__`. `SharepointApiAdapter` MUST NOT store `request_delay`, `properties_to_retrieve`, `client`, or `search_client`, and MUST NOT import `time` or `ClientContext`. `fetch_recordings(course_name)` SHALL compute `week = 1 + (file.time_created.date() - self.semester_start).days // 7` and return `list[RecordingContent]`. Verified at `SharepointApiAdapter` seam.
 
 #### Scenario: Computing weekly folder and SharePoint stream URL per recording
 - **WHEN** `SharepointApiAdapter.fetch_recordings(course_name)` finds recording files with `time_created` and `serverRelativeUrl`
@@ -70,7 +70,7 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 - **THEN** directory creation and file timestamp scanning are delegated to `FileSystemPort` and pending tasks execute through `TaskOrchestrator`
 
 ### Requirement: Composition root wires production dependencies outside application
-`create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync` in `src/idat_sync/bootstrap.py` SHALL require an explicit `SyncConfig`, construct all clients, adapters, `LocalFileSystemAdapter`, and `Downloader` groups with `config` values, and inject them plus `recordings_folder_name` into `IDATSync`. `IDATSync.__init__` MUST NOT instantiate clients or adapters from `Credentials`. Verified at `bootstrap.create_sync_service` and `IDATSync` seams.
+`create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync` in `src/idat_sync/bootstrap.py` SHALL require an explicit `SyncConfig`, construct all clients, adapters, `LocalFileSystemAdapter`, and `Downloader` groups with `config` values, wire `MoodleDownloader(moodle_client)` and `SharepointDownloader(sharepoint_raw_client)` directly to the low-level clients without `request_delay`, and inject the composed collaborators plus `recordings_folder_name` into `IDATSync`. `IDATSync.__init__` MUST NOT instantiate clients or adapters from `Credentials`. Verified at `bootstrap.create_sync_service` and `IDATSync` seams.
 
 #### Scenario: Constructing IDATSync with injected collaborators
 - **WHEN** `IDATSync(course_repository, download_manager, task_orchestrator, file_system, recordings_folder_name="Videos")` is instantiated and `sync_course(course, course_dir)` runs
@@ -78,7 +78,7 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 
 #### Scenario: Wiring SyncConfig through create_sync_service
 - **WHEN** `create_sync_service(credentials, config=custom_config)` is called with a `SyncConfig` instance
-- **THEN** it forwards `custom_config` fields to `MoodleClient`, `MoodleAdapter`, `SharepointClient`, `SharepointApiAdapter`, `MoodleDownloader`, `SharepointDownloader`, `RecordingDownloader`, and `IDATSync`
+- **THEN** it forwards `custom_config` fields to `MoodleClient`, `MoodleAdapter`, `SharepointClient`, `SharepointApiAdapter` (without `request_delay`), `RecordingDownloader`, and `IDATSync`, and wires `MoodleDownloader(moodle_client)` and `SharepointDownloader(sharepoint_raw_client)` with `moodle_dl.moodle_client is moodle_adapter.client` and `sp_dl.sharepoint_client is sp_adapter.sp_client`
 
 ### Requirement: Mandatory FileSystemPort delegation in DownloadManager
 `DownloadManager` SHALL require `FileSystemPort` as a non-nullable constructor dependency and delegate all local directory tree modification timestamp scans to `FileSystemPort.scan_mtimes`. `DownloadManager.prepare_download_tasks(contents: Sequence[Content]) -> list[DownloadTask]` SHALL accept only `contents` and map each `Content` to a `DownloadTask` via `create_download_task` without performing filesystem queries. `DownloadManager` MUST NOT define `should_download`, accept `root_dir` in `prepare_download_tasks`, or perform direct filesystem I/O (`os`, `stat`, `rglob`, `mkdir`). `FileSystemPort` and `LocalFileSystemAdapter` MUST NOT define `exists` or `get_mtime`, and `DownloadTask` MUST NOT define `last_modified`. Verified at the `DownloadManager` and `FileSystemPort` / `LocalFileSystemAdapter` public seams.
@@ -96,11 +96,11 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 - **THEN** `FileSystemPort` and `LocalFileSystemAdapter` expose only `scan_mtimes` and `ensure_dir` (neither `exists` nor `get_mtime`), `DownloadManager` does not expose `should_download`, and `DownloadTask` exposes `path` and `download` without `last_modified`
 
 ### Requirement: Sealed Anti-Corruption Layer on Moodle adapter
-`MoodleAdapter` public methods SHALL return only `domain/` models (`Course`, `CourseSection`, `CourseModule`, `ModuleContent`, `Content`). Any helper that retrieves or processes raw vendor structures (`dict`, raw JSON payloads) without converting to domain entities SHALL be private. Verified at the `MoodleAdapter` public seam.
+`MoodleAdapter` public methods SHALL return only `domain/` models (`Course`, `CourseSection`, `CourseModule`, `ModuleContent`, `Content`), and `MoodleAdapter` MUST NOT define or expose a `token` property (`hasattr(MoodleAdapter, "token") == False`). Any helper that retrieves or processes raw vendor structures (`dict`, raw JSON payloads) without converting to domain entities SHALL be private. Verified at the `MoodleAdapter` public seam.
 
 #### Scenario: Inspecting MoodleAdapter public method return types
-- **WHEN** all public methods of `MoodleAdapter` are invoked or inspected
-- **THEN** none of them return raw vendor dictionaries or SDK objects
+- **WHEN** all public methods and attributes of `MoodleAdapter` are invoked or inspected
+- **THEN** none of them return raw vendor dictionaries or SDK objects, and `MoodleAdapter` does not expose `token`
 
 ### Requirement: Ubiquitous domain language for specialized content types
 The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory text artifacts (`StringContent`) and remote class video recordings (`RecordingContent`) as distinct subtypes of `Content`. Verified at the domain vocabulary seam.
@@ -140,15 +140,15 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 - **THEN** `load_config` raises `ValueError`
 
 ### Requirement: Configurable tenant endpoints and throttling across clients, adapters, and downloaders
-`MoodleClient`, `MoodleAdapter`, `SharepointClient`, `MoodleDownloader`, `SharepointDownloader`, `RecordingDownloader`, `AuthProvider`, and `get_sharepoint_cookies` SHALL require injected tenant URL/host and `request_delay` parameters without hardcoded defaults. `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` MUST NOT exist in `idat_sync.utils`. Verified at client, adapter, downloader, and AST seams.
+`MoodleClient`, `MoodleAdapter`, `SharepointClient`, `RecordingDownloader`, `AuthProvider`, and `get_sharepoint_cookies` SHALL require injected tenant URL/host parameters without hardcoded defaults, and `MoodleClient` and `SharepointClient` SHALL require `request_delay` without hardcoded defaults as the sole owners of `time.sleep(self.request_delay)`. `MoodleDownloader`, `SharepointDownloader`, and `SharepointApiAdapter` MUST NOT accept `request_delay`. `src/idat_sync/infrastructure/downloaders.py` MUST NOT import `requests`, `RQ_HEADER`, or `time`, and `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` MUST NOT exist in `idat_sync.utils`. Verified at client, adapter, downloader, and AST seams.
 
 #### Scenario: Respecting injected Moodle and SharePoint hosts and request delays
-- **WHEN** `MoodleClient`, `MoodleAdapter`, `MoodleDownloader`, `SharepointDownloader`, and `RecordingDownloader` are constructed with custom `base_url`, `moodle_base_url`, `sharepoint_personal_host`, and `request_delay`
-- **THEN** `MoodleAdapter.can_handle` matches the hostname of `moodle_base_url`, `RecordingDownloader.can_handle` matches `f"{sharepoint_personal_host}/:v:"`, and `MoodleClient.call_ws`, `MoodleDownloader.download`, and `SharepointDownloader.download` sleep for the injected `request_delay`
+- **WHEN** `MoodleClient`, `MoodleAdapter`, `SharepointClient`, and `RecordingDownloader` are constructed with custom `base_url`, `moodle_base_url`, `sharepoint_personal_host`, and `request_delay`
+- **THEN** `MoodleAdapter.can_handle` matches the hostname of `moodle_base_url`, `RecordingDownloader.can_handle` matches `f"{sharepoint_personal_host}/:v:"`, and `MoodleClient.call_ws`, `MoodleClient.download_file`, `SharepointClient.download_file`, `SharepointClient.fetch_folder_files`, and `SharepointClient.fetch_subfolders` sleep for the injected `request_delay`
 
 #### Scenario: Inspecting infrastructure imports and utils cleanup
 - **WHEN** all Python modules under `src/idat_sync/infrastructure/` and `src/idat_sync/utils.py` are inspected
-- **THEN** no `infrastructure/` module imports `MOODLE_IDAT` or `REQUEST_DELAY` from `idat_sync.utils`, and `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` are not defined in `src/idat_sync/utils.py`
+- **THEN** no `infrastructure/` module imports `MOODLE_IDAT` or `REQUEST_DELAY` from `idat_sync.utils`, `downloaders.py` does not import `requests`, `RQ_HEADER`, or `time`, `sharepoint_adapter.py` does not import `time` or `ClientContext`, and `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` are not defined in `src/idat_sync/utils.py`
 
 ### Requirement: Unconditional target file path in RecordingDownloader
 `RecordingDownloader.download(content: RecordingContent)` SHALL unconditionally treat `content.path` as the target file path by creating `Path(content.path).parent` (`mkdir(parents=True, exist_ok=True)`) and setting `yt_dlp` `outtmpl` to `f"{prefix}{os.path.abspath(Path(content.path))}"`. `RecordingDownloader.download` MUST NOT branch on `Path(content.path).suffix` or append `"%(title)s %(id)s.%(ext)s"`. Verified at the `RecordingDownloader` public seam.
@@ -160,3 +160,18 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 #### Scenario: Downloading a recording without a file extension in path
 - **WHEN** `RecordingDownloader.download(content)` is called with a `RecordingContent` whose `path` has no file suffix (`Path(content.path).suffix == ""`)
 - **THEN** it still creates `Path(content.path).parent` (not `Path(content.path)` as a directory) and passes `f"{prefix}{os.path.abspath(Path(content.path))}"` as `outtmpl` without appending `"%(title)s %(id)s.%(ext)s"`
+
+### Requirement: Client-owned file download streaming and SharePoint SDK query execution
+`MoodleClient` and `SharepointClient` SHALL provide `download_file(..., dest: BinaryIO) -> None` to stream remote files into an open binary stream and sleep `self.request_delay`. `MoodleDownloader` and `SharepointDownloader` SHALL accept their `*Client`, create parent directories, open `content.path` as `"wb"`, and delegate to `client.download_file`. `SharepointClient` SHALL execute all guest URL, file-by-ID, and folder SDK queries. Verified at client, adapter, and downloader seams.
+
+#### Scenario: Streaming a Moodle file through MoodleClient
+- **WHEN** `MoodleClient.download_file(url, dest)` is called with a target URL and writable binary stream
+- **THEN** it performs `requests.get(url, params={"wstoken": self.token, "token": self.token}, stream=True, allow_redirects=True, timeout=60, headers=RQ_HEADER)`, raises `RuntimeError("403 Forbidden: your session cookie is missing/expired.")` on HTTP `403`, calls `raise_for_status()`, writes non-empty `1024 * 256`-byte chunks into `dest`, and calls `time.sleep(self.request_delay)`
+
+#### Scenario: Delegating MoodleDownloader and SharepointDownloader file downloads to clients
+- **WHEN** `MoodleDownloader(moodle_client).download(moodle_content)` and `SharepointDownloader(sharepoint_client).download(sp_content)` are called
+- **THEN** each stores `self.moodle_client` or `self.sharepoint_client` without accepting `request_delay`, creates `Path(content.path).parent`, opens `content.path` as `"wb"`, and calls `moodle_client.download_file(moodle_content.url, f)` and `sharepoint_client.download_file(sp_content.file, local_file)` respectively (where `SharepointClient.download_file` runs `file.download_session(dest).execute_query_with_incremental_retry()` and sleeps `self.request_delay`)
+
+#### Scenario: Delegating SharePoint guest URLs, direct links, and folder traversal to SharepointClient
+- **WHEN** `SharepointApiAdapter.list_url_content`, `fetch_folder_contents`, and `fetch_file_from_direct_link` resolve guest folder URLs, guest file URLs, direct links with `uniqueid`/`sourcedoc`, and folder hierarchies
+- **THEN** `SharepointApiAdapter` calls `sp_client.fetch_folder_by_guest_url`, `sp_client.fetch_file_by_guest_url`, `sp_client.fetch_file_by_id(link, file_id)` (skipping the client call and returning `None` when neither `uniqueid` nor `sourcedoc` is present), and calls `sp_client.fetch_folder_files(folder)` before `sp_client.fetch_subfolders(folder)`, while `SharepointClient` executes all `ClientContext` / `execute_query_retry` calls and `time.sleep(self.request_delay)`

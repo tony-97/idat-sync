@@ -51,7 +51,6 @@ def create_sync_service(
         sharepoint_personal_host=config.sharepoint_personal_host,
         recordings_folder_name=config.recordings_folder_name,
         week_folder_prefix=config.week_folder_prefix,
-        request_delay=config.request_delay,
     )
 
     course_repository = CourseRepository(
@@ -61,12 +60,10 @@ def create_sync_service(
     )
 
     download_tasks_group: list[list[Downloader]] = [
-        [MoodleDownloader(moodle_adapter, request_delay=config.request_delay)],
+        [MoodleDownloader(moodle_client)],
         [StringDownloader()],
         [
-            SharepointDownloader(
-                sharepoint_adapter, request_delay=config.request_delay
-            ),
+            SharepointDownloader(sharepoint_raw_client),
             RecordingDownloader(
                 cookies,
                 sharepoint_personal_host=config.sharepoint_personal_host,
