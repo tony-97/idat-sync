@@ -81,15 +81,19 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 - **THEN** it forwards `custom_config` fields to `MoodleClient`, `MoodleAdapter`, `SharepointClient`, `SharepointApiAdapter`, `MoodleDownloader`, `SharepointDownloader`, `RecordingDownloader`, and `IDATSync`
 
 ### Requirement: Mandatory FileSystemPort delegation in DownloadManager
-`DownloadManager` SHALL require `FileSystemPort` as a non-nullable constructor dependency and delegate all local file existence checks, file modification timestamp inspections, and directory tree scans to `FileSystemPort`. `DownloadManager` MUST NOT perform direct filesystem I/O (`os`, `stat`, `rglob`, `mkdir`). Verified at the `DownloadManager` public seam.
+`DownloadManager` SHALL require `FileSystemPort` as a non-nullable constructor dependency and delegate all local directory tree modification timestamp scans to `FileSystemPort.scan_mtimes`. `DownloadManager.prepare_download_tasks(contents: Sequence[Content]) -> list[DownloadTask]` SHALL accept only `contents` and map each `Content` to a `DownloadTask` via `create_download_task` without performing filesystem queries. `DownloadManager` MUST NOT define `should_download`, accept `root_dir` in `prepare_download_tasks`, or perform direct filesystem I/O (`os`, `stat`, `rglob`, `mkdir`). `FileSystemPort` and `LocalFileSystemAdapter` MUST NOT define `exists` or `get_mtime`, and `DownloadTask` MUST NOT define `last_modified`. Verified at the `DownloadManager` and `FileSystemPort` / `LocalFileSystemAdapter` public seams.
 
 #### Scenario: Scanning local tree modification times
 - **WHEN** `DownloadManager.diff_trees(root_dir, remote_contents)` is called
 - **THEN** it delegates scanning to `file_system.scan_mtimes(Path(root_dir))` without calling `Path.rglob` or `Path.stat` directly
 
 #### Scenario: Determining whether a task needs download
-- **WHEN** `DownloadManager.should_download(task)` evaluates a download task
-- **THEN** it checks existence via `file_system.exists(local_path)` and compares timestamps via `file_system.get_mtime(local_path)` without direct OS file queries
+- **WHEN** `DownloadManager.prepare_download_tasks(contents)` evaluates a sequence of `Content` items (such as `diff.pending_contents`)
+- **THEN** it maps each `Content` to a `DownloadTask` via `create_download_task` without querying `file_system`, and rejects any `root_dir` argument with `TypeError`
+
+#### Scenario: Enforcing minimal FileSystemPort and DownloadTask surface
+- **WHEN** `FileSystemPort`, `LocalFileSystemAdapter`, `DownloadManager`, and `DownloadTask` are inspected
+- **THEN** `FileSystemPort` and `LocalFileSystemAdapter` expose only `scan_mtimes` and `ensure_dir` (neither `exists` nor `get_mtime`), `DownloadManager` does not expose `should_download`, and `DownloadTask` exposes `path` and `download` without `last_modified`
 
 ### Requirement: Sealed Anti-Corruption Layer on Moodle adapter
 `MoodleAdapter` public methods SHALL return only `domain/` models (`Course`, `CourseSection`, `CourseModule`, `ModuleContent`, `Content`). Any helper that retrieves or processes raw vendor structures (`dict`, raw JSON payloads) without converting to domain entities SHALL be private. Verified at the `MoodleAdapter` public seam.
@@ -145,3 +149,14 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 #### Scenario: Inspecting infrastructure imports and utils cleanup
 - **WHEN** all Python modules under `src/idat_sync/infrastructure/` and `src/idat_sync/utils.py` are inspected
 - **THEN** no `infrastructure/` module imports `MOODLE_IDAT` or `REQUEST_DELAY` from `idat_sync.utils`, and `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` are not defined in `src/idat_sync/utils.py`
+
+### Requirement: Unconditional target file path in RecordingDownloader
+`RecordingDownloader.download(content: RecordingContent)` SHALL unconditionally treat `content.path` as the target file path by creating `Path(content.path).parent` (`mkdir(parents=True, exist_ok=True)`) and setting `yt_dlp` `outtmpl` to `f"{prefix}{os.path.abspath(Path(content.path))}"`. `RecordingDownloader.download` MUST NOT branch on `Path(content.path).suffix` or append `"%(title)s %(id)s.%(ext)s"`. Verified at the `RecordingDownloader` public seam.
+
+#### Scenario: Downloading a recording with a file extension
+- **WHEN** `RecordingDownloader.download(content)` is called with `RecordingContent(Path("Grabaciones/Semana 1/video.mp4"), 1700000000, url)`
+- **THEN** it creates the parent directory `Grabaciones/Semana 1` and passes `f"{prefix}{os.path.abspath(Path('Grabaciones/Semana 1/video.mp4'))}"` as `outtmpl` to `yt_dlp.YoutubeDL`
+
+#### Scenario: Downloading a recording without a file extension in path
+- **WHEN** `RecordingDownloader.download(content)` is called with a `RecordingContent` whose `path` has no file suffix (`Path(content.path).suffix == ""`)
+- **THEN** it still creates `Path(content.path).parent` (not `Path(content.path)` as a directory) and passes `f"{prefix}{os.path.abspath(Path(content.path))}"` as `outtmpl` without appending `"%(title)s %(id)s.%(ext)s"`
