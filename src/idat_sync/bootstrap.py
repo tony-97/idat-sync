@@ -3,6 +3,7 @@ from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.ports import Downloader
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.application.task_orchestrator import TaskOrchestrator
+from idat_sync.config import SyncConfig
 from idat_sync.infrastructure.auth import Credentials
 from idat_sync.infrastructure.downloaders import (
     MoodleDownloader,
@@ -17,7 +18,9 @@ from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
-def create_sync_service(credentials: Credentials) -> IDATSync:
+def create_sync_service(
+    credentials: Credentials, config: SyncConfig
+) -> IDATSync:
     sharepoint_storage_state = credentials.get("sharepoint_storage_state")
     cookies = (
         sharepoint_storage_state.get("cookies", [])
@@ -25,11 +28,31 @@ def create_sync_service(credentials: Credentials) -> IDATSync:
         else []
     )
 
-    moodle_client = MoodleClient(credentials.get("token"))
-    moodle_adapter = MoodleAdapter(moodle_client)
+    moodle_client = MoodleClient(
+        credentials.get("token"),
+        base_url=config.moodle_base_url,
+        request_delay=config.request_delay,
+    )
+    moodle_adapter = MoodleAdapter(
+        moodle_client,
+        moodle_base_url=config.moodle_base_url,
+    )
 
-    sharepoint_raw_client = SharepointClient(cookies)
-    sharepoint_adapter = SharepointApiAdapter(sharepoint_raw_client)
+    sharepoint_raw_client = SharepointClient(
+        cookies,
+        sharepoint_personal_host=config.sharepoint_personal_host,
+        academic_site_url=config.sharepoint_academic_site_url,
+        request_delay=config.request_delay,
+    )
+    sharepoint_adapter = SharepointApiAdapter(
+        sharepoint_raw_client,
+        semester_start=config.semester_start,
+        sharepoint_host=config.sharepoint_host,
+        sharepoint_personal_host=config.sharepoint_personal_host,
+        recordings_folder_name=config.recordings_folder_name,
+        week_folder_prefix=config.week_folder_prefix,
+        request_delay=config.request_delay,
+    )
 
     course_repository = CourseRepository(
         course_gateway=moodle_adapter,
@@ -38,11 +61,16 @@ def create_sync_service(credentials: Credentials) -> IDATSync:
     )
 
     download_tasks_group: list[list[Downloader]] = [
-        [MoodleDownloader(moodle_adapter)],
+        [MoodleDownloader(moodle_adapter, request_delay=config.request_delay)],
         [StringDownloader()],
         [
-            SharepointDownloader(sharepoint_adapter),
-            RecordingDownloader(cookies),
+            SharepointDownloader(
+                sharepoint_adapter, request_delay=config.request_delay
+            ),
+            RecordingDownloader(
+                cookies,
+                sharepoint_personal_host=config.sharepoint_personal_host,
+            ),
         ],
     ]
     downloaders: list[Downloader] = [
@@ -60,6 +88,7 @@ def create_sync_service(credentials: Credentials) -> IDATSync:
         download_manager=download_manager,
         task_orchestrator=task_orchestrator,
         file_system=file_system,
+        recordings_folder_name=config.recordings_folder_name,
     )
 
 

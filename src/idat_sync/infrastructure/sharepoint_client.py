@@ -10,34 +10,40 @@ from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
 from playwright._impl._api_structures import StorageStateCookie
 
-from idat_sync.utils import REQUEST_DELAY
-
 
 class SharepointClient:
     """Low-level client wrapping the Office365 SharePoint REST SDK."""
 
-    def __init__(self, cookies: list[StorageStateCookie]) -> None:
+    def __init__(
+        self,
+        cookies: list[StorageStateCookie],
+        sharepoint_personal_host: str,
+        academic_site_url: str,
+        request_delay: float,
+    ) -> None:
+        self.request_delay = request_delay
         self.properties_to_retrieve = [
             "Name",
             "ServerRelativeUrl",
             "TimeLastModified",
         ]
+        host_parts = sharepoint_personal_host.split(".", 1)
+        subdomain = f".{host_parts[1]}" if len(host_parts) > 1 else ""
         self.sharepoint_cookies = self._load_auth_cookies(
-            cookies, "idat628-my.sharepoint.com", ".sharepoint.com"
+            cookies, sharepoint_personal_host, subdomain
         )
         self.onedrive_cookies = self._load_auth_cookies(
-            cookies, "idat628-my.sharepoint.com", ".sharepoint.com"
+            cookies, sharepoint_personal_host, subdomain
         )
-        site_url = "https://idat628.sharepoint.com/sites/MATERIALESTED-ACADEMICOIDAT"
-        self.client = self.get_client(site_url)
-        personal_sharepoint_url = "https://idat628-my.sharepoint.com"
+        self.client = self.get_client(academic_site_url.rstrip("/"))
+        personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
         personal_site = (
             self.personal_client.web.current_user.get_personal_site().execute_query_with_incremental_retry()
         )
         if personal_site.url:
             self.search_client = self.get_client(personal_site.url)
-            time.sleep(REQUEST_DELAY)
+            time.sleep(self.request_delay)
         else:
             raise Exception("login expired")
 
@@ -82,7 +88,7 @@ class SharepointClient:
     def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
         ctx.load(entity, self.properties_to_retrieve)
         ctx.execute_query_with_incremental_retry()
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
 
     def search_for_recordings(
         self, course_name: str
@@ -91,13 +97,13 @@ class SharepointClient:
             course_name,
             row_limit=15,
         ).execute_query_retry()
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
         return result
 
     def fetch_document_library_items(self, site_url: str) -> list[ListItem]:
         client = self.get_client(site_url)
         doc_lib = client.web.default_document_library()
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
         items = (
             doc_lib.items.select(["FileSystemObjectType"])
             .expand(["File"])
@@ -105,5 +111,5 @@ class SharepointClient:
             .get_all(page_size=50)
             .execute_query_retry()
         )
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
         return list(items)

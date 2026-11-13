@@ -18,15 +18,20 @@ class MoodleAdapter:
     MoodleClient into strongly-typed domain models.
     """
 
-    def __init__(self, client: MoodleClient) -> None:
+    def __init__(
+        self,
+        client: MoodleClient,
+        moodle_base_url: str,
+    ) -> None:
         self.client = client
+        self.moodle_host = (urlparse(moodle_base_url).hostname or "").lower()
 
     @property
     def token(self) -> str:
         return self.client.token
 
     def can_handle(self, url: str) -> bool:
-        return "aulavirtual" in urlparse(url).netloc
+        return (urlparse(url).hostname or "").lower() == self.moodle_host
 
     def list_url_content(
         self, url: str, filename: str, last_modified: int

@@ -9,6 +9,7 @@ from typing import Any
 
 from async_tkinter_loop import async_mainloop
 
+from idat_sync.config import SyncConfig, load_config
 from idat_sync.infrastructure.auth import AuthProvider
 
 
@@ -30,10 +31,17 @@ class AppFrame(tk.Frame):
 
 
 class MainApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, config: SyncConfig):
         tk.Tk.__init__(self)
         self.loop = asyncio.new_event_loop()
-        self.auth = AuthProvider()
+        self.config = config
+        self.auth = AuthProvider(
+            session_file=self.config.session_file,
+            moodle_base_url=self.config.moodle_base_url,
+            sharepoint_host=self.config.sharepoint_host,
+            sharepoint_personal_host=self.config.sharepoint_personal_host,
+            email_domain=self.config.email_domain,
+        )
         self.__frame: AppFrame | None = None
         if self.auth.is_authenticated():
             self.switch_to_sync()
@@ -61,7 +69,7 @@ class MainApp(tk.Tk):
         from idat_sync.ui.sync_frame import SyncFrame
 
         if credentials := self.auth.get_credentials():
-            self.__change(SyncFrame, credentials=credentials)
+            self.__change(SyncFrame, credentials=credentials, config=self.config)
 
     def switch_to_login(self):
         from idat_sync.ui.login_frame import LoginFrame
@@ -70,8 +78,9 @@ class MainApp(tk.Tk):
 
 
 def main():
+    config = load_config()
     sys.stdout = io.StringIO()
-    sys.stderr = open("./log.err", mode="+w", encoding="utf-8")
-    app = MainApp()
+    sys.stderr = open(config.log_file, mode="+w", encoding="utf-8")
+    app = MainApp(config=config)
     app.run()
     sys.stderr.close()

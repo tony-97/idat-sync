@@ -1,12 +1,13 @@
 import os
 import json
 import asyncio
+from pathlib import Path
 import requests
 from typing import Awaitable, Callable, TypedDict
 
 from playwright._impl._api_structures import StorageState
 
-from idat_sync.utils import get_sharepoint_cookies, MOODLE_IDAT, RQ_HEADER
+from idat_sync.utils import get_sharepoint_cookies, RQ_HEADER
 
 
 class Credentials(TypedDict):
@@ -15,8 +16,19 @@ class Credentials(TypedDict):
 
 
 class AuthProvider:
-    def __init__(self, session_file="./session.json"):
+    def __init__(
+        self,
+        session_file: str | Path,
+        moodle_base_url: str,
+        sharepoint_host: str,
+        sharepoint_personal_host: str,
+        email_domain: str,
+    ):
         self.session_file = session_file
+        self.moodle_base_url = moodle_base_url.rstrip("/")
+        self.sharepoint_host = sharepoint_host
+        self.sharepoint_personal_host = sharepoint_personal_host
+        self.email_domain = email_domain
 
     # TODO: Handle exceptions from sharepoint and moodle
     async def login(
@@ -30,7 +42,13 @@ class AuthProvider:
         token, sharepoint_storage_state = await asyncio.gather(
             asyncio.to_thread(self.__get_moodle_token, username, password),
             get_sharepoint_cookies(
-                username, password, login_flow_ended, get_mfa_code
+                username,
+                password,
+                login_flow_ended,
+                get_mfa_code,
+                sharepoint_host=self.sharepoint_host,
+                sharepoint_personal_host=self.sharepoint_personal_host,
+                email_domain=self.email_domain,
             ),
         )
 
@@ -62,7 +80,7 @@ class AuthProvider:
             "service": "moodle_mobile_app",
         }
         response = requests.post(
-            f"{MOODLE_IDAT}/login/token.php",
+            f"{self.moodle_base_url}/login/token.php",
             data=payload,
             timeout=120,
             headers=RQ_HEADER,

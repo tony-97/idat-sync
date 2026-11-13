@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.task_orchestrator import TaskOrchestrator
@@ -25,10 +25,16 @@ from idat_sync.infrastructure.downloaders import (
 
 class TestSyncPipeline(unittest.TestCase):
     def setUp(self):
-        self.moodle_downloader = MoodleDownloader(client=MagicMock())
+        self.moodle_downloader = MoodleDownloader(
+            client=MagicMock(), request_delay=30.0
+        )
         self.string_downloader = StringDownloader()
-        self.sharepoint_downloader = SharepointDownloader(client=MagicMock())
-        self.recording_downloader = RecordingDownloader(cookies=[])
+        self.sharepoint_downloader = SharepointDownloader(
+            client=MagicMock(), request_delay=30.0
+        )
+        self.recording_downloader = RecordingDownloader(
+            cookies=[], sharepoint_personal_host="idat628-my.sharepoint.com"
+        )
 
         self.groups = [
             [self.moodle_downloader],
@@ -257,6 +263,7 @@ class TestSyncPipeline(unittest.TestCase):
             download_manager=mock_mgr,
             task_orchestrator=mock_orch,
             file_system=mock_fs,
+            recordings_folder_name="Grabaciones",
         )
 
         course = Course(id=1, name="Algorithms")
@@ -283,6 +290,7 @@ class TestSyncPipeline(unittest.TestCase):
         import ast
 
         disallowed_prefixes = (
+            "idat_sync.config",
             "idat_sync.infrastructure",
             "idat_sync.ui",
             "requests",
@@ -317,9 +325,247 @@ class TestSyncPipeline(unittest.TestCase):
             f"Found architectural layer violations in domain/application: {violations}",
         )
 
+        infra_violations: list[str] = []
+        forbidden_utils_symbols = {"MOODLE_IDAT", "REQUEST_DELAY"}
+        for py_file in (src_root / "infrastructure").rglob("*.py"):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "idat_sync.utils":
+                    imported = {alias.name for alias in node.names}
+                    bad = imported & forbidden_utils_symbols
+                    if bad:
+                        infra_violations.append(
+                            f"{py_file.name}:{node.lineno} imports {sorted(bad)} from idat_sync.utils"
+                        )
+
+        self.assertEqual(
+            infra_violations,
+            [],
+            f"Found forbidden global constant imports in infrastructure: {infra_violations}",
+        )
+
+        utils_tree = ast.parse(
+            (src_root / "utils.py").read_text(encoding="utf-8"),
+            filename=str(src_root / "utils.py"),
+        )
+        defined_names = {
+            node.name
+            for node in utils_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        } | {
+            target.id
+            for node in utils_tree.body
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        self.assertNotIn("save_content", defined_names)
+        self.assertNotIn("MOODLE_IDAT", defined_names)
+        self.assertNotIn("REQUEST_DELAY", defined_names)
+
     def test_download_manager_requires_filesystem_port(self):
         with self.assertRaises(TypeError):
             DownloadManager(self.downloaders)  # type: ignore[call-arg]
+
+    def test_downloaders_use_injected_request_delay_and_personal_host(self):
+        from idat_sync.domain.content import RecordingContent, SharepointContent
+        from idat_sync.infrastructure.downloaders import (
+            MoodleDownloader,
+            RecordingDownloader,
+            SharepointDownloader,
+        )
+
+        mock_moodle = MagicMock()
+        mock_moodle.token = "tok"
+        moodle_dl = MoodleDownloader(mock_moodle, request_delay=0.75)
+
+        mock_sp = MagicMock()
+        sp_dl = SharepointDownloader(mock_sp, request_delay=1.25)
+
+        rec_dl = RecordingDownloader(
+            cookies=[],
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+        )
+        self.assertTrue(
+            rec_dl.can_handle(
+                RecordingContent(
+                    Path("v.mp4"),
+                    0,
+                    "https://contoso-my.sharepoint.com/:v:/r/personal/u/v.mp4",
+                )
+            )
+        )
+        self.assertFalse(
+            rec_dl.can_handle(
+                RecordingContent(
+                    Path("v.mp4"),
+                    0,
+                    "https://idat628-my.sharepoint.com/:v:/r/personal/u/v.mp4",
+                )
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            with patch("idat_sync.infrastructure.downloaders.time.sleep") as mock_sleep, patch(
+                "idat_sync.infrastructure.downloaders.requests.get"
+            ) as mock_get:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.iter_content.return_value = [b"data"]
+                mock_get.return_value.__enter__.return_value = mock_resp
+                moodle_dl.download(MoodleContent(tmp / "a.pdf", 0, "https://moodle/a.pdf"))
+                mock_sleep.assert_called_once_with(0.75)
+
+            with patch("idat_sync.infrastructure.downloaders.time.sleep") as mock_sleep:
+                mock_file = MagicMock()
+                sp_dl.download(SharepointContent(tmp / "b.pdf", 0, mock_file))
+                mock_sleep.assert_called_once_with(1.25)
+
+    def test_idat_sync_uses_injected_recordings_folder_name(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.ports import FileSystemPort
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.domain.course import Course
+
+        mock_repo = MagicMock(spec=CourseRepository)
+        mock_mgr = MagicMock(spec=DownloadManager)
+        mock_orch = MagicMock(spec=TaskOrchestrator)
+        mock_fs = MagicMock(spec=FileSystemPort)
+
+        sync = IDATSync(
+            course_repository=mock_repo,
+            download_manager=mock_mgr,
+            task_orchestrator=mock_orch,
+            file_system=mock_fs,
+            recordings_folder_name="Videos",
+        )
+
+        course = Course(id=1, name="Algorithms")
+        mock_repo.get_course_content.return_value = []
+        mock_repo.get_recordings.return_value = []
+        fake_diff = MagicMock()
+        fake_diff.pending_contents = []
+        mock_mgr.diff_trees.return_value = fake_diff
+        mock_mgr.prepare_download_tasks.return_value = []
+
+        sync.sync_course(course, Path("target_dir"))
+
+        mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Videos")
+        mock_repo.get_recordings.assert_called_once_with("Algorithms", Path("target_dir") / "Videos")
+
+    def test_create_sync_service_wires_sync_config(self):
+        from datetime import date
+        from idat_sync.bootstrap import create_sync_service
+        from idat_sync.config import SyncConfig
+
+        custom_config = SyncConfig(
+            semester_start=date(2026, 3, 16),
+            request_delay=1.5,
+            moodle_base_url="https://lms.example.edu",
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            sharepoint_academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
+            recordings_folder_name="Videos",
+            week_folder_prefix="Week",
+        )
+        credentials = {
+            "token": "tok123",
+            "sharepoint_storage_state": {"cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]},
+        }
+
+        with patch("idat_sync.bootstrap.MoodleClient") as mock_mc, patch(
+            "idat_sync.bootstrap.MoodleAdapter"
+        ) as mock_ma, patch("idat_sync.bootstrap.SharepointClient") as mock_sc, patch(
+            "idat_sync.bootstrap.SharepointApiAdapter"
+        ) as mock_sa, patch(
+            "idat_sync.bootstrap.MoodleDownloader"
+        ) as mock_md, patch(
+            "idat_sync.bootstrap.SharepointDownloader"
+        ) as mock_sd, patch(
+            "idat_sync.bootstrap.RecordingDownloader"
+        ) as mock_rd:
+            service = create_sync_service(credentials, config=custom_config)  # type: ignore[arg-type]
+
+        mock_mc.assert_called_once_with(
+            "tok123",
+            base_url="https://lms.example.edu",
+            request_delay=1.5,
+        )
+        mock_ma.assert_called_once_with(
+            mock_mc.return_value,
+            moodle_base_url="https://lms.example.edu",
+        )
+        mock_sc.assert_called_once_with(
+            credentials["sharepoint_storage_state"]["cookies"],
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
+            request_delay=1.5,
+        )
+        mock_sa.assert_called_once_with(
+            mock_sc.return_value,
+            semester_start=date(2026, 3, 16),
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            recordings_folder_name="Videos",
+            week_folder_prefix="Week",
+            request_delay=1.5,
+        )
+        mock_md.assert_called_once_with(mock_ma.return_value, request_delay=1.5)
+        mock_sd.assert_called_once_with(mock_sa.return_value, request_delay=1.5)
+        mock_rd.assert_called_once_with(
+            credentials["sharepoint_storage_state"]["cookies"],
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+        )
+        self.assertEqual(service.recordings_folder_name, "Videos")
+
+    def test_auth_provider_and_ui_accept_configured_paths_and_hosts(self):
+        import asyncio
+        import inspect
+        from idat_sync.config import SyncConfig
+        from idat_sync.infrastructure.auth import AuthProvider
+        from idat_sync.ui.app import MainApp
+        from idat_sync.ui.sync_frame import SyncFrame
+        from idat_sync.utils import get_sharepoint_cookies
+
+        sig = inspect.signature(get_sharepoint_cookies)
+        self.assertIn("sharepoint_host", sig.parameters)
+        self.assertIn("sharepoint_personal_host", sig.parameters)
+        self.assertIn("email_domain", sig.parameters)
+
+        self.assertIn("config", inspect.signature(MainApp.__init__).parameters)
+        self.assertIn("config", inspect.signature(SyncFrame.__init__).parameters)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_path = Path(tmpdir) / "sess.json"
+            auth = AuthProvider(
+                session_file=session_path,
+                moodle_base_url="https://lms.example.edu/",
+                sharepoint_host="contoso.sharepoint.com",
+                sharepoint_personal_host="contoso-my.sharepoint.com",
+                email_domain="example.edu",
+            )
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"token": "tok"}
+            with patch("idat_sync.infrastructure.auth.requests.post", return_value=mock_resp) as mock_post, patch(
+                "idat_sync.infrastructure.auth.get_sharepoint_cookies",
+                return_value={"cookies": []},
+            ) as mock_cookies:
+                ok = asyncio.run(
+                    auth.login("jdoe", "pw", asyncio.Event(), lambda: asyncio.sleep(0, result="123456"))  # type: ignore[arg-type]
+                )
+
+            self.assertTrue(ok)
+            self.assertTrue(session_path.exists())
+            mock_post.assert_called_once()
+            self.assertEqual(mock_post.call_args.args[0], "https://lms.example.edu/login/token.php")
+            mock_cookies.assert_called_once()
+            self.assertEqual(mock_cookies.call_args.kwargs["sharepoint_host"], "contoso.sharepoint.com")
+            self.assertEqual(
+                mock_cookies.call_args.kwargs["sharepoint_personal_host"],
+                "contoso-my.sharepoint.com",
+            )
+            self.assertEqual(mock_cookies.call_args.kwargs["email_domain"], "example.edu")
 
 
 if __name__ == "__main__":

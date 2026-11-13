@@ -8,7 +8,11 @@ from idat_sync.infrastructure.moodle_client import MoodleClient
 class TestMoodleClient(unittest.TestCase):
     def setUp(self):
         self.token = "fake_test_token"
-        self.client = MoodleClient(token=self.token)
+        self.client = MoodleClient(
+            token=self.token,
+            base_url="https://aulavirtual.idat.edu.pe",
+            request_delay=30.0,
+        )
 
     @patch("idat_sync.infrastructure.moodle_client.time.sleep")
     @patch("idat_sync.infrastructure.moodle_client.requests.post")
@@ -82,6 +86,25 @@ class TestMoodleClient(unittest.TestCase):
         self.assertEqual(result, raw_sections)
         self.assertIsInstance(result, list)
         self.assertIsInstance(result[0], dict)  # Raw vendor data type
+
+    @patch("idat_sync.infrastructure.moodle_client.time.sleep")
+    @patch("idat_sync.infrastructure.moodle_client.requests.post")
+    def test_call_ws_uses_injected_base_url_and_request_delay(self, mock_post, mock_sleep):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"ok": True}
+        mock_post.return_value = mock_response
+
+        client = MoodleClient(
+            token="tok",
+            base_url="https://moodle.example.edu/",
+            request_delay=2.5,
+        )
+        client.call_ws("core_webservice_get_site_info")
+
+        mock_post.assert_called_once()
+        args, _ = mock_post.call_args
+        self.assertEqual(args[0], "https://moodle.example.edu/webservice/rest/server.php")
+        mock_sleep.assert_called_once_with(2.5)
 
 
 if __name__ == "__main__":

@@ -17,17 +17,19 @@ class IDATSync:
         download_manager: DownloadManager,
         task_orchestrator: TaskOrchestrator,
         file_system: FileSystemPort,
+        recordings_folder_name: str,
     ) -> None:
         self.course_repository = course_repository
         self.download_manager = download_manager
         self.task_orchestrator = task_orchestrator
         self.file_system = file_system
+        self.recordings_folder_name = recordings_folder_name
 
     def get_course_remote_tree(
         self, course: Course, course_dir: str | Path
     ) -> list[Content]:
         course_path = Path(course_dir)
-        recordings_folder = course_path / "Grabaciones"
+        recordings_folder = course_path / self.recordings_folder_name
         remote_tree = self.course_repository.get_course_content(
             course, course_path
         )
@@ -45,7 +47,7 @@ class IDATSync:
 
     def sync_course(self, course: Course, course_dir: str | Path) -> SyncDiff:
         course_path = Path(course_dir)
-        recordings_folder = course_path / "Grabaciones"
+        recordings_folder = course_path / self.recordings_folder_name
         self.file_system.ensure_dir(course_path)
         self.file_system.ensure_dir(recordings_folder)
 

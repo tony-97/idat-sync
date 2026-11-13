@@ -9,13 +9,21 @@ from async_tkinter_loop import async_handler
 
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.bootstrap import create_sync_service
+from idat_sync.config import SyncConfig
 from idat_sync.infrastructure.auth import Credentials
 from idat_sync.ui.app import AppFrame, MainApp, ProgressInterceptor
 
 
 class SyncFrame(AppFrame):
-    def __init__(self, master: MainApp, credentials: Credentials, **kwargs):
+    def __init__(
+        self,
+        master: MainApp,
+        credentials: Credentials,
+        config: SyncConfig,
+        **kwargs,
+    ):
         tk.Frame.__init__(self, master, **kwargs)
+        self.config = config
         window_width = 700
         window_height = 500
         master.center_window(window_width, window_height)
@@ -100,7 +108,7 @@ class SyncFrame(AppFrame):
     async def load_idat_sync(self, credentials: Credentials):
         self.is_syncing.set(True)
         self.idat_sync = await asyncio.to_thread(
-            create_sync_service, credentials
+            create_sync_service, credentials, self.config
         )
         self.is_syncing.set(False)
 

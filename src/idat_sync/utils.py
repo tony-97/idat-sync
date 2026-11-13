@@ -3,12 +3,10 @@ import asyncio
 import platform
 from typing import Awaitable, Callable
 import unicodedata
-from pathlib import Path
 
 
 from playwright.async_api import async_playwright
 
-MOODLE_IDAT = "https://aulavirtual.idat.edu.pe"
 RQ_HEADER = {
     "User-Agent": (
         "Mozilla/5.0 (Linux; Android 7.1.1; Moto G Play Build/NPIS26.48-43-2; wv) AppleWebKit/537.36"
@@ -17,16 +15,7 @@ RQ_HEADER = {
     "Content-Type": "application/x-www-form-urlencoded",
 }
 
-REQUEST_DELAY = 30
-
 from idat_sync.domain.path_utils import WINDOWS_RESERVED, safe_filename
-
-
-def save_content(path: str, content: str):
-    content = content.strip()
-    if not Path(path).exists() and content:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
 
 
 # TODO maybe raise timeout exception when navigation fails
@@ -36,8 +25,11 @@ async def get_sharepoint_cookies(
     password: str,
     login_flow_ended: asyncio.Event,
     get_mfa_code: Callable[[], Awaitable[str]],
+    sharepoint_host: str,
+    sharepoint_personal_host: str,
+    email_domain: str,
 ):
-    site_url = "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx"
+    site_url = f"https://{sharepoint_host}/_layouts/15/sharepoint.aspx"
     channel = "chromium"
     if (os := platform.system()) == "Windows":
         channel = "msedge"
@@ -61,7 +53,7 @@ async def get_sharepoint_cookies(
             await page.wait_for_load_state("networkidle", timeout=timeout)
             # --- Fill login form ---
             # Fill username
-            await page.fill("#i0116", f"{username}@idat.pe", force=True)
+            await page.fill("#i0116", f"{username}@{email_domain}", force=True)
             await page.click("#idSIButton9")  # Click Next
 
             # Fill password
@@ -88,13 +80,13 @@ async def get_sharepoint_cookies(
             await page.click("#idSIButton9")  # Click Sign in
             # Wait for redirection back to SharePoint after successful login
             await page.wait_for_url(
-                "https://idat628.sharepoint.com/_layouts/15/sharepoint.aspx",
+                site_url,
                 timeout=timeout,
             )
             await page.wait_for_load_state("load", timeout=timeout)
             await asyncio.sleep(3)
             await page.goto(
-                "https://idat628-my.sharepoint.com/shared",
+                f"https://{sharepoint_personal_host}/shared",
             )
             await page.wait_for_load_state("load", timeout=timeout)
             await asyncio.sleep(3)

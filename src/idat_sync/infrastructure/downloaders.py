@@ -22,7 +22,7 @@ from idat_sync.domain.content import (
     SharepointContent,
     StringContent,
 )
-from idat_sync.utils import REQUEST_DELAY, RQ_HEADER
+from idat_sync.utils import RQ_HEADER
 
 if TYPE_CHECKING:
     from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
@@ -32,8 +32,11 @@ if TYPE_CHECKING:
 class MoodleDownloader(Downloader[MoodleContent]):
     content_type = MoodleContent
 
-    def __init__(self, client: MoodleAdapter) -> None:
+    def __init__(
+        self, client: MoodleAdapter, request_delay: float
+    ) -> None:
         self.moodle_client = client
+        self.request_delay = request_delay
 
     def download(self, content: MoodleContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
@@ -57,14 +60,17 @@ class MoodleDownloader(Downloader[MoodleContent]):
                 for part in r.iter_content(chunk_size=1024 * 256):
                     if part:
                         f.write(part)
-            time.sleep(REQUEST_DELAY)
+            time.sleep(self.request_delay)
 
 
 class SharepointDownloader(Downloader[SharepointContent]):
     content_type = SharepointContent
 
-    def __init__(self, client: SharepointApiAdapter) -> None:
+    def __init__(
+        self, client: SharepointApiAdapter, request_delay: float
+    ) -> None:
         self.sharepoint_client = client
+        self.request_delay = request_delay
 
     def download(self, content: SharepointContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +78,7 @@ class SharepointDownloader(Downloader[SharepointContent]):
             content.file.download_session(
                 local_file
             ).execute_query_with_incremental_retry()
-            time.sleep(REQUEST_DELAY)
+            time.sleep(self.request_delay)
 
 
 class StringDownloader(Downloader[StringContent]):
@@ -91,11 +97,16 @@ class StringDownloader(Downloader[StringContent]):
 class RecordingDownloader(Downloader[RecordingContent]):
     content_type = RecordingContent
 
-    def __init__(self, cookies: list[StorageStateCookie]) -> None:
+    def __init__(
+        self,
+        cookies: list[StorageStateCookie],
+        sharepoint_personal_host: str,
+    ) -> None:
         self.cookies = self.netscape_cookies_format(cookies)
+        self.sharepoint_personal_host = sharepoint_personal_host.lower()
 
     def can_handle(self, content: RecordingContent) -> bool:
-        return "idat628-my.sharepoint.com/:v:" in content.url
+        return f"{self.sharepoint_personal_host}/:v:" in content.url
 
     def netscape_cookies_format(self, cookies: list[StorageStateCookie]):
         lines = []

@@ -15,17 +15,26 @@ from office365.sharepoint.search.result import SearchResult
 
 from idat_sync.domain.content import RecordingContent, SharepointContent
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
-from idat_sync.utils import REQUEST_DELAY
 
 
 class SharepointApiAdapter:
     def __init__(
         self,
         client: SharepointClient,
-        semester_start: date = date(2025, 9, 22),
+        semester_start: date,
+        sharepoint_host: str,
+        sharepoint_personal_host: str,
+        recordings_folder_name: str,
+        week_folder_prefix: str,
+        request_delay: float,
     ) -> None:
         self.sp_client = client
         self.semester_start = semester_start
+        self.sharepoint_host = sharepoint_host.lower()
+        self.sharepoint_personal_host = sharepoint_personal_host.lower()
+        self.recordings_folder_name = recordings_folder_name
+        self.week_folder_prefix = week_folder_prefix
+        self.request_delay = request_delay
         self.properties_to_retrieve = self.sp_client.properties_to_retrieve
         self.client = self.sp_client.client
         self.search_client = self.sp_client.search_client
@@ -40,7 +49,7 @@ class SharepointApiAdapter:
             site_name: str = cells.get("SiteName") or ""
             if (
                 course_name in title
-                and parent_link.lower().endswith("grabaciones")
+                and parent_link.lower().endswith(self.recordings_folder_name.lower())
                 and site_name
             ):
                 return site_name
@@ -73,14 +82,14 @@ class SharepointApiAdapter:
         )
 
     def can_handle(self, url: str):
-        return "idat628.sharepoint" in urlparse(url).netloc
+        return (urlparse(url).hostname or "").lower() == self.sharepoint_host
 
     def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[SharepointContent]:
-        if re.search(r"https://idat628\.sharepoint\.com/:(\w+):", url):
+        if re.search(rf"https://{re.escape(self.sharepoint_host)}/:(\w+):", url):
             ctx: ClientContext = self.sp_client.get_client_from_url(url)
-            if url.startswith("https://idat628.sharepoint.com/:f:"):
+            if url.startswith(f"https://{self.sharepoint_host}/:f:"):
                 folder: Folder = ctx.web.get_folder_by_guest_url(url)
                 self.sp_client.load_entity(folder, ctx)
                 return self.fetch_folder_contents(folder)
@@ -102,9 +111,9 @@ class SharepointApiAdapter:
         )
         for file in files:
             contents.append(self.__file_to_content(file))
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
         folders = folder.get_folders().execute_query_retry()
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
         for sub_folder in folders:
             if save_name := self.__get_name(sub_folder):
                 for item in self.fetch_folder_contents(sub_folder):
@@ -139,7 +148,7 @@ class SharepointApiAdapter:
                 relative_url = item.file.serverRelativeUrl or ""
                 return (
                     Path(urlparse(relative_url).path).parent.name.lower()
-                    == "grabaciones"
+                    == self.recordings_folder_name.lower()
                     and course_name in relative_url
                 )
 
@@ -155,8 +164,8 @@ class SharepointApiAdapter:
                 )
                 name = self.get_name(file)
                 last_mod = self.get_last_modified(file)
-                share_url = f"https://idat628-my.sharepoint.com/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
-                rec_path = Path(f"Semana {week}") / name
+                share_url = f"https://{self.sharepoint_personal_host}/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
+                rec_path = Path(f"{self.week_folder_prefix} {week}") / name
                 recordings.append(
                     RecordingContent(rec_path, last_mod, share_url)
                 )

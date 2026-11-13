@@ -2,8 +2,6 @@ import time
 from typing import Any
 import requests
 
-from idat_sync.utils import MOODLE_IDAT, REQUEST_DELAY
-
 
 class MoodleClient:
     """Low-level client communicating directly with the Moodle Web Services API.
@@ -12,9 +10,15 @@ class MoodleClient:
     and returns raw vendor JSON payloads without leaking domain logic.
     """
 
-    def __init__(self, token: str, base_url: str = MOODLE_IDAT) -> None:
+    def __init__(
+        self,
+        token: str,
+        base_url: str,
+        request_delay: float,
+    ) -> None:
         self.token = token
-        self.base_url = base_url
+        self.base_url = base_url.rstrip("/")
+        self.request_delay = request_delay
 
     def call_ws(self, function: str, **kwargs: Any) -> Any:
         """Call a Moodle web service endpoint with the provided parameters."""
@@ -30,7 +34,7 @@ class MoodleClient:
         result = response.json()
         if isinstance(result, dict) and result.get("exception"):
             raise RuntimeError(f"{result.get('errorcode')}: {result.get('message')}")
-        time.sleep(REQUEST_DELAY)
+        time.sleep(self.request_delay)
         return result
 
     def fetch_enrolled_courses(

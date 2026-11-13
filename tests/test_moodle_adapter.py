@@ -12,7 +12,10 @@ class TestMoodleAdapter(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock(spec=MoodleClient)
         self.mock_client.token = "test_token_123"
-        self.adapter = MoodleAdapter(client=self.mock_client)
+        self.adapter = MoodleAdapter(
+            client=self.mock_client,
+            moodle_base_url="https://aulavirtual.idat.edu.pe",
+        )
 
     def test_can_handle(self):
         self.assertTrue(
@@ -25,6 +28,14 @@ class TestMoodleAdapter(unittest.TestCase):
                 "https://idat628.sharepoint.com/sites/my_site"
             )
         )
+
+    def test_can_handle_uses_injected_moodle_base_url_host(self):
+        custom_adapter = MoodleAdapter(
+            client=self.mock_client,
+            moodle_base_url="https://lms.example.edu/portal",
+        )
+        self.assertTrue(custom_adapter.can_handle("https://lms.example.edu/mod/resource/view.php?id=1"))
+        self.assertFalse(custom_adapter.can_handle("https://aulavirtual.idat.edu.pe/mod/resource/view.php?id=1"))
 
     def test_list_url_content(self):
         items = self.adapter.list_url_content(
