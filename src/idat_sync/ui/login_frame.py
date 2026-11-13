@@ -48,12 +48,12 @@ class LoginFrame(AppFrame):
         self.login_button.pack(pady=10)
 
     def validate_buttons(self, *args):
-        has_credentials = bool(self.user_var.get().strip()) and bool(
+        has_login_inputs = bool(self.user_var.get().strip()) and bool(
             self.pass_var.get()
         )
         state = (
             "normal"
-            if not self.is_login.get() and has_credentials
+            if not self.is_login.get() and has_login_inputs
             else "disabled"
         )
         self.login_button.config(state=state)
