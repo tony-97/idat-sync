@@ -20,26 +20,43 @@ class LoginFrame(AppFrame):
         master.title("IDAT Sync Login")
 
         tk.Label(self, text="Username:").pack(pady=5)
-        self.user_entry = tk.Entry(self, width=30)
+        self.user_var = tk.StringVar()
+        self.user_entry = tk.Entry(
+            self, width=30, textvariable=self.user_var
+        )
         self.user_entry.pack()
         self.user_entry.focus()
 
         tk.Label(self, text="Password:").pack(pady=5)
-        self.pass_entry = tk.Entry(self, show="*", width=30)
+        self.pass_var = tk.StringVar()
+        self.pass_entry = tk.Entry(
+            self, show="*", width=30, textvariable=self.pass_var
+        )
         self.pass_entry.pack()
         self.pass_entry.bind("<Return>", self.do_login)
 
-        login_button = tk.Button(
-            self, text="Login", command=async_handler(self.do_login)
+        self.login_button = tk.Button(
+            self,
+            text="Login",
+            command=async_handler(self.do_login),
+            state="disabled",
         )
         self.is_login = tk.BooleanVar(value=False)
-        self.is_login.trace(
-            "w",
-            lambda *args: login_button.config(
-                state="disabled" if self.is_login.get() else "normal"
-            ),
+        self.user_var.trace_add("write", self.validate_buttons)
+        self.pass_var.trace_add("write", self.validate_buttons)
+        self.is_login.trace_add("write", self.validate_buttons)
+        self.login_button.pack(pady=10)
+
+    def validate_buttons(self, *args):
+        has_credentials = bool(self.user_var.get().strip()) and bool(
+            self.pass_var.get()
         )
-        login_button.pack(pady=10)
+        state = (
+            "normal"
+            if not self.is_login.get() and has_credentials
+            else "disabled"
+        )
+        self.login_button.config(state=state)
 
     async def get_mfa_code_ui(self):
         """Creates a Tkinter popup that pauses the async function until submitted."""
@@ -73,8 +90,10 @@ class LoginFrame(AppFrame):
 
     # TODO add loading dialog until MFA auth
     async def do_login(self, event=None):
-        if (user := self.user_entry.get()) and (
-            password := self.pass_entry.get()
+        if (
+            not self.is_login.get()
+            and (user := self.user_var.get().strip())
+            and (password := self.pass_var.get())
         ):
             self.is_login.set(True)
             try:

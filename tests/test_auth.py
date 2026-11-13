@@ -1,8 +1,11 @@
 import asyncio
+import contextlib
 import inspect
+import io
 from pathlib import Path
 import tempfile
 import threading
+import tkinter as tk
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +17,7 @@ from idat_sync.application.ports import (
 )
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
+from idat_sync.ui.login_frame import LoginFrame
 
 
 class FakeMoodleTokenPort:
@@ -490,6 +494,133 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             expect_context_close=True,
             expect_browser_close=True,
         )
+
+
+class TestLoginFrame(unittest.TestCase):
+    def _create_master(self):
+        class StubMaster(tk.Tk):
+            def __init__(self) -> None:
+                super().__init__()
+                self.withdraw()
+                self.switched_to_sync = 0
+
+            def center_window(self, window_width: int, window_height: int) -> None:
+                self.centered_size = (window_width, window_height)
+
+            def switch_to_sync(self) -> None:
+                self.switched_to_sync += 1
+
+        master = StubMaster()
+        self.addCleanup(master.destroy)
+        return master
+
+    def _login_button(self, frame: LoginFrame) -> tk.Button:
+        return next(w for w in frame.winfo_children() if isinstance(w, tk.Button))
+
+    def _set_entry(self, entry: tk.Entry, value: str) -> None:
+        entry.delete(0, tk.END)
+        entry.insert(0, value)
+
+    def test_login_button_disables_while_blank_or_logging_in_and_guards_submit(self):
+        expected_state: StorageStateData = {
+            "cookies": [{"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}]
+        }
+
+        class ControllableSharepointAuth:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, str]] = []
+                self.error: Exception | None = None
+                self.started: asyncio.Event | None = None
+                self.release: asyncio.Event | None = None
+
+            async def fetch_storage_state(
+                self, username: str, password: str, get_mfa_code
+            ) -> StorageStateData | None:
+                self.calls.append((username, password))
+                if self.started is not None:
+                    self.started.set()
+                if self.release is not None:
+                    await self.release.wait()
+                if self.error is not None:
+                    raise self.error
+                return expected_state
+
+        moodle = FakeMoodleTokenPort(token="tok-ui")
+        sharepoint = ControllableSharepointAuth()
+        store = InMemoryCredentialStore()
+        auth = AuthService(
+            moodle_auth=moodle,
+            sharepoint_auth=sharepoint,
+            credential_store=store,
+        )
+        master = self._create_master()
+        frame = LoginFrame(master, auth)  # type: ignore[arg-type]
+        login_button = self._login_button(frame)
+
+        self.assertEqual(str(login_button["state"]), "disabled")
+
+        self._set_entry(frame.user_entry, "   ")
+        self._set_entry(frame.pass_entry, " secret ")
+        self.assertEqual(str(login_button["state"]), "disabled")
+
+        self._set_entry(frame.user_entry, " jdoe@custom.edu ")
+        self._set_entry(frame.pass_entry, "")
+        self.assertEqual(str(login_button["state"]), "disabled")
+
+        self._set_entry(frame.pass_entry, " secret ")
+        self.assertEqual(str(login_button["state"]), "normal")
+
+        self._set_entry(frame.user_entry, "   ")
+        self.assertEqual(str(login_button["state"]), "disabled")
+
+        self._set_entry(frame.user_entry, " jdoe@custom.edu ")
+        self.assertEqual(str(login_button["state"]), "normal")
+
+        async def exercise_do_login() -> None:
+            # Failed concurrent submission: disables during flight, blocks duplicate Return, resets in finally
+            sharepoint.started = asyncio.Event()
+            sharepoint.release = asyncio.Event()
+            sharepoint.error = RuntimeError("sso boom")
+
+            stderr_buf = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buf):
+                task = asyncio.create_task(frame.do_login())
+                await sharepoint.started.wait()
+                self.assertEqual(str(login_button["state"]), "disabled")
+
+                # Duplicate submit while login is active must be ignored
+                await frame.do_login()
+                self.assertEqual(len(sharepoint.calls), 1)
+
+                sharepoint.release.set()
+                await task
+
+            self.assertIn("sso boom", stderr_buf.getvalue())
+            self.assertEqual(str(login_button["state"]), "normal")
+            self.assertEqual(master.switched_to_sync, 0)
+
+            # Successful submission strips username, preserves password, switches to sync
+            sharepoint.started = None
+            sharepoint.release = None
+            sharepoint.error = None
+            await frame.do_login()
+
+            self.assertEqual(moodle.calls, [("jdoe", " secret "), ("jdoe", " secret ")])
+            self.assertEqual(
+                sharepoint.calls,
+                [("jdoe@custom.edu", " secret "), ("jdoe@custom.edu", " secret ")],
+            )
+            self.assertEqual(master.switched_to_sync, 1)
+            self.assertEqual(str(login_button["state"]), "normal")
+
+            # Blank username submit is ignored and keeps button disabled
+            self._set_entry(frame.user_entry, "   ")
+            self.assertEqual(str(login_button["state"]), "disabled")
+            await frame.do_login()
+            self.assertEqual(len(moodle.calls), 2)
+            self.assertEqual(str(login_button["state"]), "disabled")
+
+        asyncio.run(exercise_do_login())
 
 
 if __name__ == "__main__":

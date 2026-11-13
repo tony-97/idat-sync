@@ -30,11 +30,11 @@ class AuthService:
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> bool:
-        clean_username = username.split("@", 1)[0]
+        moodle_username = username.split("@", 1)[0]
         async with asyncio.TaskGroup() as tg:
             moodle_task = tg.create_task(
                 asyncio.to_thread(
-                    self.moodle_auth.fetch_token, clean_username, password
+                    self.moodle_auth.fetch_token, moodle_username, password
                 ),
                 name="moodle_auth",
             )
@@ -55,7 +55,7 @@ class AuthService:
         )
         saved = await asyncio.to_thread(self.credential_store.save, credentials)
         if saved:
-            print(f"Success: User '{clean_username}' is now logged in.")
+            print(f"Success: User '{moodle_username}' is now logged in.")
         return saved
 
     def logout(self) -> None:

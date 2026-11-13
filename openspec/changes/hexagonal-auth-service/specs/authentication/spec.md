@@ -55,11 +55,15 @@ Authenticates users against Moodle and SharePoint/Microsoft SSO, orchestrates co
 - **THEN** `JsonCredentialStore.load()` catches `(OSError, json.JSONDecodeError)` and returns `None` without raising
 
 ### Requirement: Composition root wiring and UI decoupling for authentication
-`create_auth_service(config: SyncConfig) -> AuthService` in `src/idat_sync/bootstrap.py` SHALL wire `MoodleTokenAdapter(MoodleTokenClient(config.moodle_base_url))`, `SharepointBrowserAuth`, and `JsonCredentialStore` using `config` fields. `src/idat_sync/ui/` MUST NOT import `idat_sync.infrastructure`, and `MainApp`, `LoginFrame`, and `SyncFrame` SHALL consume `AuthService` and `Credentials` via `bootstrap` and `application`. Verified at the `bootstrap.create_auth_service` and AST seams.
+`create_auth_service(config: SyncConfig) -> AuthService` in `src/idat_sync/bootstrap.py` SHALL wire `MoodleTokenAdapter(MoodleTokenClient(config.moodle_base_url))`, `SharepointBrowserAuth`, and `JsonCredentialStore` using `config` fields. `src/idat_sync/ui/` MUST NOT import `idat_sync.infrastructure`, and `MainApp`, `LoginFrame`, and `SyncFrame` SHALL consume `AuthService` and `Credentials` via `bootstrap` and `application`. `LoginFrame` SHALL keep the Login button disabled whenever trimmed username is blank, password is empty, or authentication is in progress (`is_login`), pass stripped username with verbatim password to `AuthService.login`, ignore blank or concurrent submissions, unpack `ExceptionGroup.exceptions` on failure, and reset `is_login` in `finally:`. Verified at the `bootstrap.create_auth_service`, `LoginFrame`, and AST seams.
 
 #### Scenario: Wiring AuthService from SyncConfig in bootstrap
 - **WHEN** `create_auth_service(custom_config)` is called
 - **THEN** it returns an `AuthService` wired with `MoodleTokenAdapter(MoodleTokenClient(custom_config.moodle_base_url))`, `SharepointBrowserAuth(custom_config.sharepoint_host, custom_config.sharepoint_personal_host, custom_config.email_domain)`, and `JsonCredentialStore(custom_config.session_file)`
+
+#### Scenario: Disabling Login on blank inputs or active login and guarding submissions
+- **WHEN** `LoginFrame` initializes, when trimmed username or raw password is empty vs. non-empty, or while `do_login` is running vs. completes/raises
+- **THEN** the Login button starts `"disabled"`, switches to `"normal"` only when trimmed username, non-empty password, and `not is_login` all hold, `do_login` ignores blank or concurrent submissions and passes stripped `username` with unstripped `password` to `AuthService.login`, and `finally:` resets `is_login` while unpacking `ExceptionGroup.exceptions`
 
 #### Scenario: Enforcing UI isolation from infrastructure
 - **WHEN** all Python modules under `src/idat_sync/ui/` are inspected via AST
