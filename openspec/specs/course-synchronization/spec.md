@@ -7,7 +7,7 @@ Synchronizes remote `Course` structures, inline HTML artifacts, external URLs, a
 ## Requirements
 
 ### Requirement: Strict inward package dependency boundary
-The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have zero imports from `idat_sync.config`, `idat_sync.infrastructure`, `idat_sync.ui`, `requests`, `office365`, `yt_dlp`, or `playwright`. `safe_filename` and `WINDOWS_RESERVED` SHALL reside in `src/idat_sync/domain/path_utils.py` (and be re-exported in `idat_sync.utils`). Verified at the architecture boundary seam and `domain.path_utils` seam.
+The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have zero imports from `idat_sync.config`, `idat_sync.infrastructure`, `idat_sync.ui`, `requests`, `office365`, `yt_dlp`, or `playwright`. `src/idat_sync/ui/` MUST NOT import `idat_sync.infrastructure`, `src/idat_sync/infrastructure/sharepoint_auth.py` SHALL be the sole module importing `playwright`, `src/idat_sync/infrastructure/auth.py` MUST NOT exist, `src/idat_sync/utils.py` MUST NOT exist, and `safe_filename` and `WINDOWS_RESERVED` SHALL reside in `src/idat_sync/domain/path_utils.py`. Verified at the architecture boundary and `domain.path_utils` seams.
 
 #### Scenario: Inspecting domain and application imports
 - **WHEN** all Python modules under `src/idat_sync/domain/` and `src/idat_sync/application/` are parsed for import statements
@@ -16,6 +16,10 @@ The `src/idat_sync/domain/` and `src/idat_sync/application/` packages SHALL have
 #### Scenario: Sanitizing course filenames without importing infrastructure
 - **WHEN** `safe_filename(s, replacement=" ", max_len=100)` in `src/idat_sync/domain/path_utils.py` is called with accents, forbidden characters, or Windows reserved names (`WINDOWS_RESERVED`)
 - **THEN** it returns the normalized, safe ASCII filename of at most `max_len` characters
+
+#### Scenario: Enforcing ui and playwright isolation and legacy auth/utils removal
+- **WHEN** all Python modules under `src/idat_sync/` are parsed for imports and `src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` are checked
+- **THEN** `src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` do not exist, no module imports `idat_sync.utils` or `idat_sync.infrastructure.auth`, no module under `src/idat_sync/ui/` imports `idat_sync.infrastructure`, and `src/idat_sync/infrastructure/sharepoint_auth.py` is the only module importing `playwright`
 
 ### Requirement: Moodle adapter translates vendor curriculum into domain models
 `MoodleAdapter` SHALL map Moodle sections, modules, and assignments into `Course`, `CourseSection`, and `CourseModule` with `inline_contents: list[StringContent]` and `contents: list[ModuleContent]`. `domain/course.py` MUST NOT define `Assignment`, `Course.assignments`, `CourseSection.summary`, `CourseModule.modname`, or `CourseModule.description`. Verified at the `MoodleAdapter` public seam.
@@ -140,7 +144,7 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 - **THEN** `load_config` raises `ValueError`
 
 ### Requirement: Configurable tenant endpoints and throttling across clients, adapters, and downloaders
-`MoodleClient`, `MoodleAdapter`, `SharepointClient`, `RecordingDownloader`, `AuthProvider`, and `get_sharepoint_cookies` SHALL require injected tenant URL/host parameters without hardcoded defaults, and `MoodleClient` and `SharepointClient` SHALL require `request_delay` without hardcoded defaults as the sole owners of `time.sleep(self.request_delay)`. `MoodleDownloader`, `SharepointDownloader`, and `SharepointApiAdapter` MUST NOT accept `request_delay`. `src/idat_sync/infrastructure/downloaders.py` MUST NOT import `requests`, `RQ_HEADER`, or `time`, and `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` MUST NOT exist in `idat_sync.utils`. Verified at client, adapter, downloader, and AST seams.
+`MoodleClient`, `MoodleTokenClient`, `MoodleAdapter`, `SharepointClient`, `RecordingDownloader`, and `SharepointBrowserAuth` SHALL require injected tenant URL/host parameters without hardcoded defaults, and `MoodleClient` and `SharepointClient` SHALL require `request_delay` without hardcoded defaults as the sole owners of `time.sleep(self.request_delay)`. `MoodleTokenClient`, `MoodleDownloader`, `SharepointDownloader`, and `SharepointApiAdapter` MUST NOT accept `request_delay`. `src/idat_sync/infrastructure/downloaders.py` MUST NOT import `requests`, `REQUEST_HEADER`, `RQ_HEADER`, or `time`, `REQUEST_HEADER` SHALL reside in `src/idat_sync/infrastructure/moodle_client.py`, and `src/idat_sync/utils.py` MUST NOT exist. Verified at client, adapter, downloader, and AST seams.
 
 #### Scenario: Respecting injected Moodle and SharePoint hosts and request delays
 - **WHEN** `MoodleClient`, `MoodleAdapter`, `SharepointClient`, and `RecordingDownloader` are constructed with custom `base_url`, `moodle_base_url`, `sharepoint_personal_host`, and `request_delay`
@@ -148,7 +152,7 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 
 #### Scenario: Inspecting infrastructure imports and utils cleanup
 - **WHEN** all Python modules under `src/idat_sync/infrastructure/` and `src/idat_sync/utils.py` are inspected
-- **THEN** no `infrastructure/` module imports `MOODLE_IDAT` or `REQUEST_DELAY` from `idat_sync.utils`, `downloaders.py` does not import `requests`, `RQ_HEADER`, or `time`, `sharepoint_adapter.py` does not import `time` or `ClientContext`, and `MOODLE_IDAT`, `REQUEST_DELAY`, and `save_content` are not defined in `src/idat_sync/utils.py`
+- **THEN** `src/idat_sync/utils.py` does not exist, no `infrastructure/` module imports `idat_sync.utils`, `downloaders.py` does not import `requests`, `REQUEST_HEADER`, `RQ_HEADER`, or `time`, `sharepoint_adapter.py` does not import `time` or `ClientContext`, and `REQUEST_HEADER` is defined in `src/idat_sync/infrastructure/moodle_client.py`
 
 ### Requirement: Unconditional target file path in RecordingDownloader
 `RecordingDownloader.download(content: RecordingContent)` SHALL unconditionally treat `content.path` as the target file path by creating `Path(content.path).parent` (`mkdir(parents=True, exist_ok=True)`) and setting `yt_dlp` `outtmpl` to `f"{prefix}{os.path.abspath(Path(content.path))}"`. `RecordingDownloader.download` MUST NOT branch on `Path(content.path).suffix` or append `"%(title)s %(id)s.%(ext)s"`. Verified at the `RecordingDownloader` public seam.
@@ -166,7 +170,7 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 
 #### Scenario: Streaming a Moodle file through MoodleClient
 - **WHEN** `MoodleClient.download_file(url, dest)` is called with a target URL and writable binary stream
-- **THEN** it performs `requests.get(url, params={"wstoken": self.token, "token": self.token}, stream=True, allow_redirects=True, timeout=60, headers=RQ_HEADER)`, raises `RuntimeError("403 Forbidden: your session cookie is missing/expired.")` on HTTP `403`, calls `raise_for_status()`, writes non-empty `1024 * 256`-byte chunks into `dest`, and calls `time.sleep(self.request_delay)`
+- **THEN** it performs `requests.get(url, params={"wstoken": self.token, "token": self.token}, stream=True, allow_redirects=True, timeout=60, headers=REQUEST_HEADER)`, raises `RuntimeError("403 Forbidden: your session cookie is missing/expired.")` on HTTP `403`, calls `raise_for_status()`, writes non-empty `1024 * 256`-byte chunks into `dest`, and calls `time.sleep(self.request_delay)`
 
 #### Scenario: Delegating MoodleDownloader and SharepointDownloader file downloads to clients
 - **WHEN** `MoodleDownloader(moodle_client).download(moodle_content)` and `SharepointDownloader(sharepoint_client).download(sp_content)` are called
