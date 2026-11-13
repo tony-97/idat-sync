@@ -106,7 +106,7 @@ class RecordingDownloader(Downloader[RecordingContent]):
         self.sharepoint_personal_host = sharepoint_personal_host.lower()
 
     def can_handle(self, content: RecordingContent) -> bool:
-        return f"{self.sharepoint_personal_host}/:v:" in content.url
+        return f"{self.sharepoint_personal_host}/:v:" in content.url.lower()
 
     def netscape_cookies_format(self, cookies: list[StorageStateCookie]):
         lines = []

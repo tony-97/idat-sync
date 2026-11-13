@@ -211,6 +211,29 @@ class TestSharepointAdapter(unittest.TestCase):
         self.assertEqual(client.request_delay, 2.5)
         mock_sleep.assert_called_once_with(2.5)
 
+    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_single_label_host_does_not_wildcard_match_unrelated_cookies(self, mock_ctx_cls, mock_sleep):
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_personal_site = MagicMock()
+        mock_personal_site.url = "https://intranet/personal/user"
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = mock_personal_site
+        mock_ctx_cls.return_value = mock_ctx
+
+        cookies = [
+            {"name": "FedAuth", "value": "foreign", "domain": ".sharepoint.com"},
+            {"name": "rtFa", "value": "exact", "domain": "intranet"},
+        ]
+        client = SharepointClient(
+            cookies=cookies,  # type: ignore[arg-type]
+            sharepoint_personal_host="intranet",
+            academic_site_url="https://intranet/sites/ACAD",
+            request_delay=0.0,
+        )
+
+        self.assertEqual(client.sharepoint_cookies, {"rtFa": "exact"})
+
 
 if __name__ == "__main__":
     unittest.main()

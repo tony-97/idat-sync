@@ -80,7 +80,7 @@ class SharepointClient:
             name = cookie.get("name")
             cookie_domain = cookie.get("domain", "")
             if (name in {"FedAuth", "rtFa", "SPOIDCRL"}) and (
-                domain == cookie_domain or (subdomain in cookie_domain)
+                domain == cookie_domain or (bool(subdomain) and subdomain in cookie_domain)
             ):
                 auth_cookies[name] = cookie.get("value", "")
         return auth_cookies

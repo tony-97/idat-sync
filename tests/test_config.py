@@ -137,6 +137,8 @@ class TestLoadConfig(unittest.TestCase):
             '{"unknown_key": 1}',
             '{"request_delay": true}',
             '{"semester_start": "2026/03/16"}',
+            '{"semester_start": "20260316"}',
+            '{"semester_start": "2026-W11-1"}',
             '{"semester_start": 20260316}',
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -159,6 +161,24 @@ class TestLoadConfig(unittest.TestCase):
                 with patch.dict(os.environ, {"IDAT_SYNC_SEMESTER_START": "bad-date"}, clear=True):
                     with self.assertRaises(ValueError):
                         load_config()
+            finally:
+                os.chdir(old_cwd)
+
+    def test_empty_explicit_path_and_directory_raise_value_error_while_empty_env_is_unset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaises(ValueError):
+                        load_config("")
+                    with self.assertRaises(ValueError):
+                        load_config("   ")
+                    with self.assertRaises(ValueError):
+                        load_config(tmpdir)
+
+                with patch.dict(os.environ, {"IDAT_SYNC_CONFIG": ""}, clear=True):
+                    self.assertEqual(load_config(), SyncConfig())
             finally:
                 os.chdir(old_cwd)
 

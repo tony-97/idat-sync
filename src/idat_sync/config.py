@@ -122,7 +122,7 @@ class SyncConfig:
 def _coerce_field(name: str, value: Any) -> Any:
     if name == "semester_start":
         if isinstance(value, str):
-            return date.fromisoformat(value.strip())
+            return datetime.strptime(value.strip(), "%Y-%m-%d").date()
         if isinstance(value, date) and not isinstance(value, datetime):
             return value
         raise ValueError(f"semester_start must be an ISO YYYY-MM-DD date string: {value!r}")
@@ -141,18 +141,26 @@ def _coerce_field(name: str, value: Any) -> Any:
 
 def load_config(config_path: str | Path | None = None) -> SyncConfig:
     """Load SyncConfig with precedence: IDAT_SYNC_* env vars > JSON file > defaults."""
-    env_config_path = os.environ.get("IDAT_SYNC_CONFIG")
-    is_explicit = config_path is not None or bool(env_config_path)
+    if config_path is not None and (
+        not str(config_path).strip()
+    ):
+        raise ValueError("config_path must not be empty")
+
+    raw_env_config = os.environ.get("IDAT_SYNC_CONFIG")
+    env_config_path = raw_env_config.strip() if raw_env_config and raw_env_config.strip() else None
+    is_explicit = config_path is not None or env_config_path is not None
     target_path = (
         Path(config_path)
         if config_path is not None
         else Path(env_config_path)
-        if env_config_path
+        if env_config_path is not None
         else Path("./config.json")
     )
 
     raw_json: dict[str, Any] = {}
     if target_path.exists():
+        if not target_path.is_file():
+            raise ValueError(f"Config path is not a file: {target_path}")
         loaded = json.loads(target_path.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             raise ValueError("Config JSON root must be a JSON object")
