@@ -10,7 +10,8 @@ from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
-from playwright._impl._api_structures import StorageStateCookie
+
+from idat_sync.application.ports import CookieData
 
 _EntityT = TypeVar("_EntityT", File, Folder)
 
@@ -20,7 +21,7 @@ class SharepointClient:
 
     def __init__(
         self,
-        cookies: list[StorageStateCookie],
+        cookies: list[CookieData],
         sharepoint_personal_host: str,
         academic_site_url: str,
         request_delay: float,
@@ -75,7 +76,7 @@ class SharepointClient:
 
     def _load_auth_cookies(
         self,
-        cookies: list[StorageStateCookie],
+        cookies: list[CookieData],
         domain: str,
         subdomain: str = "",
     ) -> dict[str, str]:

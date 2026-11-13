@@ -7,10 +7,10 @@ from typing import cast
 
 from async_tkinter_loop import async_handler
 
+from idat_sync.application.ports import Credentials
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.bootstrap import create_sync_service
 from idat_sync.config import SyncConfig
-from idat_sync.infrastructure.auth import Credentials
 from idat_sync.ui.app import AppFrame, MainApp, ProgressInterceptor
 
 

@@ -1,123 +1,142 @@
-import os
 import json
 import asyncio
 from pathlib import Path
-import requests
-from typing import Awaitable, Callable, TypedDict
+import platform
+from typing import Awaitable, Callable, cast
 
-from playwright._impl._api_structures import StorageState
+from playwright.async_api import async_playwright
 
-from idat_sync.utils import get_sharepoint_cookies, RQ_HEADER
-
-
-class Credentials(TypedDict):
-    sharepoint_storage_state: StorageState
-    token: str
+from idat_sync.application.ports import Credentials, StorageStateData
 
 
-class AuthProvider:
+class SharepointBrowserAuth:
+    """Playwright SSO/MFA authenticator implementing SharepointAuthPort."""
+
     def __init__(
         self,
-        session_file: str | Path,
-        moodle_base_url: str,
         sharepoint_host: str,
         sharepoint_personal_host: str,
         email_domain: str,
-    ):
-        self.session_file = session_file
-        self.moodle_base_url = moodle_base_url.rstrip("/")
+    ) -> None:
         self.sharepoint_host = sharepoint_host
         self.sharepoint_personal_host = sharepoint_personal_host
         self.email_domain = email_domain
 
-    # TODO: Handle exceptions from sharepoint and moodle
-    async def login(
+    async def fetch_storage_state(
         self,
         username: str,
         password: str,
-        login_flow_ended: asyncio.Event,
         get_mfa_code: Callable[[], Awaitable[str]],
-    ):
-        username = username.split("@", 1)[0]
-        token, sharepoint_storage_state = await asyncio.gather(
-            asyncio.to_thread(self.__get_moodle_token, username, password),
-            get_sharepoint_cookies(
-                username,
-                password,
-                login_flow_ended,
-                get_mfa_code,
-                sharepoint_host=self.sharepoint_host,
-                sharepoint_personal_host=self.sharepoint_personal_host,
-                email_domain=self.email_domain,
-            ),
-        )
+    ) -> StorageStateData | None:
+        site_url = f"https://{self.sharepoint_host}/_layouts/15/sharepoint.aspx"
+        channel = "chromium"
+        if (os_name := platform.system()) == "Windows":
+            channel = "msedge"
+        elif os_name == "Darwin":
+            channel = "webkit"
 
-        if sharepoint_storage_state is None or not token:
-            return False
-        # --- Success ---
-        # Create the session file to mark the user as authenticated
-        credentials = Credentials(
-            sharepoint_storage_state=sharepoint_storage_state, token=token
-        )
-
-        def save_credentials():
+        storage_state: StorageStateData | None = None
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, channel=channel)
+            context = await browser.new_context(**p.devices["Galaxy A55 landscape"])
             try:
-                with open(self.session_file, "w", encoding="utf-8") as f:
-                    json.dump(credentials, f)
-                print(f"Success: User '{username}' is now logged in.")
-                return True
-            except IOError as e:
-                print(f"Error: Could not create session file: {e}")
-                return False
+                timeout = 60000 * 3
+                page = await context.new_page()
+                await page.goto(site_url)
+                await page.wait_for_load_state("networkidle", timeout=timeout)
+                await page.wait_for_url(
+                    "https://login.microsoftonline.com/**",
+                    timeout=timeout,
+                )
+                await page.wait_for_load_state("networkidle", timeout=timeout)
+                await page.fill(
+                    "#i0116", f"{username}@{self.email_domain}", force=True
+                )
+                await page.click("#idSIButton9")
 
-        return await asyncio.to_thread(save_credentials)
+                await page.fill("#i0118", password)
+                await page.click("#idSIButton9")
+                await page.wait_for_url(
+                    "https://login.microsoftonline.com/*/login",
+                    timeout=timeout,
+                )
+                await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(1)")
+                mfa_code = await get_mfa_code()
+                await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
+                await page.click("#idChkBx_SAOTCC_TD")
+                await page.click("#idSubmit_SAOTCC_Continue")
 
-    # TODO: raise exceptions
-    def __get_moodle_token(self, user: str, password: str) -> str:
-        payload = {
-            "username": user,
-            "password": password,
-            "service": "moodle_mobile_app",
-        }
-        response = requests.post(
-            f"{self.moodle_base_url}/login/token.php",
-            data=payload,
-            timeout=120,
-            headers=RQ_HEADER,
-        )
-        response.raise_for_status()
-        login = response.json()
-        if "error" in login:
-            print(f"[!] Token error: {login.get('error')}")
-        token = login.get("token")
-        if not token:
-            print(
-                "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
-            )
-        return token
+                await page.wait_for_url(
+                    "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+                    timeout=timeout,
+                )
+                await page.click("#KmsiCheckboxField")
+                await page.click("#idSIButton9")
+                await page.wait_for_url(
+                    site_url,
+                    timeout=timeout,
+                )
+                await page.wait_for_load_state("load", timeout=timeout)
+                await asyncio.sleep(3)
+                await page.goto(
+                    f"https://{self.sharepoint_personal_host}/shared",
+                )
+                await page.wait_for_load_state("load", timeout=timeout)
+                await asyncio.sleep(3)
+                storage_state = cast(
+                    StorageStateData, await context.storage_state()
+                )
+            except Exception:
+                storage_state = None
+            finally:
+                await context.close()
+                await browser.close()
+            return storage_state
 
-    def logout(self):
-        """Logs the user out by deleting the session file."""
+
+class JsonCredentialStore:
+    """JSON file store for persisted user Credentials."""
+
+    def __init__(self, session_file: str | Path) -> None:
+        self.session_file = Path(session_file)
+
+    def load(self) -> Credentials | None:
+        if not self.session_file.exists():
+            return None
         try:
-            if os.path.exists(self.session_file):
-                os.remove(self.session_file)
+            with open(self.session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(data, dict):
+            return None
+        token = data.get("token")
+        storage_state = data.get("sharepoint_storage_state")
+        if (
+            not isinstance(token, str)
+            or not token
+            or not isinstance(storage_state, dict)
+        ):
+            return None
+        return cast(Credentials, data)
+
+    def save(self, credentials: Credentials) -> bool:
+        try:
+            self.session_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.session_file, "w", encoding="utf-8") as f:
+                json.dump(credentials, f)
+            return True
+        except OSError as e:
+            print(f"Error: Could not create session file: {e}")
+            return False
+
+    def clear(self) -> None:
+        try:
+            if self.session_file.exists():
+                self.session_file.unlink()
                 print("Success: User has been logged out.")
             else:
                 print("Info: Already logged out (no session file found).")
         except OSError as e:
             print(f"Error: Could not remove session file: {e}")
-
-    def is_authenticated(self):
-        """Checks if a user is currently logged in."""
-        return os.path.exists(self.session_file)
-
-    def get_credentials(self):
-        """Gets the stored credentials of the currently logged-in user."""
-        if not self.is_authenticated():
-            return None
-
-        try:
-            with open(self.session_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except IOError:
-            return None

@@ -9,10 +9,9 @@ import platform
 import sys
 from typing import TYPE_CHECKING
 
-from playwright._impl._api_structures import StorageStateCookie
 import yt_dlp
 
-from idat_sync.application.ports import DownloadTask, Downloader
+from idat_sync.application.ports import CookieData, DownloadTask, Downloader
 from idat_sync.domain.content import (
     Content,
     MoodleContent,
@@ -68,7 +67,7 @@ class RecordingDownloader(Downloader[RecordingContent]):
 
     def __init__(
         self,
-        cookies: list[StorageStateCookie],
+        cookies: list[CookieData],
         sharepoint_personal_host: str,
     ) -> None:
         self.cookies = self.netscape_cookies_format(cookies)
@@ -77,7 +76,7 @@ class RecordingDownloader(Downloader[RecordingContent]):
     def can_handle(self, content: RecordingContent) -> bool:
         return f"{self.sharepoint_personal_host}/:v:" in content.url.lower()
 
-    def netscape_cookies_format(self, cookies: list[StorageStateCookie]):
+    def netscape_cookies_format(self, cookies: list[CookieData]):
         lines = []
         lines.append("# Netscape HTTP Cookie File")
 

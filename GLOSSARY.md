@@ -47,3 +47,9 @@ _Avoid_: Diff row, sync item
 **SyncDiff**:
 The complete comparison between a remote content tree and a local directory tree, partitioning paths by synchronization status and identifying pending contents to download.
 _Avoid_: Tree diff, sync report, delta
+
+### Authentication
+
+**Credentials**:
+The Moodle authentication token and SharePoint storage state obtained at login and reused for course synchronization.
+_Avoid_: Session, auth state, login data

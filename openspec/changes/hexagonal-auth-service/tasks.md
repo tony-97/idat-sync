@@ -1,0 +1,20 @@
+# Tasks
+
+## 1. Application Auth Service, Ports & Domain Vocabulary
+
+- [x] 1.1 At the `AuthService` seam (`tests/test_auth.py`), write failing tests using in-memory fake ports covering `"@..."` username stripping, concurrent Moodle token and SharePoint SSO execution, saving `Credentials` only when both succeed, `logout()`/`get_credentials()`/`is_authenticated()` delegation, and rejecting `login_flow_ended`; define pure-Python `CookieData`, `StorageStateData`, `Credentials`, `MoodleTokenPort`, `SharepointAuthPort`, and `CredentialStorePort` in `src/idat_sync/application/ports.py`, implement `AuthService` in `src/idat_sync/application/auth_service.py`, export `AuthService` in `src/idat_sync/application/__init__.py`, add **Credentials** to `GLOSSARY.md`, and verify `tests/test_auth.py` passes.
+
+## 2. Infrastructure Auth & Client Adapters
+
+- [x] 2.1 At the `MoodleTokenAdapter` seam (`tests/test_moodle_client.py`), write failing tests patching `requests.post` for `MoodleTokenAdapter(base_url).fetch_token(username, password)` covering `{base_url}/login/token.php`, `service="moodle_mobile_app"`, `RQ_HEADER`, `None` return with `[!]` diagnostic on JSON error, and `raise_for_status()` propagation; move `RQ_HEADER` into `src/idat_sync/infrastructure/moodle_client.py`, implement `MoodleTokenAdapter`, update `MoodleClient` and `tests/test_moodle_client.py` imports, and verify `tests/test_moodle_client.py` passes.
+- [x] 2.2 At the `JsonCredentialStore` seam (`tests/test_auth.py`), write failing `tempfile` tests covering `save` (including parent directory creation) -> `load` -> `clear` round-trips and returning `None` on missing, invalid JSON, `"{}"`, non-string/empty `"token"`, or non-dict `"sharepoint_storage_state"`; implement `JsonCredentialStore` in `src/idat_sync/infrastructure/auth.py` and verify `tests/test_auth.py` passes.
+- [x] 2.3 At the `SharepointBrowserAuth` seam (`tests/test_auth.py`), write failing tests patching `idat_sync.infrastructure.auth.async_playwright` covering host/email-domain `goto`/`fill`/`click` assertions, `await get_mfa_code()`, returning `None` on `Exception`, and propagating `asyncio.CancelledError` without `login_flow_ended`; add `SharepointBrowserAuth` in `src/idat_sync/infrastructure/auth.py`, replace `StorageStateCookie` with `CookieData` in `src/idat_sync/infrastructure/sharepoint_client.py` and `src/idat_sync/infrastructure/downloaders.py`, and verify `tests/test_auth.py` and `tests/test_sharepoint_adapter.py` pass.
+
+## 3. Composition Root, UI Decoupling, Cleanup & Standards
+
+- [x] 3.1 At the `bootstrap.create_auth_service` and UI boundary seams (`tests/test_sync_pipeline.py`), replace `test_auth_provider_and_ui_accept_configured_paths_and_hosts` with failing tests verifying `create_auth_service(custom_config)` wires `MoodleTokenAdapter`, `SharepointBrowserAuth`, and `JsonCredentialStore` and verifying zero `idat_sync.infrastructure` imports in `src/idat_sync/ui/`; implement `create_auth_service` in `src/idat_sync/bootstrap.py`, update `src/idat_sync/ui/app.py`, `src/idat_sync/ui/login_frame.py`, and `src/idat_sync/ui/sync_frame.py` to use `AuthService` and `Credentials`, remove `AuthProvider` from `src/idat_sync/infrastructure/auth.py` and update `src/idat_sync/infrastructure/__init__.py`, and verify `tests/test_sync_pipeline.py` passes.
+- [x] 3.2 At the architecture AST seam (`tests/test_sync_pipeline.py`), add failing assertions verifying `src/idat_sync/utils.py` does not exist, zero modules under `src/idat_sync/` import `idat_sync.utils`, and `src/idat_sync/infrastructure/auth.py` is the sole module importing `playwright`; delete `src/idat_sync/utils.py`, refresh auth references in `agent-os/standards/global/layer-boundaries.md` and `agent-os/standards/testing/composition-and-seams.md`, and verify `tests/test_sync_pipeline.py` passes.
+
+## 4. Final Verification
+
+- [x] 4.1 Run the full test suite (`$env:PYTHONPATH="src"; python -m unittest discover -s tests`), typecheck, and lint across the repository and verify all checks pass.

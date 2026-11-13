@@ -356,43 +356,39 @@ class TestSyncPipeline(unittest.TestCase):
             f"Found architectural layer violations in domain/application: {violations}",
         )
 
-        infra_violations: list[str] = []
-        forbidden_utils_symbols = {"MOODLE_IDAT", "REQUEST_DELAY"}
-        for py_file in (src_root / "infrastructure").rglob("*.py"):
+        self.assertFalse(
+            (src_root / "utils.py").exists(),
+            "src/idat_sync/utils.py should be deleted",
+        )
+
+        utils_imports: list[str] = []
+        playwright_importers: set[str] = set()
+        for py_file in src_root.rglob("*.py"):
+            rel_path = py_file.relative_to(src_root).as_posix()
             tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == "idat_sync.utils":
-                    imported = {alias.name for alias in node.names}
-                    bad = imported & forbidden_utils_symbols
-                    if bad:
-                        infra_violations.append(
-                            f"{py_file.name}:{node.lineno} imports {sorted(bad)} from idat_sync.utils"
-                        )
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                else:
+                    continue
+                for name in names:
+                    if name == "idat_sync.utils" or name.startswith("idat_sync.utils."):
+                        utils_imports.append(f"{rel_path}:{node.lineno} imports {name}")
+                    if name == "playwright" or name.startswith("playwright."):
+                        playwright_importers.add(rel_path)
 
         self.assertEqual(
-            infra_violations,
+            utils_imports,
             [],
-            f"Found forbidden global constant imports in infrastructure: {infra_violations}",
+            f"Found forbidden idat_sync.utils imports: {utils_imports}",
         )
-
-        utils_tree = ast.parse(
-            (src_root / "utils.py").read_text(encoding="utf-8"),
-            filename=str(src_root / "utils.py"),
+        self.assertEqual(
+            playwright_importers,
+            {"infrastructure/auth.py"},
+            f"Playwright imports must be confined to infrastructure/auth.py, got: {sorted(playwright_importers)}",
         )
-        defined_names = {
-            node.name
-            for node in utils_tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        } | {
-            target.id
-            for node in utils_tree.body
-            if isinstance(node, ast.Assign)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-        self.assertNotIn("save_content", defined_names)
-        self.assertNotIn("MOODLE_IDAT", defined_names)
-        self.assertNotIn("REQUEST_DELAY", defined_names)
 
         downloaders_path = src_root / "infrastructure" / "downloaders.py"
         downloaders_tree = ast.parse(
@@ -590,79 +586,77 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertFalse(hasattr(sp_dl, "request_delay"))
         self.assertEqual(rec_dl.sharepoint_personal_host, "contoso-my.sharepoint.com")
 
-    def test_auth_provider_and_ui_accept_configured_paths_and_hosts(self):
-        import asyncio
+    def test_create_auth_service_wires_sync_config_and_ui_avoids_infrastructure(self):
+        import ast
         import inspect
-        from unittest.mock import AsyncMock
-        from idat_sync.infrastructure.auth import AuthProvider
+        from idat_sync.application.auth_service import AuthService
+        from idat_sync.bootstrap import create_auth_service
+        from idat_sync.config import SyncConfig
+        from idat_sync.infrastructure.auth import (
+            JsonCredentialStore,
+            SharepointBrowserAuth,
+        )
+        from idat_sync.infrastructure.moodle_client import MoodleTokenAdapter
         from idat_sync.ui.app import MainApp
+        from idat_sync.ui.login_frame import LoginFrame
         from idat_sync.ui.sync_frame import SyncFrame
-        from idat_sync.utils import get_sharepoint_cookies
-
-        sig = inspect.signature(get_sharepoint_cookies)
-        self.assertIn("sharepoint_host", sig.parameters)
-        self.assertIn("sharepoint_personal_host", sig.parameters)
-        self.assertIn("email_domain", sig.parameters)
-
-        self.assertIn("config", inspect.signature(MainApp.__init__).parameters)
-        self.assertIn("config", inspect.signature(SyncFrame.__init__).parameters)
-
-        mock_page = MagicMock()
-        mock_page.goto = AsyncMock()
-        mock_page.wait_for_load_state = AsyncMock()
-        mock_page.wait_for_url = AsyncMock()
-        mock_page.fill = AsyncMock()
-        mock_page.click = AsyncMock()
-
-        mock_context = MagicMock()
-        mock_context.new_page = AsyncMock(return_value=mock_page)
-        mock_context.storage_state = AsyncMock(return_value={"cookies": []})
-        mock_context.close = AsyncMock()
-
-        mock_browser = MagicMock()
-        mock_browser.new_context = AsyncMock(return_value=mock_context)
-        mock_browser.close = AsyncMock()
-
-        mock_pw = MagicMock()
-        mock_pw.devices = {"Galaxy A55 landscape": {}}
-        mock_pw.chromium.launch = AsyncMock(return_value=mock_browser)
-
-        mock_pw_cm = MagicMock()
-        mock_pw_cm.__aenter__ = AsyncMock(return_value=mock_pw)
-        mock_pw_cm.__aexit__ = AsyncMock(return_value=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             session_path = Path(tmpdir) / "sess.json"
-            auth = AuthProvider(
+            custom_config = SyncConfig(
                 session_file=session_path,
                 moodle_base_url="https://lms.example.edu/",
                 sharepoint_host="contoso.sharepoint.com",
                 sharepoint_personal_host="contoso-my.sharepoint.com",
                 email_domain="example.edu",
             )
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"token": "tok"}
-            with patch("idat_sync.infrastructure.auth.requests.post", return_value=mock_resp) as mock_post, patch(
-                "idat_sync.utils.async_playwright",
-                return_value=mock_pw_cm,
-            ), patch("idat_sync.utils.asyncio.sleep", new=AsyncMock()):
-                ok = asyncio.run(
-                    auth.login("jdoe", "pw", asyncio.Event(), lambda: asyncio.sleep(0, result="123456"))  # type: ignore[arg-type]
-                )
+            auth_service = create_auth_service(custom_config)
 
-            self.assertTrue(ok)
-            self.assertTrue(session_path.exists())
-            mock_post.assert_called_once()
-            self.assertEqual(mock_post.call_args.args[0], "https://lms.example.edu/login/token.php")
-            goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
-            self.assertEqual(
-                goto_urls,
-                [
-                    "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-                    "https://contoso-my.sharepoint.com/shared",
-                ],
-            )
-            mock_page.fill.assert_any_call("#i0116", "jdoe@example.edu", force=True)
+        self.assertIsInstance(auth_service, AuthService)
+        self.assertIsInstance(auth_service.moodle_auth, MoodleTokenAdapter)
+        self.assertEqual(auth_service.moodle_auth.base_url, "https://lms.example.edu")
+        self.assertIsInstance(auth_service.sharepoint_auth, SharepointBrowserAuth)
+        self.assertEqual(
+            auth_service.sharepoint_auth.sharepoint_host, "contoso.sharepoint.com"
+        )
+        self.assertEqual(
+            auth_service.sharepoint_auth.sharepoint_personal_host,
+            "contoso-my.sharepoint.com",
+        )
+        self.assertEqual(auth_service.sharepoint_auth.email_domain, "example.edu")
+        self.assertIsInstance(auth_service.credential_store, JsonCredentialStore)
+        self.assertEqual(auth_service.credential_store.session_file, session_path)
+
+        self.assertIn("config", inspect.signature(MainApp.__init__).parameters)
+        self.assertIn("config", inspect.signature(SyncFrame.__init__).parameters)
+        self.assertIn("auth", inspect.signature(LoginFrame.__init__).parameters)
+
+        ui_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync" / "ui"
+        ui_violations: list[str] = []
+        for py_file in ui_root.rglob("*.py"):
+            tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "idat_sync.infrastructure" or alias.name.startswith(
+                            "idat_sync.infrastructure."
+                        ):
+                            ui_violations.append(
+                                f"{py_file.name}:{node.lineno} imports {alias.name}"
+                            )
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    if node.module == "idat_sync.infrastructure" or node.module.startswith(
+                        "idat_sync.infrastructure."
+                    ):
+                        ui_violations.append(
+                            f"{py_file.name}:{node.lineno} imports from {node.module}"
+                        )
+
+        self.assertEqual(
+            ui_violations,
+            [],
+            f"Found forbidden infrastructure imports in ui/: {ui_violations}",
+        )
 
 
 if __name__ == "__main__":

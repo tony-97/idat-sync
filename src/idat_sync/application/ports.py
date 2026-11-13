@@ -1,16 +1,37 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
 from idat_sync.domain.content import Content
 
 if TYPE_CHECKING:
     from idat_sync.domain.content import RecordingContent
     from idat_sync.domain.course import Course
+
+
+class CookieData(TypedDict, total=False):
+    name: str
+    value: str
+    domain: str
+    path: str
+    expires: float
+    httpOnly: bool
+    secure: bool
+    sameSite: Literal["Lax", "None", "Strict"]
+
+
+class StorageStateData(TypedDict, total=False):
+    cookies: list[CookieData]
+    origins: list[dict[str, Any]]
+
+
+class Credentials(TypedDict):
+    sharepoint_storage_state: StorageStateData
+    token: str
 
 
 @dataclass
@@ -69,11 +90,43 @@ class UrlContentStrategy(Protocol):
         ...
 
 
+class MoodleTokenPort(Protocol):
+    def fetch_token(self, username: str, password: str) -> str | None:
+        ...
+
+
+class SharepointAuthPort(Protocol):
+    async def fetch_storage_state(
+        self,
+        username: str,
+        password: str,
+        get_mfa_code: Callable[[], Awaitable[str]],
+    ) -> StorageStateData | None:
+        ...
+
+
+class CredentialStorePort(Protocol):
+    def load(self) -> Credentials | None:
+        ...
+
+    def save(self, credentials: Credentials) -> bool:
+        ...
+
+    def clear(self) -> None:
+        ...
+
+
 __all__ = [
+    "CookieData",
     "CourseGateway",
+    "CredentialStorePort",
+    "Credentials",
     "DownloadTask",
     "Downloader",
     "FileSystemPort",
+    "MoodleTokenPort",
     "RecordingGateway",
+    "SharepointAuthPort",
+    "StorageStateData",
     "UrlContentStrategy",
 ]

@@ -5,12 +5,12 @@ from typing import cast
 
 from async_tkinter_loop import async_handler
 
-from idat_sync.infrastructure.auth import AuthProvider
+from idat_sync.application.auth_service import AuthService
 from idat_sync.ui.app import AppFrame, MainApp
 
 
 class LoginFrame(AppFrame):
-    def __init__(self, master: MainApp, auth: AuthProvider, **kwargs):
+    def __init__(self, master: MainApp, auth: AuthService, **kwargs):
         tk.Frame.__init__(self, master, **kwargs)
         self.auth = auth
         self.auth.logout()
@@ -78,14 +78,9 @@ class LoginFrame(AppFrame):
             password := self.pass_entry.get()
         ):
             try:
-                login_flow_ended = asyncio.Event()
                 login_task = asyncio.create_task(
-                    self.auth.login(
-                        user, password, login_flow_ended, self.get_mfa_code
-                    )
+                    self.auth.login(user, password, self.get_mfa_code)
                 )
-                # loading_dialog = LoadingDialog(self.master)
-                # await login_flow_ended.wait()
                 if await login_task:
                     cast(MainApp, self.master).switch_to_sync()
                 # loading_dialog.remove()

@@ -9,8 +9,8 @@ from typing import Any
 
 from async_tkinter_loop import async_mainloop
 
+from idat_sync.bootstrap import create_auth_service
 from idat_sync.config import SyncConfig, load_config
-from idat_sync.infrastructure.auth import AuthProvider
 
 
 class ProgressInterceptor:
@@ -35,13 +35,7 @@ class MainApp(tk.Tk):
         tk.Tk.__init__(self)
         self.loop = asyncio.new_event_loop()
         self.config = config
-        self.auth = AuthProvider(
-            session_file=self.config.session_file,
-            moodle_base_url=self.config.moodle_base_url,
-            sharepoint_host=self.config.sharepoint_host,
-            sharepoint_personal_host=self.config.sharepoint_personal_host,
-            email_domain=self.config.email_domain,
-        )
+        self.auth = create_auth_service(self.config)
         self.__frame: AppFrame | None = None
         if self.auth.is_authenticated():
             self.switch_to_sync()
