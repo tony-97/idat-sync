@@ -16,14 +16,5 @@ class LocalFileSystemAdapter(FileSystemPort):
     def ensure_dir(self, path: Path | str) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
 
-    def exists(self, path: Path | str) -> bool:
-        return Path(path).exists()
-
-    def get_mtime(self, path: Path | str) -> int:
-        target = Path(path)
-        if target.exists():
-            return int(target.stat().st_mtime)
-        return 0
-
 
 __all__ = ["LocalFileSystemAdapter"]

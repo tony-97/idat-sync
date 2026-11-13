@@ -46,16 +46,17 @@ class TestSyncPipeline(unittest.TestCase):
         self.manager = DownloadManager(self.downloaders, file_system=self.fs)
         self.orchestrator = TaskOrchestrator(self.groups)
 
-    def test_prepare_download_tasks_creates_and_filters_existing_files(self):
+    def test_prepare_download_tasks_maps_contents_without_filesystem_calls(self):
+        from idat_sync.application.ports import FileSystemPort
+
+        mock_fs = MagicMock(spec=FileSystemPort)
+        manager = DownloadManager(self.downloaders, file_system=mock_fs)
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             existing_file = tmp_path / "already_synced.pdf"
             existing_file.write_bytes(b"data")
             os.utime(existing_file, (2000000000, 2000000000))
-
-            outdated_file = tmp_path / "outdated.pdf"
-            outdated_file.write_bytes(b"old")
-            os.utime(outdated_file, (1500000000, 1500000000))
 
             missing_file = tmp_path / "new_file.pdf"
             empty_summary = tmp_path / "empty.html"
@@ -63,20 +64,21 @@ class TestSyncPipeline(unittest.TestCase):
 
             contents = [
                 MoodleContent(existing_file, 1900000000, "https://aulavirtual/1"),
-                MoodleContent(outdated_file, 1800000000, "https://aulavirtual/2"),
                 SharepointContent(missing_file, 1800000000, MagicMock()),
                 StringContent(empty_summary, 0, ["   "]),
                 StringContent(valid_summary, 0, ["<p>Hello</p>"]),
             ]
 
-            tasks = self.manager.prepare_download_tasks(contents)
+            tasks = manager.prepare_download_tasks(contents)
 
             task_paths = [Path(t.path) for t in tasks]
-            self.assertNotIn(existing_file, task_paths)
+            self.assertEqual(task_paths, [existing_file, missing_file, valid_summary])
             self.assertNotIn(empty_summary, task_paths)
-            self.assertIn(outdated_file, task_paths)
-            self.assertIn(missing_file, task_paths)
-            self.assertIn(valid_summary, task_paths)
+            mock_fs.assert_not_called()
+            self.assertFalse(hasattr(DownloadManager, "should_download"))
+            self.assertFalse(hasattr(tasks[0], "last_modified"))
+            with self.assertRaises(TypeError):
+                manager.prepare_download_tasks(contents, root_dir=tmp_path)  # type: ignore[call-arg]
 
     def test_task_orchestrator_runs_groups_and_writes_string_tasks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -101,6 +103,36 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertEqual(len(tasks), 1)
         self.assertIs(tasks[0].downloader, self.recording_downloader)
         self.assertIs(tasks[0].content, rec)
+
+    def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(self):
+        import platform
+
+        prefix = "\\\\?\\" if platform.system() == "Windows" else ""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            for rel_path in (
+                Path("Grabaciones/Semana 1/video.mp4"),
+                Path("Grabaciones/Semana 1/recording_no_ext"),
+            ):
+                target_path = tmp_path / rel_path
+                rec = RecordingContent(
+                    target_path,
+                    1700000000,
+                    "https://idat628-my.sharepoint.com/:v:/r/personal/video.mp4",
+                )
+                with patch("idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL") as mock_ydl:
+                    self.recording_downloader.download(rec)
+
+                self.assertTrue(target_path.parent.is_dir())
+                self.assertFalse(target_path.is_dir())
+                ydl_opts = mock_ydl.call_args.args[0]
+                self.assertEqual(
+                    ydl_opts["outtmpl"],
+                    f"{prefix}{os.path.abspath(target_path)}",
+                )
+                mock_ydl.return_value.__enter__.return_value.download.assert_called_once_with(
+                    [rec.url]
+                )
 
     def test_custom_downloader_extends_without_modifying_base_classes(self):
         downloaded: list[RecordingContent] = []
@@ -223,21 +255,24 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertEqual([e.path for e in diff.entries], sorted([p_missing, p_outdated, p_synced, p_local_only]))
 
     def test_local_filesystem_adapter_and_download_manager_seam(self):
+        from idat_sync.application.ports import FileSystemPort
         from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
 
         fs = LocalFileSystemAdapter()
+        self.assertFalse(hasattr(FileSystemPort, "exists"))
+        self.assertFalse(hasattr(FileSystemPort, "get_mtime"))
+        self.assertFalse(hasattr(fs, "exists"))
+        self.assertFalse(hasattr(fs, "get_mtime"))
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             test_sub = tmp_path / "nested" / "dir"
             fs.ensure_dir(test_sub)
-            self.assertTrue(fs.exists(test_sub))
+            self.assertTrue(test_sub.is_dir())
 
             test_file = test_sub / "test.txt"
             test_file.write_text("content", encoding="utf-8")
             os.utime(test_file, (1234567890, 1234567890))
-
-            self.assertTrue(fs.exists(test_file))
-            self.assertEqual(fs.get_mtime(test_file), 1234567890)
 
             mtimes = fs.scan_mtimes(tmp_path)
             self.assertEqual(mtimes.get(test_file), 1234567890)

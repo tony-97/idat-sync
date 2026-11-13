@@ -149,15 +149,8 @@ class RecordingDownloader(Downloader[RecordingContent]):
         )
         prefix = "\\\\?\\" if platform.system() == "Windows" else ""
         target_path = Path(content.path)
-        if target_path.suffix:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path_template = f"{prefix}{os.path.abspath(target_path)}"
-        else:
-            target_path.mkdir(parents=True, exist_ok=True)
-            output_path_template = os.path.join(
-                f"{prefix}{os.path.abspath(target_path)}",
-                "%(title)s %(id)s.%(ext)s",
-            )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path_template = f"{prefix}{os.path.abspath(target_path)}"
         ydl_opts = {
             "cookiefile": io.StringIO(self.cookies),
             "format_sort": ["proto:dash"],

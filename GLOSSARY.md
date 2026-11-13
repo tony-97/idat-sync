@@ -25,7 +25,7 @@ _Avoid_: Attachment, raw link
 ### Synchronization & Files
 
 **Content**:
-A resolved, downloadable item with a relative or target local path and modification timestamp, ready to be compared against local files or written to disk.
+A resolved, downloadable item with a relative or target local file path and modification timestamp, ready to be compared against local files or written to disk.
 _Avoid_: Downloadable, file item, asset
 
 **StringContent**:
@@ -33,7 +33,7 @@ An in-memory text artifact (such as a section summary, label notice, or assignme
 _Avoid_: Text content, inline HTML, note item
 
 **RecordingContent**:
-A remote class video recording hosted on SharePoint or Microsoft Teams with a target path and last modified timestamp, ready to be downloaded by a specialized video downloader. Subtype of `Content`.
+A remote class video recording hosted on SharePoint or Microsoft Teams with a target file path and last modified timestamp, ready to be downloaded by a specialized video downloader. Subtype of `Content`.
 _Avoid_: Video, class recording, meeting recording
 
 **SyncStatus**:

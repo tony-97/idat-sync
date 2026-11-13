@@ -22,10 +22,6 @@ class DownloadTask[C: Content]:
     def path(self) -> Path:
         return self.content.path
 
-    @property
-    def last_modified(self) -> int:
-        return self.content.last_modified
-
     def download(self) -> None:
         self.downloader.download(self.content)
 
@@ -50,12 +46,6 @@ class FileSystemPort(Protocol):
         ...
 
     def ensure_dir(self, path: Path | str) -> None:
-        ...
-
-    def exists(self, path: Path | str) -> bool:
-        ...
-
-    def get_mtime(self, path: Path | str) -> int:
         ...
 
 
