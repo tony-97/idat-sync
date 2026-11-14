@@ -156,7 +156,7 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 
 #### Scenario: Respecting injected Moodle and SharePoint hosts and request delays
 - **WHEN** `MoodleClient`, `MoodleAdapter`, `SharepointClient`, and `RecordingDownloader` are constructed with custom `base_url`, `moodle_base_url`, `sharepoint_personal_host`, and `request_delay`
-- **THEN** `MoodleAdapter.can_handle` matches the hostname of `moodle_base_url`, `RecordingDownloader.can_handle` matches `f"{sharepoint_personal_host}/:v:"`, and `MoodleClient.call_ws`, `MoodleClient.download_file`, `SharepointClient.download_file`, `SharepointClient.fetch_folder_files`, and `SharepointClient.fetch_subfolders` sleep for the injected `request_delay`
+- **THEN** `MoodleAdapter.can_handle` matches the hostname of `moodle_base_url`, `RecordingDownloader.can_handle` matches `f"{sharepoint_personal_host}/:v:"`, and `MoodleClient.call_ws`, `MoodleClient.download_file`, `SharepointClient.download_file`, `SharepointClient.fetch_document_library_items`, `SharepointClient.fetch_folder_files`, and `SharepointClient.fetch_subfolders` each sleep once per query for the injected `request_delay`
 
 #### Scenario: Inspecting infrastructure imports and utils cleanup
 - **WHEN** all Python modules under `src/idat_sync/infrastructure/` and `src/idat_sync/utils.py` are inspected
@@ -174,7 +174,7 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 - **THEN** it still creates `Path(content.path).parent` (not `Path(content.path)` as a directory) and passes `f"{prefix}{os.path.abspath(Path(content.path))}"` as `outtmpl` without appending `"%(title)s %(id)s.%(ext)s"`
 
 ### Requirement: Client-owned file download streaming and SharePoint SDK query execution
-`MoodleClient` and `SharepointClient` SHALL provide `download_file(..., dest: BinaryIO) -> None`, sleep `self.request_delay`, and raise `CredentialsExpiredError` on auth failure. `MoodleDownloader` and `SharepointDownloader` SHALL delegate to `client.download_file`. `SharepointClient` SHALL execute guest URL, file-by-ID, and folder SDK queries (including `/personal/<user>` sites and `odata.null` `TypeError` recovery), and `SharepointApiAdapter.list_url_content` SHALL dispatch by URL path and skip empty entities. Verified at client, adapter, and downloader seams.
+`MoodleClient` and `SharepointClient` SHALL provide `download_file(..., dest: BinaryIO) -> None`, sleep `self.request_delay`, and raise `CredentialsExpiredError` on auth failure. `MoodleDownloader` and `SharepointDownloader` SHALL delegate to `client.download_file`. `SharepointClient` SHALL execute SDK queries via `.execute_query()` through `_run_query` (retrying HTTP `429` and `503` up to 5 attempts using `Retry-After` or `self.request_delay` backoff and re-raising on exhaustion, while failing immediately without retry on HTTP `401`/`403` or non-throttling errors), execute guest URL, file-by-ID, and folder SDK queries (including `/personal/<user>` sites and `odata.null` `TypeError` recovery), and `SharepointApiAdapter.list_url_content` SHALL dispatch by URL path and skip empty entities. Verified at client, adapter, and downloader seams.
 
 #### Scenario: Streaming a Moodle file through MoodleClient
 - **WHEN** `MoodleClient.download_file(url, dest)` is called with a target URL and writable binary stream
@@ -182,7 +182,7 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 
 #### Scenario: Delegating MoodleDownloader and SharepointDownloader file downloads to clients
 - **WHEN** `MoodleDownloader(moodle_client).download(moodle_content)` and `SharepointDownloader(sharepoint_client).download(sp_content)` are called
-- **THEN** each stores `self.moodle_client` or `self.sharepoint_client` without accepting `request_delay`, creates `Path(content.path).parent`, opens `content.path` as `"wb"`, and calls `moodle_client.download_file(moodle_content.url, f)` and `sharepoint_client.download_file(sp_content.file, local_file)` respectively (where `SharepointClient.download_file` runs `file.download_session(dest).execute_query_with_incremental_retry()` and sleeps `self.request_delay`)
+- **THEN** each stores `self.moodle_client` or `self.sharepoint_client` without accepting `request_delay`, creates `Path(content.path).parent`, opens `content.path` as `"wb"`, and calls `moodle_client.download_file(moodle_content.url, f)` and `sharepoint_client.download_file(sp_content.file, local_file)` respectively (where `SharepointClient.download_file` runs `file.download_session(dest, use_path=False).execute_query()` and sleeps `self.request_delay`)
 
 #### Scenario: Delegating SharePoint guest URLs, direct links, and folder traversal to SharepointClient
 - **WHEN** `SharepointApiAdapter.list_url_content`, `fetch_folder_contents`, and `fetch_file_from_direct_link` resolve guest folder URLs (`^/:f:/`), guest file URLs (`^/:(\w+):/`) across `sharepoint_host` and `sharepoint_personal_host`, direct links with `uniqueid`/`sourcedoc`, and folder hierarchies
@@ -191,6 +191,10 @@ The domain model and `GLOSSARY.md` SHALL define canonical terms for in-memory te
 #### Scenario: Skipping dead or expired SharePoint guest and direct links returning odata.null
 - **WHEN** `SharepointClient.load_entity(entity, ctx)` encounters `TypeError` because an `odata.null` guest URL response left `entity.resource_url` as `None`, or `SharepointApiAdapter.list_url_content` receives a `Folder` or `File` where `not entity.name and not entity.serverRelativeUrl`
 - **THEN** `SharepointClient.load_entity` catches `TypeError` and still sleeps `self.request_delay` (while propagating `CredentialsExpiredError` and non-`TypeError` exceptions unchanged), and `SharepointApiAdapter.list_url_content` returns `[]`
+
+#### Scenario: Retrying SharePoint HTTP 429 and 503 with Retry-After backoff and re-raising on exhaustion
+- **WHEN** a SharePoint SDK query inside `SharepointClient._run_query` raises `ClientRequestException` or `requests.HTTPError` with HTTP `429` or `503`
+- **THEN** `SharepointClient._run_query` sleeps `int(Retry-After)` when a valid `Retry-After` response header is present (or `self.request_delay` otherwise), retries the query up to 5 total attempts, and re-raises the exception if all 5 attempts fail without retrying HTTP `401`, `403`, or `404`
 
 ### Requirement: ASCII compatibility and edge-case hardening in safe_filename
 Per ADR-0002, `safe_filename(s, replacement=" ", max_len=100)` SHALL preserve ASCII NFKD normalization for top-level `Course` directories while checking `WINDOWS_RESERVED` against the stem before extensions and stripping trailing `[ .]+$` after `max_len` truncation. Verified at the `domain.path_utils` seam.

@@ -1,7 +1,7 @@
 from collections.abc import Callable
 import re
 import time
-from typing import BinaryIO, TypeVar
+from typing import Any, BinaryIO, TypeVar
 import urllib.parse
 
 from office365.runtime.client_request_exception import ClientRequestException
@@ -47,7 +47,7 @@ class SharepointClient:
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
         personal_site = self._run_query(
-            lambda: self.personal_client.web.current_user.get_personal_site().execute_query_with_incremental_retry(),
+            lambda: self.personal_client.web.current_user.get_personal_site().execute_query(),
             sleep_after=False,
         )
         if personal_site.url:
@@ -94,26 +94,50 @@ class SharepointClient:
                 auth_cookies[name] = cookie.get("value", "")
         return auth_cookies
 
+    @staticmethod
+    def _retry_delay(response: Any, default_delay: float) -> float:
+        headers = getattr(response, "headers", None)
+        retry_after = headers.get("Retry-After") if headers else None
+        if retry_after is not None:
+            try:
+                return max(0, int(retry_after))
+            except (TypeError, ValueError):
+                pass
+        return default_delay
+
     def _run_query(
-        self, action: Callable[[], _ResultT], *, sleep_after: bool = True
+        self,
+        action: Callable[[], _ResultT],
+        *,
+        sleep_after: bool = True,
+        max_retry: int = 5,
     ) -> _ResultT:
-        try:
-            result = action()
-        except (ClientRequestException, requests.HTTPError) as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code in (401, 403):
-                raise CredentialsExpiredError(
-                    f"HTTP {status_code}: SharePoint credentials expired."
-                ) from exc
-            raise
+        for attempt in range(max_retry):
+            try:
+                result = action()
+                break
+            except (ClientRequestException, requests.HTTPError) as exc:
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if status_code in (401, 403):
+                    raise CredentialsExpiredError(
+                        f"HTTP {status_code}: SharePoint credentials expired."
+                    ) from exc
+                if status_code in (429, 503) and attempt < max_retry - 1:
+                    time.sleep(self._retry_delay(response, self.request_delay))
+                    continue
+                raise
         if sleep_after:
             time.sleep(self.request_delay)
         return result
 
     def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
-        ctx.load(entity, self.properties_to_retrieve)
+        def _load_and_execute() -> None:
+            ctx.load(entity, self.properties_to_retrieve)
+            ctx.execute_query()
+
         try:
-            self._run_query(ctx.execute_query_with_incremental_retry)
+            self._run_query(_load_and_execute)
         except TypeError:
             # odata.null guest URL responses leave entity.resource_url as None
             time.sleep(self.request_delay)
@@ -125,19 +149,18 @@ class SharepointClient:
             lambda: self.search_client.search.query(
                 course_name,
                 row_limit=15,
-            ).execute_query_retry()
+            ).execute_query()
         )
 
     def fetch_document_library_items(self, site_url: str) -> list[ListItem]:
         client = self.get_client(site_url)
         doc_lib = client.web.default_document_library()
-        time.sleep(self.request_delay)
         items = self._run_query(
             lambda: doc_lib.items.select(["FileSystemObjectType"])
             .expand(["File"])
             .select(self.properties_to_retrieve)
             .get_all(page_size=50)
-            .execute_query_retry()
+            .execute_query()
         )
         return list(items)
 
@@ -168,17 +191,17 @@ class SharepointClient:
         files = self._run_query(
             lambda: folder.get_files()
             .select(self.properties_to_retrieve)
-            .execute_query_retry()
+            .execute_query()
         )
         return list(files)
 
     def fetch_subfolders(self, folder: Folder) -> list[Folder]:
-        folders = self._run_query(lambda: folder.get_folders().execute_query_retry())
+        folders = self._run_query(lambda: folder.get_folders().execute_query())
         return list(folders)
 
     def download_file(self, file: File, dest: BinaryIO) -> None:
         self._run_query(
             lambda: file.download_session(
-                dest
-            ).execute_query_with_incremental_retry()
+                dest, use_path=False
+            ).execute_query()
         )

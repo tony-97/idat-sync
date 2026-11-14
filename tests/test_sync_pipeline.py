@@ -588,7 +588,7 @@ class TestSyncPipeline(unittest.TestCase):
         mock_ctx.with_cookies.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/u"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
 
         with patch("idat_sync.infrastructure.sharepoint_client.ClientContext", return_value=mock_ctx) as mock_ctx_cls, patch(
             "idat_sync.infrastructure.sharepoint_client.time.sleep"

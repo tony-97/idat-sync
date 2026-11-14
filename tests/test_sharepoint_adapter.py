@@ -240,7 +240,7 @@ class TestSharepointAdapter(unittest.TestCase):
         mock_ctx.with_cookies.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/user"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
         mock_ctx_cls.return_value = mock_ctx
 
         client = SharepointClient(
@@ -263,7 +263,7 @@ class TestSharepointAdapter(unittest.TestCase):
         mock_ctx.with_cookies.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://intranet/personal/user"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
         mock_ctx_cls.return_value = mock_ctx
 
         cookies = [
@@ -288,7 +288,7 @@ class TestSharepointAdapter(unittest.TestCase):
         mock_ctx.with_cookies.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/user"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
         mock_ctx_cls.return_value = mock_ctx
 
         client = SharepointClient(
@@ -319,21 +319,31 @@ class TestSharepointAdapter(unittest.TestCase):
         mock_ctx.web.get_file_by_id.assert_called_once_with("ABC-123")
 
         child_file = MagicMock()
-        mock_folder.get_files.return_value.select.return_value.execute_query_retry.return_value = [child_file]
+        mock_folder.get_files.return_value.select.return_value.execute_query.return_value = [child_file]
         self.assertEqual(client.fetch_folder_files(mock_folder), [child_file])
         mock_folder.get_files.return_value.select.assert_called_once_with(client.properties_to_retrieve)
 
         sub_folder = MagicMock()
-        mock_folder.get_folders.return_value.execute_query_retry.return_value = [sub_folder]
+        mock_folder.get_folders.return_value.execute_query.return_value = [sub_folder]
         self.assertEqual(client.fetch_subfolders(mock_folder), [sub_folder])
 
         dest = io.BytesIO()
         client.download_file(mock_guest_file, dest)
-        mock_guest_file.download_session.assert_called_once_with(dest)
-        mock_guest_file.download_session.return_value.execute_query_with_incremental_retry.assert_called_once_with()
+        mock_guest_file.download_session.assert_called_once_with(dest, use_path=False)
+        mock_guest_file.download_session.return_value.execute_query.assert_called_once_with()
 
         self.assertEqual(mock_sleep.call_count, 6)
         mock_sleep.assert_called_with(1.75)
+
+        mock_sleep.reset_mock()
+        mock_doc_lib_item = MagicMock()
+        (
+            mock_ctx.web.default_document_library.return_value.items
+            .select.return_value.expand.return_value.select.return_value
+            .get_all.return_value.execute_query.return_value
+        ) = [mock_doc_lib_item]
+        self.assertEqual(client.fetch_document_library_items("https://contoso.sharepoint.com/sites/Course"), [mock_doc_lib_item])
+        mock_sleep.assert_called_once_with(1.75)
 
     def test_list_url_content_matches_guest_urls_case_insensitively(self):
         custom_adapter = SharepointApiAdapter(
@@ -498,7 +508,7 @@ class TestSharepointClient(unittest.TestCase):
         personal_site_empty = MagicMock()
         personal_site_empty.url = ""
         ctx_empty = MagicMock()
-        ctx_empty.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = personal_site_empty
+        ctx_empty.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_empty
         mock_ctx_cls.return_value.with_cookies.return_value = ctx_empty
 
         with self.assertRaises(CredentialsExpiredError):
@@ -513,7 +523,7 @@ class TestSharepointClient(unittest.TestCase):
         personal_site_ok = MagicMock()
         personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
         ctx_ok = MagicMock()
-        ctx_ok.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = personal_site_ok
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_ok
         mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
 
         client = SharepointClient(
@@ -526,16 +536,19 @@ class TestSharepointClient(unittest.TestCase):
         for status in (401, 403):
             resp = MagicMock(status_code=status)
             err = ClientRequestException(response=resp)
-            ctx_ok.search.query.return_value.execute_query_retry.side_effect = err
+            ctx_ok.search.query.return_value.execute_query.side_effect = err
             with self.assertRaises(CredentialsExpiredError):
                 client.search_for_recordings("Algebra")
+            self.assertEqual(ctx_ok.search.query.return_value.execute_query.call_count, 1)
+            ctx_ok.search.query.return_value.execute_query.reset_mock()
 
         resp_404 = MagicMock(status_code=404)
         err_404 = ClientRequestException(response=resp_404)
-        ctx_ok.search.query.return_value.execute_query_retry.side_effect = err_404
+        ctx_ok.search.query.return_value.execute_query.side_effect = err_404
         with self.assertRaises(ClientRequestException) as ctx:
             client.search_for_recordings("Algebra")
         self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
+        self.assertEqual(ctx_ok.search.query.return_value.execute_query.call_count, 1)
 
     @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -545,7 +558,7 @@ class TestSharepointClient(unittest.TestCase):
         personal_site_ok = MagicMock()
         personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
         ctx_ok = MagicMock()
-        ctx_ok.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = personal_site_ok
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_ok
         mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
 
         client = SharepointClient(
@@ -573,7 +586,7 @@ class TestSharepointClient(unittest.TestCase):
         )
 
         # odata.null leaves entity.resource_url=None -> execute_query raises TypeError
-        ctx_ok.execute_query_with_incremental_retry.side_effect = TypeError(
+        ctx_ok.execute_query.side_effect = TypeError(
             "unsupported operand type(s) for +: 'NoneType' and 'str'"
         )
         client.load_entity(MagicMock(), ctx_ok)
@@ -583,11 +596,56 @@ class TestSharepointClient(unittest.TestCase):
         from office365.runtime.client_request_exception import ClientRequestException
         from idat_sync.application.ports import CredentialsExpiredError
 
-        ctx_ok.execute_query_with_incremental_retry.side_effect = ClientRequestException(
+        ctx_ok.execute_query.side_effect = ClientRequestException(
             response=MagicMock(status_code=401)
         )
         with self.assertRaises(CredentialsExpiredError):
             client.load_entity(MagicMock(), ctx_ok)
+
+    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_run_query_retries_429_and_503_with_retry_after_and_reraises_on_exhaustion(
+        self, mock_ctx_cls, mock_sleep
+    ):
+        from office365.runtime.client_request_exception import ClientRequestException
+        from idat_sync.infrastructure.sharepoint_client import SharepointClient
+
+        personal_site_ok = MagicMock()
+        personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
+        ctx_ok = MagicMock()
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_ok
+        mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
+
+        client = SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+            request_delay=2.0,
+        )
+        mock_sleep.reset_mock()
+
+        # 429 with Retry-After header -> sleeps Retry-After then succeeds and sleeps request_delay
+        resp_429 = MagicMock(status_code=429, headers={"Retry-After": "7"})
+        err_429 = ClientRequestException(response=resp_429)
+        ok_result = MagicMock()
+        ctx_ok.search.query.return_value.execute_query.side_effect = [err_429, ok_result]
+
+        self.assertIs(client.search_for_recordings("Algebra"), ok_result)
+        self.assertEqual(ctx_ok.search.query.return_value.execute_query.call_count, 2)
+        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [7, 2.0])
+
+        # 503 without Retry-After -> sleeps request_delay, retries up to 5 attempts, re-raises on exhaustion
+        mock_sleep.reset_mock()
+        ctx_ok.load.reset_mock()
+        resp_503 = MagicMock(status_code=503, headers={})
+        err_503 = ClientRequestException(response=resp_503)
+        ctx_ok.execute_query.side_effect = err_503
+
+        with self.assertRaises(ClientRequestException):
+            client.load_entity(MagicMock(), ctx_ok)
+        self.assertEqual(ctx_ok.execute_query.call_count, 5)
+        self.assertEqual(ctx_ok.load.call_count, 5)
+        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [2.0, 2.0, 2.0, 2.0])
 
 
 if __name__ == "__main__":
