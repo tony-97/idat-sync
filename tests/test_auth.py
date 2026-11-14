@@ -315,6 +315,8 @@ def _make_mock_playwright():
     mock_page.goto = AsyncMock()
     mock_page.wait_for_load_state = AsyncMock()
     mock_page.wait_for_url = AsyncMock()
+    mock_page.wait_for_selector = AsyncMock()
+    mock_page.is_visible = AsyncMock(return_value=False)
     mock_page.fill = AsyncMock()
     mock_page.click = AsyncMock()
 
@@ -357,12 +359,28 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             email_domain="example.edu",
         )
 
-        for input_user, expected_email in [
-            ("jdoe", "jdoe@example.edu"),
-            ("jdoe@other.edu", "jdoe@other.edu"),
+        for input_user, expected_email, skip_visible in [
+            ("jdoe", "jdoe@example.edu", True),
+            ("jdoe@other.edu", "jdoe@other.edu", False),
         ]:
-            with self.subTest(input_user=input_user):
+            with self.subTest(input_user=input_user, skip_visible=skip_visible):
                 mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+                events: list[tuple[str, object]] = []
+                mock_page.wait_for_url = AsyncMock(
+                    side_effect=lambda url, **kw: events.append(("wait_for_url", (url, kw.get("timeout"))))
+                )
+                mock_page.wait_for_selector = AsyncMock(
+                    side_effect=lambda sel, **kw: events.append(("wait_for_selector", (sel, kw.get("timeout"))))
+                )
+
+                async def _is_visible(sel: str) -> bool:
+                    events.append(("is_visible", sel))
+                    return skip_visible
+
+                mock_page.is_visible = AsyncMock(side_effect=_is_visible)
+                mock_page.click = AsyncMock(
+                    side_effect=lambda sel, **kw: events.append(("click", sel))
+                )
                 with patch(
                     "idat_sync.infrastructure.sharepoint_auth.async_playwright",
                     return_value=mock_pw_cm,
@@ -378,6 +396,9 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                     state,
                     {"cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]},
                 )
+                mock_launch = mock_pw_cm.__aenter__.return_value.chromium.launch
+                mock_launch.assert_awaited_once()
+                self.assertIs(mock_launch.call_args.kwargs.get("headless"), False)
                 goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
                 self.assertEqual(
                     goto_urls,
@@ -389,6 +410,24 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                 mock_page.fill.assert_any_call("#i0116", expected_email, force=True)
                 mock_page.fill.assert_any_call("#i0118", "pw")
                 mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
+                expected_post_mfa = [
+                    ("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"),
+                    ("click", "#idChkBx_SAOTCC_TD"),
+                    ("click", "#idSubmit_SAOTCC_Continue"),
+                    ("wait_for_url", ("https://login.microsoftonline.com/common/SAS/ProcessAuth", 60000 * 3)),
+                    ("wait_for_selector", ("#skipMfaRegistrationLink, #KmsiCheckboxField", 60000 * 3)),
+                    ("is_visible", "#skipMfaRegistrationLink"),
+                    *(
+                        [("click", "#skipMfaRegistrationLink")]
+                        if skip_visible
+                        else []
+                    ),
+                    ("click", "#KmsiCheckboxField"),
+                    ("click", "#idSIButton9"),
+                    ("wait_for_url", ("https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx", 60000 * 3)),
+                ]
+                mfa_start = events.index(("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"))
+                self.assertEqual(events[mfa_start:], expected_post_mfa)
                 mock_context.close.assert_awaited_once()
                 mock_browser.close.assert_awaited_once()
 

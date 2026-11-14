@@ -33,9 +33,7 @@ class SharepointBrowserAuth:
         elif os_name == "Darwin":
             channel = "webkit"
 
-        login_email = (
-            username if "@" in username else f"{username}@{self.email_domain}"
-        )
+        login_email = username if "@" in username else f"{username}@{self.email_domain}"
         cancelled = False
         storage_state: StorageStateData | None = None
         try:
@@ -43,7 +41,7 @@ class SharepointBrowserAuth:
                 browser = None
                 context = None
                 try:
-                    browser = await p.chromium.launch(headless=True, channel=channel)
+                    browser = await p.chromium.launch(headless=False, channel=channel)
                     context = await browser.new_context(
                         **p.devices["Galaxy A55 landscape"]
                     )
@@ -65,7 +63,7 @@ class SharepointBrowserAuth:
                         "https://login.microsoftonline.com/*/login",
                         timeout=timeout,
                     )
-                    await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(1)")
+                    await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(2)")
                     mfa_code = await get_mfa_code()
                     await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
                     await page.click("#idChkBx_SAOTCC_TD")
@@ -75,6 +73,12 @@ class SharepointBrowserAuth:
                         "https://login.microsoftonline.com/common/SAS/ProcessAuth",
                         timeout=timeout,
                     )
+                    await page.wait_for_selector(
+                        "#skipMfaRegistrationLink, #KmsiCheckboxField",
+                        timeout=timeout,
+                    )
+                    if await page.is_visible("#skipMfaRegistrationLink"):
+                        await page.click("#skipMfaRegistrationLink")
                     await page.click("#KmsiCheckboxField")
                     await page.click("#idSIButton9")
                     await page.wait_for_url(

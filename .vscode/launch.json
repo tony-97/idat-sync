@@ -7,9 +7,12 @@
         {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
-            "module": "idat_sync.main",
             "request": "launch",
+            "program": "${file}",
             "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src"
+            },
             "justMyCode": false
         }
     ]
