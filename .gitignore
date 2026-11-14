@@ -1,6 +1,7 @@
 # development testing files
 storage_state*.json
 session*.json
+all_courses_contents.json
 experimenting/
 *.err
 

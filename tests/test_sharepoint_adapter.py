@@ -432,6 +432,57 @@ class TestSharepointAdapter(unittest.TestCase):
         recs = self.adapter.fetch_recordings("Algebra")
         self.assertEqual(recs[0].path, Path("Semana 1") / "Sesión 01 Parte.mp4")
 
+    def test_personal_host_can_handle_path_dispatch_and_empty_odata_null_skip(self):
+        personal_file_url = (
+            "https://idat628-my.sharepoint.com/:b:/g/personal/user_idat_pe/Ea7D?e=1"
+        )
+        personal_folder_url = (
+            "https://idat628-my.sharepoint.com/:f:/g/personal/user_idat_pe/IgCR?e=1"
+        )
+        self.assertTrue(self.adapter.can_handle(personal_file_url))
+        self.assertTrue(self.adapter.can_handle(personal_folder_url))
+        self.assertFalse(self.adapter.can_handle("https://example.com/file.pdf"))
+
+        mock_personal_file = MagicMock()
+        mock_personal_file.name = "CLASE1.pdf"
+        mock_personal_file.serverRelativeUrl = "/personal/user/Documents/CLASE1.pdf"
+        mock_personal_file.time_last_modified = None
+        self.mock_client.fetch_file_by_guest_url.return_value = mock_personal_file
+
+        items = self.adapter.list_url_content(personal_file_url, "Clase 1", 100)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].path, Path("CLASE1.pdf"))
+        self.mock_client.fetch_file_by_guest_url.assert_called_once_with(
+            personal_file_url
+        )
+
+        # Dead/expired odata.null entities (both name and serverRelativeUrl falsy) -> []
+        dead_entity = MagicMock()
+        dead_entity.name = None
+        dead_entity.serverRelativeUrl = None
+        self.mock_client.fetch_file_by_guest_url.return_value = dead_entity
+        self.assertEqual(
+            self.adapter.list_url_content(personal_file_url, "fallback.pdf", 100),
+            [],
+        )
+
+        self.mock_client.fetch_folder_by_guest_url.return_value = dead_entity
+        self.assertEqual(
+            self.adapter.list_url_content(personal_folder_url, "fallback", 100),
+            [],
+        )
+        self.mock_client.fetch_folder_files.assert_not_called()
+
+        self.mock_client.fetch_file_by_id.return_value = dead_entity
+        self.assertEqual(
+            self.adapter.list_url_content(
+                "https://idat628.sharepoint.com/sites/C/_layouts/15/embed.aspx?UniqueId=111",
+                "fallback.mp4",
+                100,
+            ),
+            [],
+        )
+
 
 class TestSharepointClient(unittest.TestCase):
     @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
@@ -485,6 +536,50 @@ class TestSharepointClient(unittest.TestCase):
         with self.assertRaises(ClientRequestException) as ctx:
             client.search_for_recordings("Algebra")
         self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
+
+    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_get_client_from_url_routes_personal_and_load_entity_handles_odata_null_type_error(
+        self, mock_ctx_cls, mock_sleep
+    ):
+        personal_site_ok = MagicMock()
+        personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
+        ctx_ok = MagicMock()
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query_with_incremental_retry.return_value = personal_site_ok
+        mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
+
+        client = SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+            request_delay=1.25,
+        )
+        mock_ctx_cls.reset_mock()
+        mock_sleep.reset_mock()
+
+        client.get_client_from_url(
+            "https://idat628-my.sharepoint.com/:b:/g/personal/fjcanari_idat_pe/Ea7D?e=1"
+        )
+        mock_ctx_cls.assert_called_once_with(
+            "https://idat628-my.sharepoint.com/personal/fjcanari_idat_pe"
+        )
+
+        # odata.null leaves entity.resource_url=None -> execute_query raises TypeError
+        ctx_ok.execute_query_with_incremental_retry.side_effect = TypeError(
+            "unsupported operand type(s) for +: 'NoneType' and 'str'"
+        )
+        client.load_entity(MagicMock(), ctx_ok)
+        mock_sleep.assert_called_once_with(1.25)
+
+        # CredentialsExpiredError must still propagate
+        from office365.runtime.client_request_exception import ClientRequestException
+        from idat_sync.application.ports import CredentialsExpiredError
+
+        ctx_ok.execute_query_with_incremental_retry.side_effect = ClientRequestException(
+            response=MagicMock(status_code=401)
+        )
+        with self.assertRaises(CredentialsExpiredError):
+            client.load_entity(MagicMock(), ctx_ok)
 
 
 if __name__ == "__main__":

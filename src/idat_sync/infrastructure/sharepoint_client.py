@@ -65,7 +65,7 @@ class SharepointClient:
         parsed_url = urllib.parse.urlparse(url)
         site_url = None
         path_match = re.search(
-            r"/(sites|teams|s)/([^/]+)", parsed_url.path, re.IGNORECASE
+            r"/(sites|teams|s|personal)/([^/]+)", parsed_url.path, re.IGNORECASE
         )
         if path_match:
             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -112,7 +112,11 @@ class SharepointClient:
 
     def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
         ctx.load(entity, self.properties_to_retrieve)
-        self._run_query(ctx.execute_query_with_incremental_retry)
+        try:
+            self._run_query(ctx.execute_query_with_incremental_retry)
+        except TypeError:
+            # odata.null guest URL responses leave entity.resource_url as None
+            time.sleep(self.request_delay)
 
     def search_for_recordings(
         self, course_name: str

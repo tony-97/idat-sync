@@ -76,18 +76,31 @@ class SharepointApiAdapter:
         )
 
     def can_handle(self, url: str):
-        return (urlparse(url).hostname or "").lower() == self.sharepoint_host
+        return (urlparse(url).hostname or "").lower() in {
+            self.sharepoint_host,
+            self.sharepoint_personal_host,
+        }
+
+    @staticmethod
+    def _is_empty_entity(entity: Folder | File | None) -> bool:
+        return not entity or (not entity.name and not entity.serverRelativeUrl)
 
     def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[SharepointContent]:
-        if re.search(rf"https://{re.escape(self.sharepoint_host)}/:(\w+):", url, re.IGNORECASE):
-            if url.lower().startswith(f"https://{self.sharepoint_host}/:f:"):
+        path = urlparse(url).path
+        if re.search(r"^/:(\w+):/", path, re.IGNORECASE):
+            if re.search(r"^/:f:/", path, re.IGNORECASE):
                 folder = self.sp_client.fetch_folder_by_guest_url(url)
+                if self._is_empty_entity(folder):
+                    return []
                 return self.fetch_folder_contents(folder)
             file = self.sp_client.fetch_file_by_guest_url(url)
+            if self._is_empty_entity(file):
+                return []
             return [self.__file_to_content(file, filename, last_modified)]
-        if file := self.fetch_file_from_direct_link(url):
+        file = self.fetch_file_from_direct_link(url)
+        if not self._is_empty_entity(file):
             return [self.__file_to_content(file, filename, last_modified)]
         return []
 
