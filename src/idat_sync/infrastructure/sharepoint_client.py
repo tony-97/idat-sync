@@ -69,7 +69,7 @@ class SharepointClient:
         )
         if path_match:
             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-            if path_match.group(1) == "s":
+            if path_match.group(1).lower() == "s":
                 site_url = f"{base_url}/sites/{path_match.group(2)}"
             else:
                 site_url = f"{base_url}{path_match.group(0)}"

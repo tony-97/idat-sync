@@ -19,7 +19,7 @@ from idat_sync.domain.content import (
     SharepointContent,
     StringContent,
 )
-from idat_sync.domain.path_utils import safe_filename
+from idat_sync.domain.path_utils import safe_filename, safe_path_segment
 from idat_sync.domain.sync import SyncDiff
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import MoodleDownloader
@@ -71,9 +71,12 @@ class TestDeveloperScriptsAndGitignore(unittest.TestCase):
             os.chdir(tmpdir)
             try:
                 stdout = io.StringIO()
+                mock_store = MagicMock()
+                mock_store.load.return_value = None
                 with (
                     patch("builtins.input", return_value="jdoe@idat.pe"),
                     patch.object(module.getpass, "getpass", return_value="secret"),
+                    patch.object(module, "JsonCredentialStore", return_value=mock_store),
                     patch.object(module, "MoodleTokenAdapter", return_value=mock_token_adapter),
                     patch.object(module, "MoodleClient", return_value=mock_client),
                     patch("sys.stdout", stdout),
@@ -97,6 +100,40 @@ class TestDeveloperScriptsAndGitignore(unittest.TestCase):
                 ],
             )
             self.assertNotIn('"Algorithms"', stdout.getvalue())
+
+    def test_moodle_json_script_reuses_existing_credentials_without_prompting(self):
+        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
+        spec = importlib.util.spec_from_file_location("moodle_json_reuse", script_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        mock_store = MagicMock()
+        mock_store.load.return_value = {
+            "token": "saved-tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+        mock_client = MagicMock()
+        mock_client.fetch_enrolled_courses.return_value = []
+        mock_client.fetch_assignments.return_value = []
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with (
+                    patch("builtins.input", side_effect=AssertionError("should not prompt")),
+                    patch.object(module.getpass, "getpass", side_effect=AssertionError("should not prompt")),
+                    patch.object(module, "JsonCredentialStore", return_value=mock_store),
+                    patch.object(module, "MoodleClient", return_value=mock_client) as mock_client_cls,
+                ):
+                    rc = module.main()
+            finally:
+                os.chdir(orig_cwd)
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(mock_client_cls.call_args.args[0], "saved-tok")
+            self.assertTrue((Path(tmpdir) / "all_courses_contents.json").is_file())
 
 
 @unittest.skipUnless(
@@ -221,6 +258,21 @@ class TestRealCourseContentsFixture(unittest.TestCase):
             ]
             self.assertGreater(len(intro_names), 0)
 
+            expected_att_names = {
+                safe_path_segment(att["filename"])
+                for entry in self.raw_data
+                for a in entry.get("assignments", [])
+                if isinstance(a, dict)
+                for att in a.get("introattachments", [])
+                if isinstance(att, dict) and att.get("filename")
+            }
+            if expected_att_names:
+                emitted_names = {item.path.name for item in all_remote_contents}
+                self.assertTrue(
+                    expected_att_names.issubset(emitted_names),
+                    f"Missing introattachments: {expected_att_names - emitted_names}",
+                )
+
         diff = SyncDiff.from_trees(all_remote_contents, {})
         self.assertEqual(
             diff.missing_paths, {item.path for item in all_remote_contents}
@@ -281,19 +333,19 @@ class TestLiveCredentialsIntegration(unittest.TestCase):
                 sp_personal_b_candidates.append((filename, url, timemodified))
 
         # 1. Live Moodle file download
-        if moodle_candidates:
-            moodle_client = MoodleClient(
-                self.credentials["token"],
-                base_url=self.config.moodle_base_url,
-                request_delay=0.0,
-            )
-            downloader = MoodleDownloader(moodle_client)
-            fn, url, ts = moodle_candidates[0]
-            with tempfile.TemporaryDirectory() as tmpdir:
-                target = Path(tmpdir) / Path(fn).name
-                downloader.download(MoodleContent(target, ts, url))
-                self.assertTrue(target.is_file())
-                self.assertGreater(target.stat().st_size, 0)
+        self.assertGreater(len(moodle_candidates), 0, "Expected at least one Moodle file URL")
+        moodle_client = MoodleClient(
+            self.credentials["token"],
+            base_url=self.config.moodle_base_url,
+            request_delay=0.0,
+        )
+        downloader = MoodleDownloader(moodle_client)
+        fn, url, ts = moodle_candidates[0]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / Path(fn).name
+            downloader.download(MoodleContent(target, ts, url))
+            self.assertTrue(target.is_file())
+            self.assertGreater(target.stat().st_size, 0)
 
         # 2. Live SharePoint URL resolution across host & personal_host
         cookies = self.credentials.get("sharepoint_storage_state", {}).get("cookies", [])
@@ -318,9 +370,8 @@ class TestLiveCredentialsIntegration(unittest.TestCase):
             ("sharepoint direct", sp_direct_candidates),
             ("personal :b:", sp_personal_b_candidates),
         ]:
-            if not candidates:
-                continue
             with self.subTest(category=label):
+                self.assertGreater(len(candidates), 0, f"Expected at least one {label} URL")
                 resolved_any = False
                 for fn, url, ts in candidates[:5]:
                     self.assertTrue(sp_adapter.can_handle(url))

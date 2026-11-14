@@ -564,6 +564,14 @@ class TestSharepointClient(unittest.TestCase):
             "https://idat628-my.sharepoint.com/personal/fjcanari_idat_pe"
         )
 
+        mock_ctx_cls.reset_mock()
+        client.get_client_from_url(
+            "https://idat628.sharepoint.com/:b:/S/MATERIALESTED/Ea7D?e=1"
+        )
+        mock_ctx_cls.assert_called_once_with(
+            "https://idat628.sharepoint.com/sites/MATERIALESTED"
+        )
+
         # odata.null leaves entity.resource_url=None -> execute_query raises TypeError
         ctx_ok.execute_query_with_incremental_retry.side_effect = TypeError(
             "unsupported operand type(s) for +: 'NoneType' and 'str'"
