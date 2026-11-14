@@ -1,29 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 import io
 import sys
 import tkinter as tk
-from typing import Any
 
 from async_tkinter_loop import async_mainloop
 
 from idat_sync.bootstrap import create_auth_service
 from idat_sync.config import SyncConfig, load_config
-
-
-class ProgressInterceptor:
-    def __init__(self, log_func: Callable[[str], Any]) -> None:
-        self.original_stdout = sys.stdout
-        self.log_func = log_func
-
-    def write(self, text: str):
-        self.original_stdout.write(text)
-        self.log_func(text)
-
-    def flush(self):
-        self.original_stdout.flush()
 
 
 class AppFrame(tk.Frame):

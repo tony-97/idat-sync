@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import requests
 
+from idat_sync.application.ports import CourseGateway
 from idat_sync.domain.content import MoodleContent, StringContent
 from idat_sync.domain.course import Course, CourseModule, CourseSection, ModuleContent
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
@@ -50,7 +51,12 @@ class TestMoodleAdapter(unittest.TestCase):
 
     def test_list_courses_converts_to_domain_models(self):
         self.mock_client.fetch_enrolled_courses.return_value = [
-            {"id": 10, "fullname": "Software Engineering", "shortname": "SE"},
+            {
+                "id": 10,
+                "fullname": "Software Engineering",
+                "shortname": "SE",
+                "coursecategory": "IV.01.2026-III",
+            },
             {"id": 20, "fullname": "", "shortname": "DB101"},
         ]
 
@@ -60,11 +66,16 @@ class TestMoodleAdapter(unittest.TestCase):
         for c in courses:
             self.assertIsInstance(c, Course)
             self.assertNotIsInstance(c, dict)
+            self.assertEqual(c.sections, [])
 
         self.assertEqual(courses[0].id, 10)
         self.assertEqual(courses[0].name, "Software Engineering")
+        self.assertEqual(courses[0].category, "IV.01.2026-III")
         self.assertEqual(courses[1].id, 20)
         self.assertEqual(courses[1].name, "DB101")
+        self.assertEqual(courses[1].category, "")
+        self.mock_client.fetch_assignments.assert_not_called()
+        self.mock_client.fetch_course_contents.assert_not_called()
 
     def test_section_summary_generates_inline_content(self):
         raw_section = {
@@ -162,9 +173,10 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(mod_unmatched.inline_contents, [])
         self.assertEqual(mod_unmatched.contents, [])
 
-    def test_get_courses_with_contents_orchestrates_full_domain_models(self):
+    def test_populate_course_sections_caches_assignments_and_populates_domain_models(self):
         self.mock_client.fetch_enrolled_courses.return_value = [
-            {"id": 42, "fullname": "Data Structures"}
+            {"id": 42, "fullname": "Data Structures", "coursecategory": "IV.01.2026-III"},
+            {"id": 43, "fullname": "Algorithms", "coursecategory": "IV.01.2026-III"},
         ]
         self.mock_client.fetch_assignments.return_value = [
             {
@@ -186,30 +198,39 @@ class TestMoodleAdapter(unittest.TestCase):
                 ],
             }
         ]
-        self.mock_client.fetch_course_contents.return_value = [
-            {
-                "id": 1,
-                "name": "Topic 1",
-                "summary": "Intro",
-                "modules": [
-                    {
-                        "id": 201,
-                        "name": "Lab 1 Module",
-                        "modname": "assign",
-                        "contents": [],
-                    }
-                ],
-            }
+        self.mock_client.fetch_course_contents.side_effect = [
+            [
+                {
+                    "id": 1,
+                    "name": "Topic 1",
+                    "summary": "Intro",
+                    "modules": [
+                        {
+                            "id": 201,
+                            "name": "Lab 1 Module",
+                            "modname": "assign",
+                            "contents": [],
+                        }
+                    ],
+                }
+            ],
+            [],
         ]
 
-        courses = self.adapter.get_courses_with_contents()
+        courses = self.adapter.list_courses()
+        course = self.adapter.populate_course_sections(courses[0])
+        second = self.adapter.populate_course_sections(courses[1])
 
-        self.assertEqual(len(courses), 1)
-        course = courses[0]
+        self.mock_client.fetch_assignments.assert_called_once()
+        self.assertEqual(self.mock_client.fetch_course_contents.call_count, 2)
+        self.assertFalse(hasattr(self.adapter, "get_courses_with_contents"))
+        self.assertFalse(hasattr(CourseGateway, "get_courses_with_contents"))
+
         self.assertIsInstance(course, Course)
         self.assertEqual(course.id, 42)
         self.assertEqual(course.name, "Data Structures")
         self.assertFalse(hasattr(course, "assignments"))
+        self.assertEqual(second.sections, [])
 
         self.assertEqual(len(course.sections), 1)
         section = course.sections[0]
@@ -264,7 +285,8 @@ class TestMoodleAdapter(unittest.TestCase):
             }
         ]
 
-        courses = self.adapter.get_courses_with_contents()
+        courses = self.adapter.list_courses()
+        self.adapter.populate_course_sections(courses[0])
         sec = courses[0].sections[0]
         sec_path = sec.inline_contents[0].path.name
         self.assertLessEqual(len(sec_path), 100)

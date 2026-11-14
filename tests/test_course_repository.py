@@ -18,6 +18,7 @@ from idat_sync.domain.course import (
     CourseModule,
     CourseSection,
     ModuleContent,
+    get_in_progress_course_ids,
 )
 
 
@@ -48,21 +49,32 @@ class TestCourseRepository(unittest.TestCase):
             url_strategies=self.strategies,
         )
 
-    def test_get_courses_delegates_to_course_gateway(self):
+    def test_list_courses_and_populate_course_sections_delegate_to_course_gateway(
+        self,
+    ):
         domain_courses = [
-            Course(id=1, name="Algorithms"),
-            Course(id=2, name="Databases"),
+            Course(id=1, name="Algorithms", category="IV.01.2026-III"),
+            Course(id=2, name="Databases", category="III.01.2026-II"),
         ]
-        self.mock_course_gateway.get_courses_with_contents.return_value = (
-            domain_courses
+        self.mock_course_gateway.list_courses.return_value = domain_courses
+        self.mock_course_gateway.populate_course_sections.side_effect = (
+            lambda c: c
         )
 
-        result = self.repo.get_courses()
+        result = self.repo.list_courses()
 
         self.assertEqual(result, domain_courses)
         for c in result:
             self.assertIsInstance(c, Course)
             self.assertNotIsInstance(c, dict)
+
+        populated = self.repo.populate_course_sections(domain_courses[0])
+        self.assertIs(populated, domain_courses[0])
+        self.mock_course_gateway.populate_course_sections.assert_called_once_with(
+            domain_courses[0]
+        )
+        self.assertFalse(hasattr(self.repo, "get_courses"))
+        self.assertFalse(hasattr(self.repo, "get_all_courses_contents"))
 
     def test_get_recordings_delegates_to_recording_gateway_and_wraps_in_folder(
         self,
@@ -270,32 +282,6 @@ class TestCourseRepository(unittest.TestCase):
             Path("CloudComputingDir/Semana 01/Project Submission/spec.pdf"),
         )
 
-    def test_get_all_courses_contents(self):
-        course = Course(
-            id=1,
-            name="C1",
-            sections=[
-                CourseSection(
-                    id=10,
-                    name="S1",
-                    inline_contents=[
-                        StringContent(
-                            Path("S1-[10]-resumen.html"), 0, ["Summary 1"]
-                        )
-                    ],
-                    modules=[],
-                )
-            ],
-        )
-        self.mock_course_gateway.get_courses_with_contents.return_value = [
-            course
-        ]
-
-        all_contents = self.repo.get_all_courses_contents()
-        self.assertEqual(len(all_contents), 1)
-        self.assertIsInstance(all_contents[0], StringContent)
-        self.assertEqual(all_contents[0].path, Path("S1/S1-[10]-resumen.html"))
-
     def test_get_course_content_sanitizes_section_and_module_names_and_skips_empty(self):
         course = Course(
             id=1,
@@ -330,6 +316,32 @@ class TestCourseRepository(unittest.TestCase):
         items = self.repo.get_course_content(course, Path("CourseDir"))
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].path, Path("CourseDir/Sesión 1 2/_CON/nota.html"))
+
+
+class TestInProgressCourseDetection(unittest.TestCase):
+    def test_ranks_academic_terms_and_groups_split_sections(self):
+        courses = [
+            Course(id=1, name="Course A", category="I.01.2025-IIA"),
+            Course(id=2, name="Course B", category="I.03.2025-IIA"),
+            Course(id=3, name="Course C", category="II.01.2025-III"),
+            Course(id=4, name="Course D", category="III.01.2026-I"),
+            Course(id=5, name="Course E", category="III.01.2026-II"),
+            Course(id=6, name="Course F", category="IV.01.2026-III"),
+        ]
+        self.assertEqual(get_in_progress_course_ids(courses), {6})
+        self.assertEqual(get_in_progress_course_ids(courses[:2]), {1, 2})
+
+    def test_falls_back_to_name_prefix_and_returns_empty_when_unmatched(self):
+        courses = [
+            Course(id=10, name="IV.01.2026-III PATRONES", category=""),
+            Course(id=11, name="III.01.2026-II REDES", category=""),
+        ]
+        self.assertEqual(get_in_progress_course_ids(courses), {10})
+        self.assertEqual(
+            get_in_progress_course_ids([Course(id=99, name="General", category="")]),
+            set(),
+        )
+        self.assertEqual(get_in_progress_course_ids([]), set())
 
 
 if __name__ == "__main__":

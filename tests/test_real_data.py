@@ -19,6 +19,7 @@ from idat_sync.domain.content import (
     SharepointContent,
     StringContent,
 )
+from idat_sync.domain.course import get_in_progress_course_ids
 from idat_sync.domain.path_utils import safe_filename, safe_path_segment
 from idat_sync.domain.sync import SyncDiff
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
@@ -201,11 +202,13 @@ class TestRealCourseContentsFixture(unittest.TestCase):
             url_strategies=[moodle_adapter, sp_adapter],
         )
 
-        courses = repo.get_courses()
+        courses = repo.list_courses()
         self.assertEqual(len(courses), len(self.raw_data))
+        self.assertTrue(get_in_progress_course_ids(courses))
 
         all_remote_contents: list[Content] = []
         for course in courses:
+            repo.populate_course_sections(course)
             course_dir = Path(safe_filename(course.name))
             items = repo.get_course_content(course, course_dir)
             for item in items:

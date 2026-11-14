@@ -7,7 +7,7 @@ Synchronizes remote course materials and class recordings from IDAT's learning p
 ### Curriculum Structure
 
 **Course**:
-An enrolled academic subject containing ordered sections of learning material and associated class recordings.
+An enrolled academic subject identified by its academic term category and containing ordered sections of learning material and associated class recordings.
 _Avoid_: Subject, class
 
 **CourseSection**:

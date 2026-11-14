@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict
@@ -68,7 +68,10 @@ class FileSystemPort(Protocol):
 
 
 class CourseGateway(Protocol):
-    def get_courses_with_contents(self) -> list[Course]:
+    def list_courses(self) -> list[Course]:
+        ...
+
+    def populate_course_sections(self, course: Course) -> Course:
         ...
 
 
@@ -117,6 +120,36 @@ class CredentialStorePort(Protocol):
         ...
 
 
+class SyncProgressPort(Protocol):
+    def on_course_start(self, course: Course) -> None:
+        ...
+
+    def on_course_files(
+        self,
+        course: Course,
+        course_dir: Path,
+        synced_paths: Sequence[Path],
+        pending_paths: Sequence[Path],
+    ) -> None:
+        ...
+
+    def on_task_start(self, course: Course, path: Path) -> None:
+        ...
+
+    def on_task_complete(self, course: Course, path: Path) -> None:
+        ...
+
+    def on_task_error(
+        self, course: Course, path: Path, error: Exception
+    ) -> None:
+        ...
+
+    def on_course_complete(
+        self, course: Course, error: Exception | None
+    ) -> None:
+        ...
+
+
 __all__ = [
     "CookieData",
     "CourseGateway",
@@ -130,5 +163,6 @@ __all__ = [
     "RecordingGateway",
     "SharepointAuthPort",
     "StorageStateData",
+    "SyncProgressPort",
     "UrlContentStrategy",
 ]

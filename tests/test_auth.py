@@ -687,10 +687,14 @@ class TestLoginFrame(unittest.TestCase):
 
 
 class TestSyncFrame(unittest.TestCase):
-    def test_sync_frame_recovers_from_startup_and_sync_errors_without_wiping_credentials(self):
+    def test_sync_frame_treeview_selection_progress_and_error_recovery(self):
         from idat_sync.application.ports import CredentialsExpiredError
         from idat_sync.config import SyncConfig
+        from idat_sync.domain.course import Course
+        import idat_sync.ui.app as app_module
         from idat_sync.ui.sync_frame import SyncFrame
+
+        self.assertFalse(hasattr(app_module, "ProgressInterceptor"))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             creds_file = Path(tmpdir) / "session.json"
@@ -700,6 +704,13 @@ class TestSyncFrame(unittest.TestCase):
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": [], "origins": []},
             }
+
+            past_course = Course(
+                id=1, name="I.01.2025-IIA PAST", category="I.01.2025-IIA"
+            )
+            current_course = Course(
+                id=2, name="IV.01.2026-III CURRENT", category="IV.01.2026-III"
+            )
 
             async def exercise():
                 class StubMaster(tk.Tk):
@@ -718,53 +729,162 @@ class TestSyncFrame(unittest.TestCase):
                 master = StubMaster()
                 try:
                     frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
+                    self.assertFalse(hasattr(frame, "output_text"))
                     try:
                         mock_sync = MagicMock()
+                        mock_sync.list_courses.return_value = [
+                            past_course,
+                            current_course,
+                        ]
+
+                        def fake_sync_courses(
+                            root_folder, courses, progress_listener=None
+                        ):
+                            self.assertEqual(root_folder, tmpdir)
+                            self.assertEqual(courses, [current_course])
+                            assert progress_listener is not None
+                            c_dir = Path(tmpdir) / current_course.name
+                            synced_p = c_dir / "S1" / "already.pdf"
+                            ok_p = c_dir / "S1" / "new.pdf"
+                            err_p = c_dir / "S1" / "broken.pdf"
+                            progress_listener.on_course_start(current_course)
+                            progress_listener.on_course_files(
+                                current_course,
+                                c_dir,
+                                [synced_p],
+                                [ok_p, err_p],
+                            )
+                            progress_listener.on_task_start(current_course, ok_p)
+                            progress_listener.on_task_complete(current_course, ok_p)
+                            progress_listener.on_task_start(current_course, err_p)
+                            progress_listener.on_task_error(
+                                current_course, err_p, OSError("disk full")
+                            )
+                            progress_listener.on_course_complete(
+                                current_course, RuntimeError("partial")
+                            )
+
+                        mock_sync.sync_courses.side_effect = fake_sync_courses
+
                         with patch(
                             "idat_sync.ui.sync_frame.create_sync_service",
                             side_effect=[RuntimeError("network offline"), mock_sync],
                         ) as mock_factory:
                             # 1. Startup failure recovers controls and preserves credentials
                             await frame.load_idat_sync(creds)
+                            await asyncio.sleep(0)
                             self.assertIsNone(frame.idat_sync)
                             self.assertFalse(frame.is_syncing.get())
                             self.assertEqual(str(frame.browse_button["state"]), "normal")
                             self.assertEqual(str(frame.logout_button["state"]), "normal")
                             self.assertEqual(master.switched_to_login, 0)
                             self.assertTrue(creds_file.exists())
-
-                            # Drain queued startup error message
-                            startup_msgs = []
-                            while not frame.progress_queue.empty():
-                                startup_msgs.append(frame.progress_queue.get_nowait())
-                            self.assertTrue(
-                                any("network offline" in m for m in startup_msgs if m)
-                            )
+                            self.assertIn("network offline", frame.status_var.get())
 
                             # 2. Selecting folder and calling do_sync retries create_sync_service
                             frame.folder_path.set(tmpdir)
                             self.assertEqual(str(frame.sync_button["state"]), "normal")
                             await frame.do_sync()
+                            await asyncio.sleep(0)
                             self.assertEqual(mock_factory.call_count, 2)
-                            mock_sync.sync_courses.assert_called_once_with(tmpdir)
                             self.assertFalse(frame.is_syncing.get())
 
-                            # 3. CredentialsExpiredError during sync prompts Logout without wiping file
-                            while not frame.progress_queue.empty():
-                                frame.progress_queue.get_nowait()
+                            # Verify ordering: in-progress first (checked icon), past second (unchecked icon)
+                            top_items = frame.tree.get_children("")
+                            self.assertEqual(len(top_items), 2)
+                            self.assertEqual(
+                                frame.tree.item(top_items[0], "text"),
+                                current_course.name,
+                            )
+                            self.assertEqual(
+                                frame.tree.item(top_items[0], "image"),
+                                (str(frame._checked_icon),),
+                            )
+                            self.assertEqual(
+                                frame.tree.item(top_items[1], "text"),
+                                past_course.name,
+                            )
+                            self.assertEqual(
+                                frame.tree.item(top_items[1], "image"),
+                                (str(frame._unchecked_icon),),
+                            )
+
+                            # Verify parent & nested folder/file progress rows with icons
+                            self.assertEqual(
+                                frame.tree.item(top_items[0], "values"),
+                                ("Failed", "66%"),
+                            )
+                            folder_items = frame.tree.get_children(top_items[0])
+                            self.assertEqual(len(folder_items), 1)
+                            self.assertEqual(
+                                frame.tree.item(folder_items[0], "text"), "S1"
+                            )
+                            self.assertEqual(
+                                frame.tree.item(folder_items[0], "image"),
+                                (str(frame._folder_icon),),
+                            )
+                            file_items = frame.tree.get_children(folder_items[0])
+                            child_rows = {
+                                frame.tree.item(cid, "text"): (
+                                    frame.tree.item(cid, "values"),
+                                    frame.tree.item(cid, "image"),
+                                )
+                                for cid in file_items
+                            }
+                            self.assertEqual(
+                                child_rows,
+                                {
+                                    "already.pdf": (
+                                        ("Synced", "100%"),
+                                        (str(frame._file_icon),),
+                                    ),
+                                    "new.pdf": (
+                                        ("Completed", "100%"),
+                                        (str(frame._file_icon),),
+                                    ),
+                                    "broken.pdf": (
+                                        ("Failed", "0%"),
+                                        (str(frame._file_icon),),
+                                    ),
+                                },
+                            )
+
+                            # 3. Quick-select buttons & row-click toggling
+                            frame.clear_selection()
+                            self.assertEqual(str(frame.sync_button["state"]), "disabled")
+                            frame.select_all()
+                            self.assertEqual(str(frame.sync_button["state"]), "normal")
+                            self.assertTrue(
+                                all(
+                                    frame.tree.item(iid, "image")
+                                    == (str(frame._checked_icon),)
+                                    for iid in frame.tree.get_children("")
+                                )
+                            )
+                            frame.select_in_progress()
+                            self.assertEqual(
+                                frame.tree.item(top_items[0], "image"),
+                                (str(frame._checked_icon),),
+                            )
+                            self.assertEqual(
+                                frame.tree.item(top_items[1], "image"),
+                                (str(frame._unchecked_icon),),
+                            )
+                            frame.toggle_course_row(top_items[0])
+                            self.assertEqual(str(frame.sync_button["state"]), "disabled")
+                            frame.toggle_course_row(top_items[0])
+                            self.assertEqual(str(frame.sync_button["state"]), "normal")
+
+                            # 4. CredentialsExpiredError during sync prompts Logout without wiping file
                             mock_sync.sync_courses.side_effect = CredentialsExpiredError(
                                 "401 expired"
                             )
                             await frame.do_sync()
+                            await asyncio.sleep(0)
                             self.assertFalse(frame.is_syncing.get())
                             self.assertEqual(master.switched_to_login, 0)
                             self.assertTrue(creds_file.exists())
-                            err_msgs = []
-                            while not frame.progress_queue.empty():
-                                err_msgs.append(frame.progress_queue.get_nowait())
-                            self.assertTrue(
-                                any("Logout" in m for m in err_msgs if m)
-                            )
+                            self.assertIn("Logout", frame.status_var.get())
                     finally:
                         frame.exit()
                         await asyncio.sleep(0)

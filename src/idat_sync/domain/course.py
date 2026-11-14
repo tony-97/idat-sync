@@ -1,6 +1,11 @@
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+import re
 
 from idat_sync.domain.content import StringContent
+
+_TERM_PATTERN = re.compile(r"(\d{4})-(I{1,3}|IV)([A-Z]?)$")
+_ROMAN_TERMS = {"I": 1, "II": 2, "III": 3, "IV": 4}
 
 
 @dataclass
@@ -40,6 +45,33 @@ class Course:
     id: int
     name: str
     sections: list[CourseSection] = field(default_factory=list)
+    category: str = ""
+
+
+def _parse_course_term(course: Course) -> tuple[int, int, str] | None:
+    """Extract a sortable (year, roman_term, suffix) key from category or name."""
+    source = course.category.strip()
+    if not source:
+        parts = course.name.split(None, 1)
+        source = parts[0] if parts else ""
+    match = _TERM_PATTERN.search(source)
+    if not match:
+        return None
+    year_str, roman, suffix = match.groups()
+    return (int(year_str), _ROMAN_TERMS[roman], suffix)
+
+
+def get_in_progress_course_ids(courses: Sequence[Course]) -> set[int]:
+    """Return IDs of courses belonging to the highest academic term."""
+    ranked = [
+        (course.id, term)
+        for course in courses
+        if (term := _parse_course_term(course)) is not None
+    ]
+    if not ranked:
+        return set()
+    max_term = max(term for _, term in ranked)
+    return {course_id for course_id, term in ranked if term == max_term}
 
 
 __all__ = [
@@ -47,4 +79,5 @@ __all__ = [
     "CourseModule",
     "CourseSection",
     "ModuleContent",
+    "get_in_progress_course_ids",
 ]

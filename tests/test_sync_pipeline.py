@@ -365,8 +365,9 @@ class TestSyncPipeline(unittest.TestCase):
         mock_orch.run.assert_called_once_with([])
 
         # sync_courses
-        mock_repo.get_courses.return_value = [course]
-        sync.sync_courses(Path("root_folder"))
+        mock_repo.list_courses.return_value = [course]
+        self.assertEqual(sync.list_courses(), [course])
+        sync.sync_courses(Path("root_folder"), [course])
         mock_fs.ensure_dir.assert_any_call(Path("root_folder") / "Algorithms")
 
     def test_hexagonal_architecture_import_boundaries_ast(self):
@@ -774,6 +775,49 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertNotIn("auth:t2_never.txt", executed)
         self.assertNotIn("sib:s2_never.txt", executed)
 
+    def test_task_orchestrator_reports_task_lifecycle_callbacks(self):
+        from idat_sync.application.ports import DownloadTask, SyncProgressPort
+
+        for method in (
+            "on_course_start",
+            "on_course_files",
+            "on_task_start",
+            "on_task_complete",
+            "on_task_error",
+            "on_course_complete",
+        ):
+            self.assertTrue(hasattr(SyncProgressPort, method))
+
+        class StubDownloader(Downloader[StringContent]):
+            content_type = StringContent
+
+            def download(self, content: StringContent) -> None:
+                if content.path.name == "bad.txt":
+                    raise OSError("disk hiccup")
+
+        dl = StubDownloader()
+        orch = TaskOrchestrator([[dl]])
+        bad_task = DownloadTask(StringContent(Path("bad.txt"), 0, ["x"]), dl)
+        good_task = DownloadTask(StringContent(Path("good.txt"), 0, ["x"]), dl)
+
+        events: list[tuple[str, Path, str | None]] = []
+        orch.run(
+            [bad_task, good_task],
+            on_task_start=lambda t: events.append(("start", t.path, None)),
+            on_task_complete=lambda t: events.append(("complete", t.path, None)),
+            on_task_error=lambda t, exc: events.append(("error", t.path, str(exc))),
+        )
+
+        self.assertEqual(
+            events,
+            [
+                ("start", Path("bad.txt"), None),
+                ("error", Path("bad.txt"), "disk hiccup"),
+                ("start", Path("good.txt"), None),
+                ("complete", Path("good.txt"), None),
+            ],
+        )
+
     def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
         from idat_sync.application.course_repository import CourseRepository
         from idat_sync.application.ports import (
@@ -826,7 +870,7 @@ class TestSyncPipeline(unittest.TestCase):
                 self.downloaded.append(content.path)
 
         mock_course_gw = MagicMock(spec=CourseGateway)
-        mock_course_gw.get_courses_with_contents.return_value = [c1, c2]
+        mock_course_gw.list_courses.return_value = [c1, c2]
         mock_rec_gw = MagicMock(spec=RecordingGateway)
         mock_rec_gw.fetch_recordings.side_effect = [
             RuntimeError("course 1 transient failure"),
@@ -839,14 +883,41 @@ class TestSyncPipeline(unittest.TestCase):
         orch = TaskOrchestrator([[str_dl]])
         sync = IDATSync(repo, dm, orch, StubFileSystem(), "Grabaciones")  # type: ignore[arg-type]
 
+        completed_courses: list[tuple[int, Exception | None]] = []
+
+        class RecordingListener:
+            def on_course_start(self, course: Course) -> None:
+                pass
+
+            def on_course_files(self, course, course_dir, synced_paths, pending_paths) -> None:
+                pass
+
+            def on_task_start(self, course: Course, path: Path) -> None:
+                pass
+
+            def on_task_complete(self, course: Course, path: Path) -> None:
+                pass
+
+            def on_task_error(self, course: Course, path: Path, error: Exception) -> None:
+                pass
+
+            def on_course_complete(self, course: Course, error: Exception | None) -> None:
+                completed_courses.append((course.id, error))
+
+        listener = RecordingListener()
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            sync.sync_courses(tmpdir)
+            sync.sync_courses(tmpdir, [c1, c2], progress_listener=listener)
             self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 2)
             self.assertEqual(
                 str_dl.downloaded,
                 [Path(tmpdir) / "Course Two" / "S2" / "c2.html"],
             )
+            self.assertEqual(completed_courses[0][0], 1)
+            self.assertIsInstance(completed_courses[0][1], RuntimeError)
+            self.assertEqual(completed_courses[1], (2, None))
 
+            completed_courses.clear()
             str_dl.downloaded.clear()
             mock_rec_gw.fetch_recordings.reset_mock()
             mock_rec_gw.fetch_recordings.side_effect = [
@@ -854,9 +925,95 @@ class TestSyncPipeline(unittest.TestCase):
                 [],
             ]
             with self.assertRaises(CredentialsExpiredError):
-                sync.sync_courses(tmpdir)
+                sync.sync_courses(tmpdir, [c1, c2], progress_listener=listener)
             self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 1)
             self.assertEqual(str_dl.downloaded, [])
+            self.assertEqual(len(completed_courses), 1)
+            self.assertEqual(completed_courses[0][0], 1)
+            self.assertIsInstance(completed_courses[0][1], CredentialsExpiredError)
+
+    def test_idat_sync_list_courses_lazy_populate_and_actionable_file_filtering(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.ports import CourseGateway, RecordingGateway
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.domain.course import Course, CourseSection
+        from idat_sync.infrastructure.downloaders import StringDownloader
+        from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
+
+        c_lazy = Course(id=10, name="Lazy Course", category="IV.01.2026-III")
+
+        def populate(course: Course) -> Course:
+            course.sections = [
+                CourseSection(
+                    id=1,
+                    name="S1",
+                    inline_contents=[
+                        StringContent(Path("empty.html"), 0, ["   "]),
+                        StringContent(Path("synced.html"), 100, ["ok"]),
+                        StringContent(Path("missing.html"), 100, ["new"]),
+                    ],
+                    modules=[],
+                )
+            ]
+            return course
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.list_courses.return_value = [c_lazy]
+        mock_course_gw.populate_course_sections.side_effect = populate
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings.return_value = []
+
+        fs = LocalFileSystemAdapter()
+        str_dl = StringDownloader()
+        repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
+        dm = DownloadManager([str_dl], fs)
+        orch = TaskOrchestrator([[str_dl]])
+        sync = IDATSync(repo, dm, orch, fs, "Grabaciones")
+
+        self.assertEqual(sync.list_courses(), [c_lazy])
+
+        events: list[tuple] = []
+
+        class Listener:
+            def on_course_start(self, course: Course) -> None:
+                events.append(("course_start", course.id))
+
+            def on_course_files(self, course, course_dir, synced_paths, pending_paths) -> None:
+                events.append(("course_files", course.id, list(synced_paths), list(pending_paths)))
+
+            def on_task_start(self, course: Course, path: Path) -> None:
+                events.append(("task_start", path))
+
+            def on_task_complete(self, course: Course, path: Path) -> None:
+                events.append(("task_complete", path))
+
+            def on_task_error(self, course: Course, path: Path, error: Exception) -> None:
+                events.append(("task_error", path, str(error)))
+
+            def on_course_complete(self, course: Course, error: Exception | None) -> None:
+                events.append(("course_complete", course.id, error))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            course_dir = Path(tmpdir) / "Lazy Course"
+            synced_file = course_dir / "S1" / "synced.html"
+            synced_file.parent.mkdir(parents=True, exist_ok=True)
+            synced_file.write_text("ok", encoding="utf-8")
+            os.utime(synced_file, (200, 200))
+
+            sync.sync_course(c_lazy, course_dir, progress_listener=Listener())
+
+            mock_course_gw.populate_course_sections.assert_called_once_with(c_lazy)
+            missing_file = course_dir / "S1" / "missing.html"
+            self.assertEqual(
+                events,
+                [
+                    ("course_start", 10),
+                    ("course_files", 10, [synced_file], [missing_file]),
+                    ("task_start", missing_file),
+                    ("task_complete", missing_file),
+                    ("course_complete", 10, None),
+                ],
+            )
 
 
 if __name__ == "__main__":

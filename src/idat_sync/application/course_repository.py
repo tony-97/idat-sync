@@ -62,9 +62,13 @@ class CourseRepository:
         folder = Path(recordings_folder)
         return [r.in_folder(folder) for r in recordings]
 
-    def get_courses(self) -> list[Course]:
-        """Retrieve all enrolled courses with full domain structure."""
-        return self.course_gateway.get_courses_with_contents()
+    def list_courses(self) -> list[Course]:
+        """Retrieve all enrolled courses with basic metadata."""
+        return self.course_gateway.list_courses()
+
+    def populate_course_sections(self, course: Course) -> Course:
+        """Populate sections and modules for a single course."""
+        return self.course_gateway.populate_course_sections(course)
 
     def _get_module_content(self, module: CourseModule) -> list[Content]:
         items: list[Content] = list(module.inline_contents)
@@ -93,13 +97,6 @@ class CourseRepository:
         return [
             item.in_folder(course_dir) for item in course_modules_contents
         ]
-
-    def get_all_courses_contents(self) -> list[Content]:
-        to_download = list[Content]()
-        courses = self.get_courses()
-        for course in courses:
-            to_download += self.get_course_content(course)
-        return to_download
 
 
 __all__ = ["CourseRepository"]

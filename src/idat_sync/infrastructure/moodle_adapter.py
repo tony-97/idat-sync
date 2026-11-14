@@ -47,6 +47,7 @@ class MoodleAdapter:
     ) -> None:
         self.client = client
         self.moodle_host = (urlparse(moodle_base_url).hostname or "").lower()
+        self._assignments_cache: dict[int, dict[int, dict]] | None = None
 
     def can_handle(self, url: str) -> bool:
         return (urlparse(url).hostname or "").lower() == self.moodle_host
@@ -167,7 +168,7 @@ class MoodleAdapter:
     # -------------------------------------------------------------------------
 
     def list_courses(self) -> list[Course]:
-        """List all enrolled courses with basic metadata (id and name)."""
+        """List all enrolled courses with basic metadata (id, name, category)."""
         raw_courses = self.client.fetch_enrolled_courses()
         courses: list[Course] = []
         for raw in raw_courses:
@@ -175,8 +176,15 @@ class MoodleAdapter:
                 continue
             course_id = raw.get("id")
             course_name = raw.get("fullname") or raw.get("shortname") or ""
+            course_category = raw.get("coursecategory") or ""
             if course_id:
-                courses.append(Course(id=int(course_id), name=str(course_name)))
+                courses.append(
+                    Course(
+                        id=int(course_id),
+                        name=str(course_name),
+                        category=str(course_category),
+                    )
+                )
         return courses
 
     def _get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
@@ -208,16 +216,12 @@ class MoodleAdapter:
             if isinstance(raw_sec, dict)
         ]
 
-    def get_courses_with_contents(self) -> list[Course]:
-        """Retrieve all enrolled courses fully populated with sections and modules."""
-        courses = self.list_courses()
-        assignments_by_course = self._get_assignments_by_course()
-
-        for course in courses:
-            print(f"\nFetching contents for: {course.name} (id={course.id}) ...")
-            course_assignments = assignments_by_course.get(course.id, {})
-            course.sections = self.get_course_sections(
-                course.id, assignments=course_assignments
-            )
-
-        return courses
+    def populate_course_sections(self, course: Course) -> Course:
+        """Populate sections and modules for a single course, caching assignments once."""
+        if self._assignments_cache is None:
+            self._assignments_cache = self._get_assignments_by_course()
+        course_assignments = self._assignments_cache.get(course.id, {})
+        course.sections = self.get_course_sections(
+            course.id, assignments=course_assignments
+        )
+        return course
