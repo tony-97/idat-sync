@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import io
 import logging
@@ -10,7 +11,7 @@ from pathlib import Path
 import platform
 import re
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 import urllib.error
 
 import yt_dlp
@@ -35,14 +36,15 @@ if TYPE_CHECKING:
     from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
-async def _atomic_download(target_path: Path | str, writer) -> None:
-    target = Path(target_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    part_path = target.with_name(f"{target.name}.part")
+async def _atomic_download(
+    target_path: Path, writer: Callable[[BinaryIO], Awaitable[None]]
+) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = target_path.with_name(f"{target_path.name}.part")
     try:
         with open(part_path, "wb") as f:
             await writer(f)
-        os.replace(part_path, target)
+        os.replace(part_path, target_path)
     except BaseException:
         part_path.unlink(missing_ok=True)
         raise

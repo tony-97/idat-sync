@@ -806,8 +806,7 @@ class TestLoginFrame(unittest.TestCase):
         app = MainApp(SyncConfig())
         self.addCleanup(app.destroy)
         app.withdraw()
-        first_frame = app._MainApp__frame  # type: ignore[attr-defined]
-        assert first_frame is not None
+        first_frame = app.winfo_children()[0]
         app.switch_to_login()
         self.assertFalse(first_frame.winfo_exists())
 

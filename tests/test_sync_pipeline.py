@@ -577,6 +577,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(mock_sp.download_file.call_args.args[1].closed)
 
     async def test_downloaders_use_atomic_part_files_and_clean_up_on_failure(self):
+        from idat_sync.infrastructure.moodle_client import MoodleClient
+        from idat_sync.infrastructure.sharepoint_client import SharepointClient
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             moodle_target = tmp / "moodle" / "a.pdf"
@@ -594,9 +597,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
                 fh.write(b"partial")
                 raise RuntimeError("network drop")
 
-            mock_moodle = MagicMock()
+            mock_moodle = MagicMock(spec=MoodleClient)
             mock_moodle.download_file = AsyncMock(side_effect=ok_moodle)
-            mock_sp = MagicMock()
+            mock_sp = MagicMock(spec=SharepointClient)
             mock_sp.download_file = AsyncMock(side_effect=failing_sp)
 
             await MoodleDownloader(mock_moodle).download(
