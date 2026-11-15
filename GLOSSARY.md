@@ -19,7 +19,7 @@ A discrete learning activity or item inside a course section (such as a notice, 
 _Avoid_: Activity, lesson
 
 **ModuleContent**:
-An unresolved remote resource link attached to a course module, carrying a target filename, remote URL, and modification timestamp prior to URL expansion.
+An unresolved remote resource link attached to a course module, carrying a target filename, relative subfolder path, remote URL, and modification timestamp prior to URL expansion.
 _Avoid_: Attachment, raw link
 
 ### Synchronization & Files

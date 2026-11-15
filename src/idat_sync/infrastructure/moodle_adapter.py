@@ -12,7 +12,7 @@ from idat_sync.domain.course import (
     CourseSection,
     ModuleContent,
 )
-from idat_sync.domain.path_utils import safe_path_segment
+from idat_sync.domain.path_utils import safe_path_segment, safe_suffixed_segment
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 
 _logger = logging.getLogger(__name__)
@@ -65,9 +65,7 @@ class MoodleAdapter:
 
     @staticmethod
     def _safe_suffixed_html(prefix: str, suffix: str) -> str:
-        budget = max(1, 100 - len(suffix))
-        bounded = safe_path_segment(prefix, max_len=budget) if prefix else ""
-        return safe_path_segment(f"{bounded}{suffix}")
+        return safe_suffixed_segment(prefix, suffix)
 
     # -------------------------------------------------------------------------
     # Internal Vendor-to-Domain Mappers
@@ -79,6 +77,7 @@ class MoodleAdapter:
             fileurl=raw_content.get("fileurl", ""),
             timemodified=int(raw_content.get("timemodified", 0) or 0),
             filesize=int(raw_content.get("filesize", 0) or 0),
+            filepath=raw_content.get("filepath") or "/",
         )
 
     def _to_course_module(

@@ -1,7 +1,7 @@
 # 01 - Duplicate `Content.path` collisions (Moodle `'label'` and leaf path collisions)
 
-Status: needs-triage
-Source: `/ponytail-audit` Finding `#5` (deferred during `/grill-with-docs`, formerly `Q3` / `Q8`)
+Status: ready-for-agent
+Source: `/ponytail-audit` Finding `#8` (resolved during `/grill-with-docs`)
 
 ## Summary
 
@@ -95,3 +95,17 @@ Module `1229750` silently overwrites `1229747` in `remote_map`, dropping `"evalu
 
 - **Leaf-only disambiguation** (`CourseRepository.get_course_content`, `CourseRepository.get_recordings`, `IDATSync.get_course_remote_tree`): keep shared folder paths like `'Rup'` untouched, leave the 1st occurrence unchanged for ADR-0002 incremental-sync compatibility, suffix the 2nd+ collision deterministically (`stem (2).ext` within `max_len=100` — or `-[<module_id>]` on colliding leaves), and have `SyncDiff.from_trees` raise `ValueError` on unexpected duplicate paths.
 - Also evaluate non-label collision vectors: `assign` attachments, ignored Moodle `filepath` subdirectories, same-week `RecordingContent` filenames, and section names colliding with `recordings_folder_name`.
+
+## Comments
+
+- **2026-11-15 (`/ponytail-audit` & triage feedback):**
+  - Commit `969e8ee` eliminated the `'label'` collision cases listed above by consolidating section labels into per-section `info.html` and `bibliografia.html`.
+  - Remaining collision vectors tracked under `/ponytail-audit` Finding `#8`: `MoodleAdapter._to_module_content` ignoring non-root `filepath` subdirectories, duplicate `CourseModule` / `CourseSection` directory names containing same-named files, filename collisions after `max_len=100` truncation (`safe_path_segment`), and same-week `RecordingContent` filename collisions.
+  - **Maintainer direction:** concatenate the ID onto the last folder preceding the filename (i.e., `CourseModule.id` on the module directory `<module_name>-[<module_id>]`).
+  - **Design points to settle before implementation (`/grill-with-docs` / `/opsx:propose`):**
+    1. **Scope where the last folder has no Moodle `module.id`:** Moodle `folder` `filepath` subdirs, SharePoint `:f:` subfolders, `CourseSection` inline files (`info.html`, `bibliografia.html`), and `RecordingContent` week folders (`Semana N/`) cannot rely solely on `CourseModule.id` (`filepath` preservation + leaf fallback still needed for intra-folder or truncated-filename collisions).
+    2. **ADR-0002 backward compatibility:** appending `-[<module_id>]` to every module folder renames all existing synced module directories, causing `SyncDiff` to mark previously downloaded files as `MISSING` and re-download them (leaving old module folders as `LOCAL_ONLY`) unless migrated or scoped only to future syncs.
+  - **Settled `/grill-with-docs` decisions (`ADR-0004`, ready for `/opsx:propose`):**
+    1. Preserve non-root Moodle `filepath` subfolders via `ModuleContent.filepath: str = "/"` applied in `CourseRepository.list_url_content` (keeping `UrlContentStrategy` unchanged; `GLOSSARY.md` updated).
+    2. Unconditionally format every `CourseModule` folder as `<bounded_name>-[<module.id>]` (`<= 100` chars), keeping `Course` and `CourseSection` names clean and reopening `ADR-0002` via `docs/adr/0004-module-id-folders-and-filepath-preservation.md` (since no users/synced trees exist yet; migration script skipped under YAGNI).
+    3. Disambiguate remaining case-insensitive leaf path collisions (`<stem> (2)<ext>`) in `IDATSync.get_course_remote_tree` and raise `ValueError` on unexpected duplicate `Path` keys in `SyncDiff.from_trees`.

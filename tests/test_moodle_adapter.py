@@ -480,6 +480,76 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(c1.sections[0].modules[0].inline_contents[0].contents, ["<p>old</p>"])
         self.assertEqual(c1_refreshed.sections[0].modules[0].inline_contents[0].contents, ["<p>new</p>"])
 
+    def test_populate_course_sections_preserves_module_content_filepath(self):
+        self.mock_client.fetch_assignments = AsyncMock(
+            return_value=[
+                {
+                    "id": 10,
+                    "assignments": [
+                        {
+                            "id": 1,
+                            "cmid": 51,
+                            "name": "Task",
+                            "intro": "<p>t</p>",
+                            "introattachments": [
+                                {
+                                    "filename": "rubric.pdf",
+                                    "filepath": "/Rubrics/",
+                                    "fileurl": "https://aulavirtual.idat.edu.pe/rubric.pdf",
+                                    "timemodified": 100,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        )
+        self.mock_client.fetch_course_contents = AsyncMock(
+            return_value=[
+                {
+                    "id": 1,
+                    "name": "S1",
+                    "summary": "",
+                    "modules": [
+                        {
+                            "id": 50,
+                            "modname": "folder",
+                            "name": "Carpeta",
+                            "contents": [
+                                {
+                                    "filename": "guia.pdf",
+                                    "filepath": "/Parte 1/",
+                                    "fileurl": "https://aulavirtual.idat.edu.pe/1/guia.pdf",
+                                    "timemodified": 10,
+                                },
+                                {
+                                    "filename": "flat.pdf",
+                                    "filepath": "",
+                                    "fileurl": "https://aulavirtual.idat.edu.pe/flat.pdf",
+                                    "timemodified": 20,
+                                },
+                                {
+                                    "filename": "default.pdf",
+                                    "fileurl": "https://aulavirtual.idat.edu.pe/default.pdf",
+                                    "timemodified": 30,
+                                },
+                            ],
+                        },
+                        {"id": 51, "modname": "assign", "name": "Task"},
+                    ],
+                }
+            ]
+        )
+
+        course = asyncio.run(
+            self.adapter.populate_course_sections(Course(id=10, name="C10"))
+        )
+
+        folder_contents = course.sections[0].modules[0].contents
+        self.assertEqual([c.filepath for c in folder_contents], ["/Parte 1/", "/", "/"])
+        assign_contents = course.sections[0].modules[1].contents
+        self.assertEqual(assign_contents[0].filepath, "/Rubrics/")
+
 
 class TestMoodleTokenAdapter(unittest.TestCase):
     def test_requires_client_without_base_url(self):

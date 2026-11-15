@@ -13,7 +13,7 @@ from idat_sync.domain.course import (
     CourseSection,
     ModuleContent,
 )
-from idat_sync.domain.path_utils import safe_path_segment
+from idat_sync.domain.path_utils import safe_path_segment, safe_suffixed_segment
 
 
 class CourseRepository:
@@ -38,6 +38,17 @@ class CourseRepository:
                 return strategy
         return None
 
+    @staticmethod
+    def _safe_subfolder(filepath: str) -> Path | None:
+        parts: list[str] = []
+        for raw_part in filepath.split("/"):
+            if not raw_part or raw_part == ".":
+                continue
+            if raw_part == "..":
+                raise ValueError(f"Unsafe content filepath: {filepath}")
+            parts.append(safe_path_segment(raw_part))
+        return Path(*parts) if parts else None
+
     async def list_url_content(
         self, contents: Sequence[ModuleContent]
     ) -> list[Content]:
@@ -45,7 +56,8 @@ class CourseRepository:
         for content in contents:
             if content.fileurl and content.filename:
                 if strategy := self._get_strategy(content.fileurl):
-                    resolved_contents.extend(
+                    subfolder = self._safe_subfolder(content.filepath)
+                    items = (
                         await strategy.list_url_content(
                             content.fileurl,
                             content.filename,
@@ -53,6 +65,9 @@ class CourseRepository:
                         )
                         or []
                     )
+                    if subfolder is not None:
+                        items = [item.in_folder(subfolder) for item in items]
+                    resolved_contents.extend(items)
         return resolved_contents
 
     async def get_recordings(
@@ -77,7 +92,7 @@ class CourseRepository:
     async def _get_module_content(self, module: CourseModule) -> list[Content]:
         items: list[Content] = list(module.inline_contents)
         items.extend(await self.list_url_content(module.contents))
-        safe_name = safe_path_segment(module.name)
+        safe_name = safe_suffixed_segment(module.name, f"-[{module.id}]")
         return [item.in_folder(safe_name) for item in items]
 
     async def _get_section_content(

@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import contextlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Self
 
@@ -24,13 +25,33 @@ from idat_sync.application.ports import (
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
-from idat_sync.domain.path_utils import safe_filename
+from idat_sync.domain.path_utils import safe_filename, safe_suffixed_segment
 from idat_sync.domain.sync import SyncDiff
 
 
 def _emit(event: SyncEvent) -> SyncEvent:
     log_sync_event(event)
     return event
+
+
+def _disambiguate_paths(items: Sequence[Content]) -> list[Content]:
+    seen_keys: set[str] = set()
+    result: list[Content] = []
+    for item in items:
+        candidate = item.path
+        key = candidate.as_posix().casefold()
+        if key in seen_keys:
+            stem, ext = item.path.stem, item.path.suffix
+            counter = 2
+            while key in seen_keys:
+                new_name = safe_suffixed_segment(stem, f" ({counter}){ext}")
+                candidate = item.path.with_name(new_name)
+                key = candidate.as_posix().casefold()
+                counter += 1
+            item = replace(item, path=candidate)
+        seen_keys.add(key)
+        result.append(item)
+    return result
 
 
 class IDATSync:
@@ -76,14 +97,14 @@ class IDATSync:
     ) -> list[Content]:
         course_path = Path(course_dir)
         recordings_folder = course_path / self.recordings_folder_name
-        remote_tree = await self.course_repository.get_course_content(
-            course, course_path
+        remote_tree = list(
+            await self.course_repository.get_course_content(course, course_path)
         )
         recordings_content = await self.course_repository.get_recordings(
             course.name, recordings_folder
         )
         remote_tree.extend(recordings_content)
-        return remote_tree
+        return _disambiguate_paths(remote_tree)
 
     async def check_course_sync(
         self, course: Course, course_dir: str | Path

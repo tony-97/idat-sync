@@ -47,7 +47,11 @@ class SyncDiff:
         remote_contents: Sequence[Content],
         local_mtimes: Mapping[Path, int],
     ) -> "SyncDiff":
-        remote_map: dict[Path, Content] = {c.path: c for c in remote_contents}
+        remote_map: dict[Path, Content] = {}
+        for content in remote_contents:
+            if content.path in remote_map:
+                raise ValueError(f"Duplicate remote content path: {content.path}")
+            remote_map[content.path] = content
 
         remote_keys = remote_map.keys()
         local_keys = local_mtimes.keys()

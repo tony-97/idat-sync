@@ -308,6 +308,18 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diff.pending_contents, [c_missing, c_outdated])
         self.assertEqual([e.path for e in diff.entries], sorted([p_missing, p_outdated, p_synced, p_local_only]))
 
+    def test_sync_diff_from_trees_rejects_duplicate_remote_paths(self):
+        dup_path = Path("semana1/Carpeta-[1]/guia.pdf")
+        with self.assertRaises(ValueError) as ctx:
+            SyncDiff.from_trees(
+                [
+                    MoodleContent(dup_path, 100, "http://a/1"),
+                    MoodleContent(dup_path, 200, "http://a/2"),
+                ],
+                {},
+            )
+        self.assertIn("guia.pdf", str(ctx.exception))
+
     def test_local_filesystem_adapter_and_download_manager_seam(self):
         from idat_sync.application.ports import FileSystemPort
         from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
@@ -1349,6 +1361,64 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         async with IDATSync(mock_repo, dm, orch, fs, "Grabaciones", closers=[closer_c]) as ctx_sync:
             self.assertIsInstance(ctx_sync, IDATSync)
         closer_c.assert_awaited_once_with()
+
+    async def test_idat_sync_get_course_remote_tree_disambiguates_case_insensitive_collisions(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.domain.content import RecordingContent
+        from idat_sync.domain.course import Course
+        from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
+
+        long_name = f"{'L' * 96}.pdf"
+        course = Course(id=1, name="Course")
+        course_dir = Path("Course")
+
+        mock_repo = MagicMock(spec=CourseRepository)
+        mock_repo.get_course_content = AsyncMock(
+            return_value=[
+                MoodleContent(Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf"), 10, "http://a/1"),
+                MoodleContent(Path("Course/Sec/Mod-[1]/parte 1/guia.pdf"), 20, "http://a/2"),
+                MoodleContent(Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf"), 30, "http://a/3"),
+                MoodleContent(Path("Course/Sec/Mod-[2]/file.pdf"), 40, "http://a/4"),
+                MoodleContent(Path("Course/Sec/Mod-[2]/file (2).pdf"), 50, "http://a/5"),
+                MoodleContent(Path("Course/Sec/Mod-[2]/file.pdf"), 60, "http://a/6"),
+                MoodleContent(Path(f"Course/Sec/Mod-[3]/{long_name}"), 70, "http://a/7"),
+                MoodleContent(Path(f"Course/Sec/Mod-[3]/{long_name}"), 80, "http://a/8"),
+            ]
+        )
+        mock_repo.get_recordings = AsyncMock(
+            return_value=[
+                RecordingContent(Path("Course/Grabaciones/Semana 1/video.mp4"), 90, "http://v/1"),
+                RecordingContent(Path("Course/Grabaciones/Semana 1/video.mp4"), 95, "http://v/2"),
+            ]
+        )
+
+        fs = LocalFileSystemAdapter()
+        dm = DownloadManager([], fs)
+        orch = TaskOrchestrator([])
+        sync = IDATSync(mock_repo, dm, orch, fs, "Grabaciones")
+
+        items = await sync.get_course_remote_tree(course, course_dir)
+
+        expected_paths = [
+            Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf"),
+            Path("Course/Sec/Mod-[1]/parte 1/guia (2).pdf"),
+            Path("Course/Sec/Mod-[1]/Parte 1/guia (3).pdf"),
+            Path("Course/Sec/Mod-[2]/file.pdf"),
+            Path("Course/Sec/Mod-[2]/file (2).pdf"),
+            Path("Course/Sec/Mod-[2]/file (3).pdf"),
+            Path(f"Course/Sec/Mod-[3]/{long_name}"),
+            Path(f"Course/Sec/Mod-[3]/{'L' * 92} (2).pdf"),
+            Path("Course/Grabaciones/Semana 1/video.mp4"),
+            Path("Course/Grabaciones/Semana 1/video (2).mp4"),
+        ]
+        self.assertEqual([item.path for item in items], expected_paths)
+        for item in items:
+            self.assertLessEqual(len(item.path.name), 100)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            diff = await sync.check_course_sync(course, Path(tmpdir))
+        self.assertEqual(len(diff.missing_paths), 10)
 
 
 if __name__ == "__main__":

@@ -64,3 +64,12 @@ def safe_path_segment(s: str, replacement: str = " ", max_len: int = 100) -> str
         ascii_only=False,
         preserve_extension=True,
     )
+
+
+def safe_suffixed_segment(
+    prefix: str, suffix: str, *, max_len: int = 100
+) -> str:
+    """Sanitize ``prefix + suffix`` within ``max_len`` without truncating ``suffix``."""
+    budget = max(1, max_len - len(suffix))
+    bounded = safe_path_segment(prefix, max_len=budget) if prefix else ""
+    return safe_path_segment(f"{bounded}{suffix}", max_len=max_len)

@@ -131,6 +131,54 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contents[0].path, Path("document.pdf"))
         self.assertEqual(contents[1].path, Path("slides.pptx"))
 
+    async def test_list_url_content_preserves_filepath_subfolders_and_rejects_traversal(self):
+        items = [
+            ModuleContent(
+                filename="guia.pdf",
+                fileurl="https://aulavirtual.idat.edu.pe/1/guia.pdf",
+                timemodified=10,
+                filepath="/Parte 1/",
+            ),
+            ModuleContent(
+                filename="guia.pdf",
+                fileurl="https://aulavirtual.idat.edu.pe/2/guia.pdf",
+                timemodified=20,
+                filepath="/Tema: 1/./CON/",
+            ),
+            ModuleContent(
+                filename="flat.pdf",
+                fileurl="https://aulavirtual.idat.edu.pe/flat.pdf",
+                timemodified=30,
+                filepath="/",
+            ),
+        ]
+
+        contents = await self.repo.list_url_content(items)
+
+        self.assertEqual(
+            [c.path for c in contents],
+            [
+                Path("Parte 1/guia.pdf"),
+                Path("Tema 1/_CON/guia.pdf"),
+                Path("flat.pdf"),
+            ],
+        )
+        self.mock_moodle_strategy.list_url_content.assert_any_call(
+            "https://aulavirtual.idat.edu.pe/1/guia.pdf", "guia.pdf", 10
+        )
+
+        with self.assertRaises(ValueError):
+            await self.repo.list_url_content(
+                [
+                    ModuleContent(
+                        filename="secret.pdf",
+                        fileurl="https://aulavirtual.idat.edu.pe/secret.pdf",
+                        timemodified=40,
+                        filepath="/../outside/",
+                    )
+                ]
+            )
+
     async def test_get_course_content_builds_all_content_types_from_domain_model(
         self,
     ):
@@ -242,7 +290,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(res_file, MoodleContent)
         self.assertEqual(
             res_file.path,
-            Path("CloudComputingDir/Semana 01/Lecture Notes/notes.pdf"),
+            Path("CloudComputingDir/Semana 01/Lecture Notes-[201]/notes.pdf"),
         )
 
         # 3. Label content
@@ -251,7 +299,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             label_content.path,
             Path(
-                "CloudComputingDir/Semana 01/Important Notice/Important Notice.html"
+                "CloudComputingDir/Semana 01/Important Notice-[202]/Important Notice.html"
             ),
         )
         self.assertEqual(
@@ -263,7 +311,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(url_content, MoodleContent)
         self.assertEqual(
             url_content.path,
-            Path("CloudComputingDir/Semana 01/External Guide/guide_link"),
+            Path("CloudComputingDir/Semana 01/External Guide-[203]/guide_link"),
         )
 
         # 5. Assignment intro
@@ -272,7 +320,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             assign_intro.path,
             Path(
-                "CloudComputingDir/Semana 01/Project Submission/Project Submission-[55]-intro.html"
+                "CloudComputingDir/Semana 01/Project Submission-[204]/Project Submission-[55]-intro.html"
             ),
         )
         self.assertEqual(assign_intro.contents, ["Submit your zip file here"])
@@ -282,7 +330,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(assign_att, MoodleContent)
         self.assertEqual(
             assign_att.path,
-            Path("CloudComputingDir/Semana 01/Project Submission/spec.pdf"),
+            Path("CloudComputingDir/Semana 01/Project Submission-[204]/spec.pdf"),
         )
 
     async def test_get_course_content_sanitizes_section_and_module_names_and_skips_empty(self):
@@ -318,7 +366,57 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
 
         items = await self.repo.get_course_content(course, Path("CourseDir"))
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0].path, Path("CourseDir/Sesión 1 2/_CON/nota.html"))
+        self.assertEqual(items[0].path, Path("CourseDir/Sesión 1 2/_CON-[11]/nota.html"))
+
+    async def test_get_course_content_preserves_module_id_suffix_beyond_segment_budget(self):
+        prefix = "M" * 95
+        course = Course(
+            id=1,
+            name="C1",
+            sections=[
+                CourseSection(
+                    id=10,
+                    name="Semana 01",
+                    modules=[
+                        CourseModule(
+                            id=1001,
+                            name=f"{prefix}A",
+                            contents=[
+                                ModuleContent(
+                                    filename="guia.pdf",
+                                    fileurl="https://aulavirtual.idat.edu.pe/1/guia.pdf",
+                                    timemodified=10,
+                                    filepath="/Parte 1/",
+                                )
+                            ],
+                        ),
+                        CourseModule(
+                            id=1002,
+                            name=f"{prefix}B",
+                            contents=[
+                                ModuleContent(
+                                    filename="guia.pdf",
+                                    fileurl="https://aulavirtual.idat.edu.pe/2/guia.pdf",
+                                    timemodified=20,
+                                    filepath="/Parte 2/",
+                                )
+                            ],
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        items = await self.repo.get_course_content(course, Path("CourseDir"))
+        mod_seg_1 = items[0].path.parts[2]
+        mod_seg_2 = items[1].path.parts[2]
+        self.assertLessEqual(len(mod_seg_1), 100)
+        self.assertLessEqual(len(mod_seg_2), 100)
+        self.assertTrue(mod_seg_1.endswith("-[1001]"))
+        self.assertTrue(mod_seg_2.endswith("-[1002]"))
+        self.assertNotEqual(mod_seg_1, mod_seg_2)
+        self.assertEqual(items[0].path.parts[-2:], ("Parte 1", "guia.pdf"))
+        self.assertEqual(items[1].path.parts[-2:], ("Parte 2", "guia.pdf"))
 
     def test_invalidate_cache_delegates_to_course_gateway(self):
         self.repo.invalidate_cache()
