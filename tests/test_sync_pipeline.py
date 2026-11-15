@@ -806,6 +806,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*coros)
         self.assertEqual(executed, ["g1a:a.txt", "g1b:b.txt", "g2:c.txt"])
 
+        executed.clear()
+        default_coros = orch.create_coroutines(tasks)
+        self.assertEqual(len(default_coros), 2)
+        await asyncio.gather(*default_coros)
+        self.assertEqual(executed, ["g1a:a.txt", "g1b:b.txt", "g2:c.txt"])
+
     async def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
         from idat_sync.application.course_repository import CourseRepository
         from idat_sync.application.ports import (

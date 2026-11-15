@@ -37,10 +37,9 @@ class AuthService:
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> bool:
-        moodle_username = username.split("@", 1)[0]
         async with asyncio.TaskGroup() as tg:
             moodle_task = tg.create_task(
-                self.moodle_auth.fetch_token(moodle_username, password),
+                self.authenticate(username, password),
                 name="moodle_auth",
             )
             sharepoint_task = tg.create_task(
@@ -60,7 +59,7 @@ class AuthService:
         )
         saved = await asyncio.to_thread(self.credential_store.save, credentials)
         if saved:
-            _logger.info("User '%s' is now logged in.", moodle_username)
+            _logger.info("User '%s' is now logged in.", username.split("@", 1)[0])
         return saved
 
     def logout(self) -> None:

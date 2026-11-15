@@ -12,7 +12,9 @@ class TaskOrchestrator:
     def create_coroutines(
         self,
         tasks: Sequence[DownloadTask],
-        run_task: Callable[[DownloadTask], Awaitable[None]],
+        run_task: Callable[[DownloadTask], Awaitable[None]] = (
+            lambda task: task.download()
+        ),
     ) -> list[Coroutine[Any, Any, None]]:
         if not tasks:
             return []

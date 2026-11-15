@@ -62,18 +62,12 @@ class SharepointClient:
             academic_site_url=academic_site_url,
             request_delay=request_delay,
         )
-        try:
-            personal_site = (
-                await client.personal_client.web.current_user.get_personal_site().execute_query_async()
-            )
-        except ClientRequestException as exc:
-            if getattr(getattr(exc, "response", None), "status_code", None) in (401, 403):
-                raise CredentialsExpiredError("SharePoint login expired") from exc
-            raise
+        personal_site = await client._await_query(
+            client.personal_client.web.current_user.get_personal_site().execute_query_async()
+        )
         if not personal_site.url:
             raise CredentialsExpiredError("SharePoint login expired")
         client.search_client = client.get_client(personal_site.url)
-        await asyncio.sleep(client.request_delay)
         return client
 
     def get_client(self, site_url: str) -> ClientContext:
