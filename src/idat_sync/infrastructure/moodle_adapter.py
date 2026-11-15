@@ -63,10 +63,6 @@ class MoodleAdapter:
         # TODO: list recursive moodle folder url
         return [MoodleContent(Path(safe_path_segment(filename)), last_modified, url)]
 
-    @staticmethod
-    def _safe_suffixed_html(prefix: str, suffix: str) -> str:
-        return safe_suffixed_segment(prefix, suffix)
-
     # -------------------------------------------------------------------------
     # Internal Vendor-to-Domain Mappers
     # -------------------------------------------------------------------------
@@ -99,7 +95,7 @@ class MoodleAdapter:
                 inline_contents = [
                     StringContent(
                         Path(
-                            self._safe_suffixed_html(
+                            safe_suffixed_segment(
                                 assign_name, f"-[{assign_id}]-intro.html"
                             )
                         ),
@@ -163,7 +159,7 @@ class MoodleAdapter:
             inline_contents = [
                 StringContent(
                     Path(
-                        self._safe_suffixed_html(
+                        safe_suffixed_segment(
                             sec_name, f"-[{sec_id}]-resumen.html"
                         )
                     ),

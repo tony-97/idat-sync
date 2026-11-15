@@ -1364,39 +1364,81 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
 
     async def test_idat_sync_get_course_remote_tree_disambiguates_case_insensitive_collisions(self):
         from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.ports import (
+            CourseGateway,
+            RecordingGateway,
+            UrlContentStrategy,
+        )
         from idat_sync.application.sync_service import IDATSync
         from idat_sync.domain.content import RecordingContent
-        from idat_sync.domain.course import Course
+        from idat_sync.domain.course import (
+            Course,
+            CourseModule,
+            CourseSection,
+            ModuleContent,
+        )
         from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
 
         long_name = f"{'L' * 96}.pdf"
-        course = Course(id=1, name="Course")
+        course = Course(
+            id=1,
+            name="Course",
+            sections=[
+                CourseSection(
+                    id=10,
+                    name="Sec",
+                    modules=[
+                        CourseModule(
+                            id=1,
+                            name="Mod",
+                            contents=[
+                                ModuleContent("guia.pdf", "http://a/1", 10, filepath="/Parte 1/"),
+                                ModuleContent("guia.pdf", "http://a/2", 20, filepath="/parte 1/"),
+                                ModuleContent("guia.pdf", "http://a/3", 30, filepath="/Parte 1/"),
+                            ],
+                        ),
+                        CourseModule(
+                            id=2,
+                            name="Mod",
+                            contents=[
+                                ModuleContent("file.pdf", "http://a/4", 40),
+                                ModuleContent("file (2).pdf", "http://a/5", 50),
+                                ModuleContent("file.pdf", "http://a/6", 60),
+                            ],
+                        ),
+                        CourseModule(
+                            id=3,
+                            name="Mod",
+                            contents=[
+                                ModuleContent(long_name, "http://a/7", 70),
+                                ModuleContent(long_name, "http://a/8", 80),
+                            ],
+                        ),
+                    ],
+                )
+            ],
+        )
         course_dir = Path("Course")
 
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_repo.get_course_content = AsyncMock(
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_recording_gw = MagicMock(spec=RecordingGateway)
+        mock_recording_gw.fetch_recordings = AsyncMock(
             return_value=[
-                MoodleContent(Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf"), 10, "http://a/1"),
-                MoodleContent(Path("Course/Sec/Mod-[1]/parte 1/guia.pdf"), 20, "http://a/2"),
-                MoodleContent(Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf"), 30, "http://a/3"),
-                MoodleContent(Path("Course/Sec/Mod-[2]/file.pdf"), 40, "http://a/4"),
-                MoodleContent(Path("Course/Sec/Mod-[2]/file (2).pdf"), 50, "http://a/5"),
-                MoodleContent(Path("Course/Sec/Mod-[2]/file.pdf"), 60, "http://a/6"),
-                MoodleContent(Path(f"Course/Sec/Mod-[3]/{long_name}"), 70, "http://a/7"),
-                MoodleContent(Path(f"Course/Sec/Mod-[3]/{long_name}"), 80, "http://a/8"),
+                RecordingContent(Path("Semana 1/video.mp4"), 90, "http://v/1"),
+                RecordingContent(Path("Semana 1/video.mp4"), 95, "http://v/2"),
             ]
         )
-        mock_repo.get_recordings = AsyncMock(
-            return_value=[
-                RecordingContent(Path("Course/Grabaciones/Semana 1/video.mp4"), 90, "http://v/1"),
-                RecordingContent(Path("Course/Grabaciones/Semana 1/video.mp4"), 95, "http://v/2"),
-            ]
+        mock_strategy = MagicMock(spec=UrlContentStrategy)
+        mock_strategy.can_handle.return_value = True
+        mock_strategy.list_url_content = AsyncMock(
+            side_effect=lambda url, filename, ts: [MoodleContent(Path(filename), ts, url)]
         )
+        repo = CourseRepository(mock_course_gw, mock_recording_gw, [mock_strategy])
 
         fs = LocalFileSystemAdapter()
         dm = DownloadManager([], fs)
         orch = TaskOrchestrator([])
-        sync = IDATSync(mock_repo, dm, orch, fs, "Grabaciones")
+        sync = IDATSync(repo, dm, orch, fs, "Grabaciones")
 
         items = await sync.get_course_remote_tree(course, course_dir)
 
