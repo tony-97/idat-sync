@@ -324,6 +324,48 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.repo.invalidate_cache()
         self.mock_course_gateway.invalidate_cache.assert_called_once_with()
 
+    async def test_get_course_content_projects_section_info_and_bibliografia_without_url_strategies(
+        self,
+    ):
+        course = Course(
+            id=1,
+            name="C1",
+            sections=[
+                CourseSection(
+                    id=10,
+                    name="Semana 01",
+                    inline_contents=[
+                        StringContent(Path("Semana 01-[10]-resumen.html"), 0, ["<p>S</p>"]),
+                        StringContent(Path("info.html"), 0, ["<p>L1</p>\n<p>L2</p>"]),
+                    ],
+                ),
+                CourseSection(
+                    id=11,
+                    name="Bibliografía",
+                    inline_contents=[
+                        StringContent(
+                            Path("bibliografia.html"),
+                            0,
+                            ['<p>E-Libro</p>\n<p><a href="https://elibro.net/1">Libro</a></p>'],
+                        )
+                    ],
+                ),
+            ],
+        )
+
+        items = await self.repo.get_course_content(course, Path("CourseDir"))
+
+        self.assertEqual(
+            [item.path for item in items],
+            [
+                Path("CourseDir/Semana 01/Semana 01-[10]-resumen.html"),
+                Path("CourseDir/Semana 01/info.html"),
+                Path("CourseDir/Bibliografía/bibliografia.html"),
+            ],
+        )
+        self.mock_moodle_strategy.can_handle.assert_not_called()
+        self.mock_sp_strategy.can_handle.assert_not_called()
+
 
 class TestInProgressCourseDetection(unittest.TestCase):
     def test_ranks_academic_terms_and_groups_split_sections(self):

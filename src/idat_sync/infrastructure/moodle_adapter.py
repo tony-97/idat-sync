@@ -1,6 +1,8 @@
+import html
 import logging
 from pathlib import Path
 from typing import Any
+import unicodedata
 from urllib.parse import urlparse
 
 from idat_sync.domain.content import MoodleContent, StringContent
@@ -89,17 +91,7 @@ class MoodleAdapter:
         inline_contents: list[StringContent] = []
         contents: list[ModuleContent] = []
 
-        if modname == "label":
-            description = raw_module.get("description", "")
-            if description:
-                inline_contents = [
-                    StringContent(
-                        Path(safe_path_segment(f"{module_name}.html")),
-                        0,
-                        [description],
-                    )
-                ]
-        elif modname == "assign":
+        if modname == "assign":
             assign = (assignments or {}).get(module_id)
             if assign:
                 assign_name = assign.get("name") or module_name
@@ -135,6 +127,33 @@ class MoodleAdapter:
             contents=contents,
         )
 
+    @staticmethod
+    def _is_bibliografia_section(section_name: str) -> bool:
+        normalized = "".join(
+            ch
+            for ch in unicodedata.normalize("NFKD", section_name)
+            if not unicodedata.combining(ch)
+        )
+        return normalized.strip().lower() == "bibliografia"
+
+    @staticmethod
+    def _format_bibliografia_url(raw_module: dict) -> str | None:
+        name = (raw_module.get("name") or "").strip()
+        urls = [
+            item["fileurl"]
+            for item in raw_module.get("contents", [])
+            if isinstance(item, dict) and item.get("fileurl")
+        ]
+        if urls:
+            label = html.escape(name)
+            return "\n".join(
+                f'<p><a href="{html.escape(url, quote=True)}">{label or html.escape(url)}</a></p>'
+                for url in urls
+            )
+        if name:
+            return f"<p>{html.escape(name)}</p>"
+        return None
+
     def _to_course_section(
         self, raw_section: dict, assignments: dict[int, Any] | None = None
     ) -> CourseSection:
@@ -154,11 +173,28 @@ class MoodleAdapter:
                 )
             ]
 
-        modules = [
-            self._to_course_module(module, assignments)
-            for module in raw_section.get("modules", [])
-            if isinstance(module, dict)
-        ]
+        is_bib = self._is_bibliografia_section(sec_name)
+        inline_parts: list[str] = []
+        modules: list[CourseModule] = []
+        for module in raw_section.get("modules", []):
+            if not isinstance(module, dict):
+                continue
+            modname = module.get("modname")
+            if modname == "label":
+                if desc := module.get("description", ""):
+                    inline_parts.append(desc)
+                continue
+            if is_bib and modname == "url":
+                if entry := self._format_bibliografia_url(module):
+                    inline_parts.append(entry)
+                continue
+            modules.append(self._to_course_module(module, assignments))
+
+        if inline_parts:
+            filename = "bibliografia.html" if is_bib else "info.html"
+            inline_contents.append(
+                StringContent(Path(filename), 0, ["\n".join(inline_parts)])
+            )
         return CourseSection(
             id=sec_id,
             name=sec_name,

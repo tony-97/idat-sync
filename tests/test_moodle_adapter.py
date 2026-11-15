@@ -102,35 +102,148 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(summary_content.path, Path("Week 1-[1]-resumen.html"))
         self.assertEqual(summary_content.contents, ["<p>Introduction</p>"])
 
-    def test_label_module_with_non_empty_and_empty_descriptions(self):
-        raw_label_non_empty = {
-            "id": 101,
-            "name": "Notice",
-            "modname": "label",
-            "description": "<p>Class starts at 8am</p>",
-            "contents": [],
-        }
-        mod_with_desc = self.adapter._to_course_module(raw_label_non_empty)
-        self.assertIsInstance(mod_with_desc, CourseModule)
-        self.assertFalse(hasattr(mod_with_desc, "modname"))
-        self.assertFalse(hasattr(mod_with_desc, "description"))
-        self.assertEqual(len(mod_with_desc.inline_contents), 1)
-        self.assertEqual(mod_with_desc.contents, [])
-        self.assertEqual(mod_with_desc.inline_contents[0].path, Path("Notice.html"))
-        self.assertEqual(
-            mod_with_desc.inline_contents[0].contents, ["<p>Class starts at 8am</p>"]
+    def test_consolidates_section_labels_into_info_html_and_ignores_empty(self):
+        self.mock_client.fetch_course_contents = AsyncMock(
+            return_value=[
+                {
+                    "id": 1,
+                    "name": "Week 1",
+                    "summary": "<p>Intro</p>",
+                    "modules": [
+                        {
+                            "id": 101,
+                            "name": "Notice 1",
+                            "modname": "label",
+                            "description": "<p>First</p>",
+                        },
+                        {
+                            "id": 102,
+                            "name": "Blank Notice",
+                            "modname": "label",
+                            "description": "",
+                        },
+                        {
+                            "id": 103,
+                            "name": "Notice 2",
+                            "modname": "label",
+                            "description": "<p>Second</p>",
+                        },
+                        {
+                            "id": 104,
+                            "name": "Slides",
+                            "modname": "resource",
+                            "contents": [
+                                {
+                                    "filename": "slides.pdf",
+                                    "fileurl": "https://aulavirtual/slides.pdf",
+                                    "timemodified": 100,
+                                }
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "id": 2,
+                    "name": "Empty Labels",
+                    "modules": [
+                        {
+                            "id": 201,
+                            "name": "Blank",
+                            "modname": "label",
+                            "description": "",
+                        }
+                    ],
+                },
+            ]
         )
 
-        raw_label_empty = {
-            "id": 102,
-            "name": "Blank Notice",
-            "modname": "label",
-            "description": "",
-            "contents": [],
-        }
-        mod_empty = self.adapter._to_course_module(raw_label_empty)
-        self.assertEqual(mod_empty.inline_contents, [])
-        self.assertEqual(mod_empty.contents, [])
+        sections = asyncio.run(self.adapter.get_course_sections(10))
+
+        self.assertEqual(len(sections), 2)
+        sec1 = sections[0]
+        self.assertEqual(len(sec1.inline_contents), 2)
+        self.assertEqual(sec1.inline_contents[0].path, Path("Week 1-[1]-resumen.html"))
+        self.assertEqual(sec1.inline_contents[1].path, Path("info.html"))
+        self.assertEqual(sec1.inline_contents[1].contents, ["<p>First</p>\n<p>Second</p>"])
+        self.assertEqual(len(sec1.modules), 1)
+        self.assertEqual(sec1.modules[0].name, "Slides")
+
+        sec2 = sections[1]
+        self.assertEqual(sec2.inline_contents, [])
+        self.assertEqual(sec2.modules, [])
+
+    def test_bibliografia_section_dumps_labels_and_escaped_urls_into_bibliografia_html(self):
+        self.mock_client.fetch_course_contents = AsyncMock(
+            return_value=[
+                {
+                    "id": 10,
+                    "name": " Bibliografía ",
+                    "modules": [
+                        {
+                            "id": 301,
+                            "name": "E-Libro",
+                            "modname": "label",
+                            "description": "<p><strong>Base de datos E-Libro:</strong></p>",
+                        },
+                        {
+                            "id": 302,
+                            "name": "Libro <A & B>",
+                            "modname": "url",
+                            "contents": [
+                                {
+                                    "filename": "Libro",
+                                    "fileurl": "https://elibro.net/es/titulos/1?a=1&b=2",
+                                    "timemodified": 100,
+                                }
+                            ],
+                        },
+                        {
+                            "id": 303,
+                            "name": "Blank",
+                            "modname": "label",
+                            "description": "",
+                        },
+                        {
+                            "id": 304,
+                            "name": "Guía",
+                            "modname": "resource",
+                            "contents": [
+                                {
+                                    "filename": "guia.pdf",
+                                    "fileurl": "https://aulavirtual/guia.pdf",
+                                    "timemodified": 200,
+                                }
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "id": 11,
+                    "name": "bibliografia",
+                    "modules": [],
+                },
+            ]
+        )
+
+        sections = asyncio.run(self.adapter.get_course_sections(10))
+
+        self.assertEqual(len(sections), 2)
+        bib = sections[0]
+        self.assertEqual(len(bib.inline_contents), 1)
+        self.assertEqual(bib.inline_contents[0].path, Path("bibliografia.html"))
+        self.assertEqual(
+            bib.inline_contents[0].contents,
+            [
+                "<p><strong>Base de datos E-Libro:</strong></p>\n"
+                '<p><a href="https://elibro.net/es/titulos/1?a=1&amp;b=2">Libro &lt;A &amp; B&gt;</a></p>'
+            ],
+        )
+        self.assertEqual(len(bib.modules), 1)
+        self.assertEqual(bib.modules[0].name, "Guía")
+
+        empty_bib = sections[1]
+        self.assertEqual(empty_bib.inline_contents, [])
+        self.assertEqual(empty_bib.modules, [])
 
     def test_assign_module_merges_intro_and_attachments_by_cmid(self):
         raw_assign_module = {
@@ -321,9 +434,11 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertLessEqual(len(sec_path), 100)
         self.assertTrue(sec_path.endswith("-[12]-resumen.html"))
 
-        self.assertEqual(sec.modules[0].inline_contents[0].path, Path("Aviso CON 1.html"))
-        self.assertEqual(sec.modules[1].inline_contents[0].path, Path("_CON.html"))
-        assign_path = sec.modules[2].inline_contents[0].path.name
+        self.assertEqual(len(sec.inline_contents), 2)
+        self.assertEqual(sec.inline_contents[1].path, Path("info.html"))
+        self.assertEqual(sec.inline_contents[1].contents, ["<p>l</p>\n<p>c</p>"])
+        self.assertEqual(len(sec.modules), 1)
+        assign_path = sec.modules[0].inline_contents[0].path.name
         self.assertLessEqual(len(assign_path), 100)
         self.assertTrue(assign_path.endswith("-[99]-intro.html"))
 
