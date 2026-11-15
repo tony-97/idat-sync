@@ -48,6 +48,10 @@ _Avoid_: Diff row, sync item
 The complete comparison between a remote content tree and a local directory tree, partitioning paths by synchronization status and identifying pending contents to download.
 _Avoid_: Tree diff, sync report, delta
 
+**SyncEvent**:
+An immutable lifecycle notification emitted as a course and its downloadable items progress through synchronization.
+_Avoid_: Progress callback, listener, queue tuple
+
 ### Authentication
 
 **Credentials**:

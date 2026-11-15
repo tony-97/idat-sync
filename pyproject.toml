@@ -7,10 +7,10 @@ name = "idat-sync"
 version = "0.0.2"
 dependencies = [
     "async-tkinter-loop >= 0.10.2",
-    "office365-rest-python-client @ git+https://github.com/vgrem/office365-rest-python-client.git@8268769c2575549a6e8af87c5ba4518f3a714cf3",
+    "office365-rest-python-client[httpx] >= 3.3.1",
     "playwright >= 1.55.0",
     "yt-dlp[default]",
-    "requests >= 2.32.5",
+    "httpx >= 0.27",
 ]
 authors = [{ name = "Tony Acuña Flores", email = "toanacfl@gmail.com" }]
 description = "Sincroniza automáticamente el material y grabaciones de IDAT (Moodle, SharePoint, OneDrive) a una carpeta local, manteniendo la estructura original de los cursos."

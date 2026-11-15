@@ -27,6 +27,10 @@ class AuthService:
         self.sharepoint_auth = sharepoint_auth
         self.credential_store = credential_store
 
+    async def authenticate(self, username: str, password: str) -> str | None:
+        moodle_username = username.split("@", 1)[0]
+        return await self.moodle_auth.fetch_token(moodle_username, password)
+
     async def login(
         self,
         username: str,
@@ -36,9 +40,7 @@ class AuthService:
         moodle_username = username.split("@", 1)[0]
         async with asyncio.TaskGroup() as tg:
             moodle_task = tg.create_task(
-                asyncio.to_thread(
-                    self.moodle_auth.fetch_token, moodle_username, password
-                ),
+                self.moodle_auth.fetch_token(moodle_username, password),
                 name="moodle_auth",
             )
             sharepoint_task = tg.create_task(

@@ -1,10 +1,11 @@
 import ast
+import asyncio
 import inspect
 from pathlib import Path
 import tempfile
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.task_orchestrator import TaskOrchestrator
@@ -41,7 +42,7 @@ def _matches_prefix(name: str, prefixes: tuple[str, ...]) -> bool:
     return any(name == p or name.startswith(f"{p}.") for p in prefixes)
 
 
-class TestSyncPipeline(unittest.TestCase):
+class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.moodle_downloader = MoodleDownloader(client=MagicMock())
         self.string_downloader = StringDownloader()
@@ -94,13 +95,16 @@ class TestSyncPipeline(unittest.TestCase):
             with self.assertRaises(TypeError):
                 manager.prepare_download_tasks(contents, root_dir=tmp_path)  # type: ignore[call-arg]
 
-    def test_task_orchestrator_runs_groups_and_writes_string_tasks(self):
+    async def test_task_orchestrator_runs_groups_and_writes_string_tasks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             target_html = Path(tmpdir) / "Semana 01" / "resumen.html"
             content = StringContent(target_html, 0, ["<h1>Week 1</h1>"])
 
             tasks = self.manager.prepare_download_tasks([content])
-            self.orchestrator.run(tasks)
+            coros = self.orchestrator.create_coroutines(
+                tasks, lambda task: task.download()
+            )
+            await asyncio.gather(*coros)
 
             self.assertTrue(target_html.exists())
             self.assertEqual(
@@ -118,7 +122,7 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertIs(tasks[0].downloader, self.recording_downloader)
         self.assertIs(tasks[0].content, rec)
 
-    def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(self):
+    async def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(self):
         import platform
 
         prefix = "\\\\?\\" if platform.system() == "Windows" else ""
@@ -135,7 +139,7 @@ class TestSyncPipeline(unittest.TestCase):
                     "https://idat628-my.sharepoint.com/:v:/r/personal/video.mp4",
                 )
                 with patch("idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL") as mock_ydl:
-                    self.recording_downloader.download(rec)
+                    await self.recording_downloader.download(rec)
 
                 self.assertTrue(target_path.parent.is_dir())
                 self.assertFalse(target_path.is_dir())
@@ -148,7 +152,7 @@ class TestSyncPipeline(unittest.TestCase):
                     [rec.url]
                 )
 
-    def test_custom_downloader_extends_without_modifying_base_classes(self):
+    async def test_custom_downloader_extends_without_modifying_base_classes(self):
         downloaded: list[RecordingContent] = []
 
         class YoutubeRecordingDownloader(Downloader[RecordingContent]):
@@ -157,7 +161,7 @@ class TestSyncPipeline(unittest.TestCase):
             def can_handle(self, content: RecordingContent) -> bool:
                 return "youtube.com" in content.url
 
-            def download(self, content: RecordingContent) -> None:
+            async def download(self, content: RecordingContent) -> None:
                 downloaded.append(content)
 
         yt_downloader = YoutubeRecordingDownloader()
@@ -175,7 +179,9 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertEqual(len(tasks), 1)
         self.assertIs(tasks[0].downloader, yt_downloader)
 
-        orchestrator.run(tasks)
+        await asyncio.gather(
+            *orchestrator.create_coroutines(tasks, lambda task: task.download())
+        )
         self.assertEqual(downloaded, [yt_rec])
 
     def test_diff_trees_uses_python_sets_for_sync_status(self):
@@ -330,7 +336,12 @@ class TestSyncPipeline(unittest.TestCase):
             diff = mgr.diff_trees(tmp_path, [content])
             self.assertEqual(diff.synced_paths, {test_file})
 
-    def test_idat_sync_orchestration_with_injected_collaborators(self):
+    async def test_idat_sync_orchestration_with_injected_collaborators(self):
+        from idat_sync.application.events import (
+            CourseFilesDiscovered,
+            CourseSyncCompleted,
+            CourseSyncStarted,
+        )
         from idat_sync.application.sync_service import IDATSync
         from idat_sync.application.course_repository import CourseRepository
         from idat_sync.application.ports import FileSystemPort
@@ -339,6 +350,7 @@ class TestSyncPipeline(unittest.TestCase):
         mock_repo = MagicMock(spec=CourseRepository)
         mock_mgr = MagicMock(spec=DownloadManager)
         mock_orch = MagicMock(spec=TaskOrchestrator)
+        mock_orch.create_coroutines.return_value = []
         mock_fs = MagicMock(spec=FileSystemPort)
 
         sync = IDATSync(
@@ -353,21 +365,30 @@ class TestSyncPipeline(unittest.TestCase):
         mock_repo.get_course_content.return_value = []
         mock_repo.get_recordings.return_value = []
         fake_diff = MagicMock()
+        fake_diff.synced_paths = set()
         fake_diff.pending_contents = []
         mock_mgr.diff_trees.return_value = fake_diff
         mock_mgr.prepare_download_tasks.return_value = []
 
-        result_diff = sync.sync_course(course, Path("target_dir"))
+        events = [event async for event in sync.sync_course(course, Path("target_dir"))]
 
-        self.assertIs(result_diff, fake_diff)
+        self.assertEqual(
+            events,
+            [
+                CourseSyncStarted(course),
+                CourseFilesDiscovered(course, Path("target_dir"), (), ()),
+                CourseSyncCompleted(course, None),
+            ],
+        )
         mock_fs.ensure_dir.assert_any_call(Path("target_dir"))
         mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Grabaciones")
-        mock_orch.run.assert_called_once_with([])
+        mock_orch.create_coroutines.assert_called_once()
+        self.assertEqual(mock_orch.create_coroutines.call_args.args[0], [])
 
-        # sync_courses
+        # sync_courses & list_courses
         mock_repo.list_courses.return_value = [course]
-        self.assertEqual(sync.list_courses(), [course])
-        sync.sync_courses(Path("root_folder"), [course])
+        self.assertEqual(await sync.list_courses(), [course])
+        _ = [event async for event in sync.sync_courses(Path("root_folder"), [course])]
         mock_fs.ensure_dir.assert_any_call(Path("root_folder") / "Algorithms")
 
     def test_hexagonal_architecture_import_boundaries_ast(self):
@@ -473,7 +494,7 @@ class TestSyncPipeline(unittest.TestCase):
         with self.assertRaises(TypeError):
             DownloadManager(self.downloaders)  # type: ignore[call-arg]
 
-    def test_downloaders_delegate_to_clients_and_use_injected_personal_host(self):
+    async def test_downloaders_delegate_to_clients_and_use_injected_personal_host(self):
         from idat_sync.domain.content import RecordingContent, SharepointContent
         from idat_sync.infrastructure.downloaders import (
             MoodleDownloader,
@@ -527,24 +548,32 @@ class TestSyncPipeline(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            mock_moodle.download_file.side_effect = lambda _url, dest: dest.write(b"moodle-bytes")
+
+            async def _write_moodle(_url, dest):
+                dest.write(b"moodle-bytes")
+
+            mock_moodle.download_file.side_effect = _write_moodle
             moodle_target = tmp / "nested" / "a.pdf"
-            moodle_dl.download(MoodleContent(moodle_target, 0, "https://moodle/a.pdf"))
+            await moodle_dl.download(MoodleContent(moodle_target, 0, "https://moodle/a.pdf"))
             self.assertEqual(moodle_target.read_bytes(), b"moodle-bytes")
             mock_moodle.download_file.assert_called_once()
             self.assertEqual(mock_moodle.download_file.call_args.args[0], "https://moodle/a.pdf")
             self.assertTrue(mock_moodle.download_file.call_args.args[1].closed)
 
             mock_file = MagicMock()
-            mock_sp.download_file.side_effect = lambda _file, dest: dest.write(b"sp-bytes")
+
+            async def _write_sp(_file, dest):
+                dest.write(b"sp-bytes")
+
+            mock_sp.download_file.side_effect = _write_sp
             sp_target = tmp / "nested_sp" / "b.pdf"
-            sp_dl.download(SharepointContent(sp_target, 0, mock_file))
+            await sp_dl.download(SharepointContent(sp_target, 0, mock_file))
             self.assertEqual(sp_target.read_bytes(), b"sp-bytes")
             mock_sp.download_file.assert_called_once()
             self.assertIs(mock_sp.download_file.call_args.args[0], mock_file)
             self.assertTrue(mock_sp.download_file.call_args.args[1].closed)
 
-    def test_idat_sync_uses_injected_recordings_folder_name(self):
+    async def test_idat_sync_uses_injected_recordings_folder_name(self):
         from idat_sync.application.course_repository import CourseRepository
         from idat_sync.application.ports import FileSystemPort
         from idat_sync.application.sync_service import IDATSync
@@ -553,6 +582,7 @@ class TestSyncPipeline(unittest.TestCase):
         mock_repo = MagicMock(spec=CourseRepository)
         mock_mgr = MagicMock(spec=DownloadManager)
         mock_orch = MagicMock(spec=TaskOrchestrator)
+        mock_orch.create_coroutines.return_value = []
         mock_fs = MagicMock(spec=FileSystemPort)
 
         sync = IDATSync(
@@ -567,16 +597,17 @@ class TestSyncPipeline(unittest.TestCase):
         mock_repo.get_course_content.return_value = []
         mock_repo.get_recordings.return_value = []
         fake_diff = MagicMock()
+        fake_diff.synced_paths = set()
         fake_diff.pending_contents = []
         mock_mgr.diff_trees.return_value = fake_diff
         mock_mgr.prepare_download_tasks.return_value = []
 
-        sync.sync_course(course, Path("target_dir"))
+        _ = [event async for event in sync.sync_course(course, Path("target_dir"))]
 
         mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Videos")
         mock_repo.get_recordings.assert_called_once_with("Algorithms", Path("target_dir") / "Videos")
 
-    def test_create_sync_service_wires_sync_config(self):
+    async def test_create_sync_service_wires_sync_config(self):
         from datetime import date
         from idat_sync.bootstrap import create_sync_service
         from idat_sync.config import SyncConfig
@@ -607,19 +638,22 @@ class TestSyncPipeline(unittest.TestCase):
 
         mock_ctx = MagicMock()
         mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/u"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=mock_personal_site
+        )
 
         with patch("idat_sync.infrastructure.sharepoint_client.ClientContext", return_value=mock_ctx) as mock_ctx_cls, patch(
-            "idat_sync.infrastructure.sharepoint_client.time.sleep"
+            "idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock
         ) as mock_sleep:
-            service = create_sync_service(credentials, config=custom_config)  # type: ignore[arg-type]
+            service = await create_sync_service(credentials, config=custom_config)  # type: ignore[arg-type]
 
         called_urls = [call.args[0] for call in mock_ctx_cls.call_args_list]
         self.assertIn("https://contoso.sharepoint.com/sites/ACAD", called_urls)
         self.assertIn("https://contoso-my.sharepoint.com", called_urls)
-        mock_sleep.assert_called_once_with(1.5)
+        mock_sleep.assert_awaited_once_with(1.5)
 
         self.assertEqual(service.recordings_folder_name, "Videos")
         moodle_adapter = service.course_repository.course_gateway
@@ -709,7 +743,7 @@ class TestSyncPipeline(unittest.TestCase):
             f"Found forbidden infrastructure imports in ui/: {ui_violations}",
         )
 
-    def test_recording_downloader_maps_http_401_403_download_error_to_credentials_expired(self):
+    async def test_recording_downloader_maps_http_401_403_download_error_to_credentials_expired(self):
         from yt_dlp.utils import DownloadError
         from idat_sync.application.ports import CredentialsExpiredError
 
@@ -726,115 +760,53 @@ class TestSyncPipeline(unittest.TestCase):
                         DownloadError(msg)
                     )
                     with self.assertRaises(CredentialsExpiredError):
-                        dl.download(content)
+                        await dl.download(content)
 
             with patch("idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL") as mock_ydl:
                 mock_ydl.return_value.__enter__.return_value.download.side_effect = (
                     DownloadError("HTTP Error 404: Not Found")
                 )
                 with self.assertRaises(DownloadError) as ctx:
-                    dl.download(content)
+                    await dl.download(content)
                 self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
 
-    def test_task_orchestrator_isolates_item_errors_and_aborts_on_credentials_expired(self):
-        import threading
-        from idat_sync.application.ports import CredentialsExpiredError, DownloadTask
+    async def test_task_orchestrator_create_coroutines_groups_and_skips_empty_groups(self):
+        from idat_sync.application.ports import DownloadTask
 
         executed: list[str] = []
 
         class StubDownloader(Downloader[StringContent]):
             content_type = StringContent
 
-            def __init__(self, label: str, behavior):
+            def __init__(self, label: str):
                 self.label = label
-                self.behavior = behavior
 
-            def download(self, content: StringContent) -> None:
+            async def download(self, content: StringContent) -> None:
                 executed.append(f"{self.label}:{content.path.name}")
-                self.behavior(content)
 
-        # Case 1: single-item non-credential error logs and continues
-        d1 = StubDownloader(
-            "g1",
-            lambda c: (_ for _ in ()).throw(OSError("disk hiccup"))
-            if c.path.name == "bad.txt"
-            else None,
-        )
-        d2 = StubDownloader("g2", lambda c: None)
-        orch = TaskOrchestrator([[d1], [d2]])
+        d1 = StubDownloader("g1a")
+        d2 = StubDownloader("g1b")
+        d_empty = StubDownloader("empty")
+        d3 = StubDownloader("g2")
+        orch = TaskOrchestrator([[d1, d2], [d_empty], [d3]])
+
+        self.assertEqual(orch.create_coroutines([], lambda t: t.download()), [])
+
         tasks = [
-            DownloadTask(StringContent(Path("bad.txt"), 0, ["x"]), d1),
-            DownloadTask(StringContent(Path("good1.txt"), 0, ["x"]), d1),
-            DownloadTask(StringContent(Path("good2.txt"), 0, ["x"]), d2),
+            DownloadTask(StringContent(Path("a.txt"), 0, ["x"]), d1),
+            DownloadTask(StringContent(Path("b.txt"), 0, ["x"]), d2),
+            DownloadTask(StringContent(Path("c.txt"), 0, ["x"]), d3),
         ]
-        orch.run(tasks)
-        self.assertEqual(executed, ["g1:bad.txt", "g1:good1.txt", "g2:good2.txt"])
 
-        # Case 2: CredentialsExpiredError aborts remaining tasks across groups
-        executed.clear()
-        g1_failed = threading.Event()
+        async def _run_task(task: DownloadTask) -> None:
+            await task.download()
 
-        def fail_auth(_content):
-            g1_failed.set()
-            raise CredentialsExpiredError("401 expired")
+        coros = orch.create_coroutines(tasks, _run_task)
+        self.assertEqual(len(coros), 2)
+        await asyncio.gather(*coros)
+        self.assertEqual(executed, ["g1a:a.txt", "g1b:b.txt", "g2:c.txt"])
 
-        def wait_then_ok(_content):
-            g1_failed.wait(timeout=2.0)
-
-        d_auth = StubDownloader("auth", fail_auth)
-        d_sibling = StubDownloader("sib", wait_then_ok)
-        orch2 = TaskOrchestrator([[d_auth], [d_sibling]])
-        tasks2 = [
-            DownloadTask(StringContent(Path("t1.txt"), 0, ["x"]), d_auth),
-            DownloadTask(StringContent(Path("t2_never.txt"), 0, ["x"]), d_auth),
-            DownloadTask(StringContent(Path("s1.txt"), 0, ["x"]), d_sibling),
-            DownloadTask(StringContent(Path("s2_never.txt"), 0, ["x"]), d_sibling),
-        ]
-        with self.assertRaises(CredentialsExpiredError):
-            orch2.run(tasks2)
-        self.assertNotIn("auth:t2_never.txt", executed)
-        self.assertNotIn("sib:s2_never.txt", executed)
-
-    def test_task_orchestrator_publishes_task_events_and_returns_errors(self):
-        from idat_sync.application.events import (
-            SyncEvent,
-            TaskDownloadCompleted,
-            TaskDownloadFailed,
-            TaskDownloadStarted,
-        )
-        from idat_sync.application.ports import DownloadTask
-
-        class StubDownloader(Downloader[StringContent]):
-            content_type = StringContent
-
-            def download(self, content: StringContent) -> None:
-                if content.path.name == "bad.txt":
-                    raise OSError("disk hiccup")
-
-        dl = StubDownloader()
-        events: list[SyncEvent] = []
-        orch = TaskOrchestrator([[dl]], publish=events.append)
-        bad_task = DownloadTask(StringContent(Path("bad.txt"), 0, ["x"]), dl)
-        good_task = DownloadTask(StringContent(Path("good.txt"), 0, ["x"]), dl)
-
-        errors = orch.run([bad_task, good_task])
-
-        self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], OSError)
-        self.assertEqual(str(errors[0]), "disk hiccup")
-        self.assertEqual(
-            events,
-            [
-                TaskDownloadStarted(Path("bad.txt")),
-                TaskDownloadFailed(Path("bad.txt"), errors[0]),
-                TaskDownloadStarted(Path("good.txt")),
-                TaskDownloadCompleted(Path("good.txt")),
-            ],
-        )
-        with self.assertRaises(TypeError):
-            orch.run([good_task], on_task_start=lambda _t: None)  # type: ignore[call-arg]
-
-    def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
+    async def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
         from idat_sync.application.course_repository import CourseRepository
         from idat_sync.application.ports import (
             CourseGateway,
@@ -882,7 +854,7 @@ class TestSyncPipeline(unittest.TestCase):
             def __init__(self) -> None:
                 self.downloaded: list[Path] = []
 
-            def download(self, content: StringContent) -> None:
+            async def download(self, content: StringContent) -> None:
                 self.downloaded.append(content.path)
 
         mock_course_gw = MagicMock(spec=CourseGateway)
@@ -895,22 +867,22 @@ class TestSyncPipeline(unittest.TestCase):
 
         from idat_sync.application.events import CourseSyncCompleted, SyncEvent
 
-        events: list[SyncEvent] = []
         str_dl = StubStringDownloader()
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
         dm = DownloadManager([str_dl], StubFileSystem())  # type: ignore[arg-type]
-        orch = TaskOrchestrator([[str_dl]], publish=events.append)
+        orch = TaskOrchestrator([[str_dl]])
         sync = IDATSync(
             repo,
             dm,
             orch,
             StubFileSystem(),  # type: ignore[arg-type]
             "Grabaciones",
-            publish=events.append,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            sync.sync_courses(tmpdir, [c1, c2])
+            events: list[SyncEvent] = [
+                event async for event in sync.sync_courses(tmpdir, [c1, c2])
+            ]
             self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 2)
             self.assertEqual(
                 str_dl.downloaded,
@@ -933,7 +905,8 @@ class TestSyncPipeline(unittest.TestCase):
                 [],
             ]
             with self.assertRaises(CredentialsExpiredError):
-                sync.sync_courses(tmpdir, [c1, c2])
+                async for event in sync.sync_courses(tmpdir, [c1, c2]):
+                    events.append(event)
             self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 1)
             self.assertEqual(str_dl.downloaded, [])
             completed_courses = [
@@ -945,7 +918,102 @@ class TestSyncPipeline(unittest.TestCase):
             self.assertEqual(completed_courses[0][0], 1)
             self.assertIsInstance(completed_courses[0][1], CredentialsExpiredError)
 
-    def test_idat_sync_list_courses_lazy_populate_and_actionable_file_filtering(self):
+    async def test_idat_sync_cancels_sibling_group_tasks_on_credentials_expired(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.events import (
+            CourseSyncCompleted,
+            SyncEvent,
+            TaskDownloadFailed,
+        )
+        from idat_sync.application.ports import (
+            CourseGateway,
+            CredentialsExpiredError,
+            RecordingGateway,
+        )
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.domain.course import Course, CourseSection
+
+        class FailingDownloader(Downloader[StringContent]):
+            content_type = StringContent
+
+            def can_handle(self, content: StringContent) -> bool:
+                return content.path.name == "auth.html"
+
+            async def download(self, content: StringContent) -> None:
+                await asyncio.sleep(0)
+                raise CredentialsExpiredError("401 expired")
+
+        class SiblingDownloader(Downloader[MoodleContent]):
+            content_type = MoodleContent
+
+            def __init__(self) -> None:
+                self.cancelled = False
+                self.finished = False
+
+            async def download(self, content: MoodleContent) -> None:
+                try:
+                    await asyncio.sleep(5)
+                    self.finished = True
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+
+        class StubFileSystem:
+            def ensure_dir(self, path: Path) -> None:
+                pass
+
+            def scan_mtimes(self, root: Path) -> dict[Path, int]:
+                return {}
+
+        c1 = Course(
+            id=1,
+            name="C1",
+            sections=[
+                CourseSection(
+                    id=1,
+                    name="S1",
+                    inline_contents=[StringContent(Path("auth.html"), 1, ["a"])],
+                    modules=[],
+                )
+            ],
+        )
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings.return_value = [
+            RecordingContent(Path("r.mp4"), 1, "https://example.com/r.mp4")
+        ]
+
+        # Use MoodleContent via a stubbed repo method for the sibling group
+        failing_dl = FailingDownloader()
+        sibling_dl = SiblingDownloader()
+        repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
+
+        async def _fake_course_content(_course, course_dir):
+            return [
+                StringContent(Path(course_dir) / "auth.html", 1, ["a"]),
+                MoodleContent(Path(course_dir) / "sib.pdf", 1, "https://moodle/sib.pdf"),
+            ]
+
+        repo.get_course_content = _fake_course_content  # type: ignore[method-assign]
+        mock_rec_gw.fetch_recordings.return_value = []
+
+        dm = DownloadManager([failing_dl, sibling_dl], StubFileSystem())  # type: ignore[arg-type]
+        orch = TaskOrchestrator([[failing_dl], [sibling_dl]])
+        sync = IDATSync(repo, dm, orch, StubFileSystem(), "Grabaciones")  # type: ignore[arg-type]
+
+        events: list[SyncEvent] = []
+        with self.assertRaises(CredentialsExpiredError):
+            async for event in sync.sync_course(c1, Path("out")):
+                events.append(event)
+
+        self.assertTrue(sibling_dl.cancelled)
+        self.assertFalse(sibling_dl.finished)
+        self.assertTrue(any(isinstance(e, TaskDownloadFailed) for e in events))
+        self.assertIsInstance(events[-1], CourseSyncCompleted)
+        assert isinstance(events[-1], CourseSyncCompleted)
+        self.assertIsInstance(events[-1].error, CredentialsExpiredError)
+
+    async def test_idat_sync_list_courses_lazy_populate_and_actionable_file_filtering(self):
         from idat_sync.application.course_repository import CourseRepository
         from idat_sync.application.ports import CourseGateway, RecordingGateway
         from idat_sync.application.sync_service import IDATSync
@@ -955,7 +1023,7 @@ class TestSyncPipeline(unittest.TestCase):
 
         c_lazy = Course(id=10, name="Lazy Course", category="IV.01.2026-III")
 
-        def populate(course: Course) -> Course:
+        async def populate(course: Course) -> Course:
             course.sections = [
                 CourseSection(
                     id=1,
@@ -985,15 +1053,14 @@ class TestSyncPipeline(unittest.TestCase):
             TaskDownloadStarted,
         )
 
-        events: list[SyncEvent] = []
         fs = LocalFileSystemAdapter()
         str_dl = StringDownloader()
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
         dm = DownloadManager([str_dl], fs)
-        orch = TaskOrchestrator([[str_dl]], publish=events.append)
-        sync = IDATSync(repo, dm, orch, fs, "Grabaciones", publish=events.append)
+        orch = TaskOrchestrator([[str_dl]])
+        sync = IDATSync(repo, dm, orch, fs, "Grabaciones")
 
-        self.assertEqual(sync.list_courses(), [c_lazy])
+        self.assertEqual(await sync.list_courses(), [c_lazy])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             course_dir = Path(tmpdir) / "Lazy Course"
@@ -1002,7 +1069,9 @@ class TestSyncPipeline(unittest.TestCase):
             synced_file.write_text("ok", encoding="utf-8")
             os.utime(synced_file, (200, 200))
 
-            sync.sync_course(c_lazy, course_dir)
+            events: list[SyncEvent] = [
+                event async for event in sync.sync_course(c_lazy, course_dir)
+            ]
 
             mock_course_gw.populate_course_sections.assert_called_once_with(c_lazy)
             missing_file = course_dir / "S1" / "missing.html"
@@ -1030,7 +1099,8 @@ class TestSyncPipeline(unittest.TestCase):
 
         self.assertFalse(hasattr(ports, "SyncProgressPort"))
         self.assertTrue(hasattr(events_mod, "SyncEvent"))
-        self.assertTrue(hasattr(events_mod, "EventPublisher"))
+        self.assertFalse(hasattr(events_mod, "EventPublisher"))
+        self.assertFalse(hasattr(events_mod, "noop_publisher"))
 
         course = Course(id=1, name="Algebra")
         started = events_mod.CourseSyncStarted(course=course)
@@ -1069,12 +1139,10 @@ class TestSyncPipeline(unittest.TestCase):
             ["INFO", "INFO", "INFO", "INFO", "INFO", "ERROR", "ERROR"],
         )
 
-    def test_bootstrap_configure_logging_and_event_fanout(self):
+    async def test_bootstrap_configure_logging_and_event_logging(self):
         import logging
-        from idat_sync.application.events import CourseSyncStarted, SyncEvent
         from idat_sync.bootstrap import configure_logging, create_sync_service
         from idat_sync.config import SyncConfig
-        from idat_sync.domain.course import Course
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "app.log"
@@ -1102,11 +1170,13 @@ class TestSyncPipeline(unittest.TestCase):
 
         mock_ctx = MagicMock()
         mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://idat628-my.sharepoint.com/personal/u"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=mock_personal_site
+        )
 
-        received: list[SyncEvent] = []
         credentials = {
             "token": "tok123",
             "sharepoint_storage_state": {
@@ -1114,20 +1184,15 @@ class TestSyncPipeline(unittest.TestCase):
             },
         }
         with patch("idat_sync.infrastructure.sharepoint_client.ClientContext", return_value=mock_ctx), patch(
-            "idat_sync.infrastructure.sharepoint_client.time.sleep"
+            "idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock
         ):
-            service = create_sync_service(
+            service = await create_sync_service(
                 credentials,  # type: ignore[arg-type]
                 config=SyncConfig(request_delay=0.0),
-                publish=received.append,
             )
 
-        self.assertIs(service.publish, service.task_orchestrator.publish)
-        ev = CourseSyncStarted(Course(id=1, name="Algebra"))
-        with self.assertLogs("idat_sync", level="INFO") as cm:
-            service.publish(ev)
-        self.assertEqual(received, [ev])
-        self.assertEqual(len(cm.records), 1)
+        self.assertFalse(hasattr(service, "publish"))
+        self.assertFalse(hasattr(service.task_orchestrator, "publish"))
 
 
 if __name__ == "__main__":

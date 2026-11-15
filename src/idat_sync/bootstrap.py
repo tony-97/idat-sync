@@ -4,12 +4,6 @@ from pathlib import Path
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
-from idat_sync.application.events import (
-    EventPublisher,
-    SyncEvent,
-    log_sync_event,
-    noop_publisher,
-)
 from idat_sync.application.ports import Credentials, Downloader
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.application.task_orchestrator import TaskOrchestrator
@@ -47,15 +41,10 @@ def configure_logging(log_file: Path) -> logging.Logger:
     return logger
 
 
-def create_sync_service(
+async def create_sync_service(
     credentials: Credentials,
     config: SyncConfig,
-    publish: EventPublisher = noop_publisher,
 ) -> IDATSync:
-    def _publish(event: SyncEvent) -> None:
-        log_sync_event(event)
-        publish(event)
-
     sharepoint_storage_state = credentials.get("sharepoint_storage_state")
     cookies = (
         sharepoint_storage_state.get("cookies", [])
@@ -73,7 +62,7 @@ def create_sync_service(
         moodle_base_url=config.moodle_base_url,
     )
 
-    sharepoint_raw_client = SharepointClient(
+    sharepoint_raw_client = await SharepointClient.create(
         cookies,
         sharepoint_personal_host=config.sharepoint_personal_host,
         academic_site_url=config.sharepoint_academic_site_url,
@@ -113,7 +102,7 @@ def create_sync_service(
 
     file_system = LocalFileSystemAdapter()
     download_manager = DownloadManager(downloaders, file_system=file_system)
-    task_orchestrator = TaskOrchestrator(download_tasks_group, publish=_publish)
+    task_orchestrator = TaskOrchestrator(download_tasks_group)
 
     return IDATSync(
         course_repository=course_repository,
@@ -121,7 +110,6 @@ def create_sync_service(
         task_orchestrator=task_orchestrator,
         file_system=file_system,
         recordings_folder_name=config.recordings_folder_name,
-        publish=_publish,
     )
 
 

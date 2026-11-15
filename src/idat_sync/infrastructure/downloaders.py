@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
 from dataclasses import dataclass
 import io
 import logging
@@ -40,10 +41,10 @@ class MoodleDownloader(Downloader[MoodleContent]):
     def __init__(self, client: MoodleClient) -> None:
         self.moodle_client = client
 
-    def download(self, content: MoodleContent) -> None:
+    async def download(self, content: MoodleContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
         with open(content.path, "wb") as f:
-            self.moodle_client.download_file(content.url, f)
+            await self.moodle_client.download_file(content.url, f)
 
 
 class SharepointDownloader(Downloader[SharepointContent]):
@@ -52,10 +53,10 @@ class SharepointDownloader(Downloader[SharepointContent]):
     def __init__(self, client: SharepointClient) -> None:
         self.sharepoint_client = client
 
-    def download(self, content: SharepointContent) -> None:
+    async def download(self, content: SharepointContent) -> None:
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
         with open(content.path, "wb") as local_file:
-            self.sharepoint_client.download_file(content.file, local_file)
+            await self.sharepoint_client.download_file(content.file, local_file)
 
 
 class StringDownloader(Downloader[StringContent]):
@@ -64,7 +65,7 @@ class StringDownloader(Downloader[StringContent]):
     def can_handle(self, content: StringContent) -> bool:
         return bool("".join(content.contents).strip())
 
-    def download(self, content: StringContent) -> None:
+    async def download(self, content: StringContent) -> None:
         text = "".join(content.contents).strip()
         Path(content.path).parent.mkdir(parents=True, exist_ok=True)
         with open(content.path, "w", encoding="utf-8") as f:
@@ -120,7 +121,7 @@ class RecordingDownloader(Downloader[RecordingContent]):
             lines.append(line)
         return "\n".join(lines)
 
-    def download(self, content: RecordingContent) -> None:
+    def _download_sync(self, content: RecordingContent) -> None:
         logging.getLogger(__name__).info(
             "Downloading share url: %s", content.url
         )
@@ -147,6 +148,9 @@ class RecordingDownloader(Downloader[RecordingContent]):
             ) or re.search(r"\b(?:HTTP Error 40[13]|401 Unauthorized|403 Forbidden)\b", str(exc)):
                 raise CredentialsExpiredError(str(exc)) from exc
             raise
+
+    async def download(self, content: RecordingContent) -> None:
+        await asyncio.to_thread(self._download_sync, content)
 
 
 __all__ = [

@@ -51,7 +51,7 @@ class SharepointApiAdapter:
     def get_name(self, f: Folder | File, fallback_name: str = ""):
         return (
             f.name
-            or pathlib.PurePosixPath(f.serverRelativeUrl or "").name
+            or pathlib.PurePosixPath(f.server_relative_url or "").name
             or fallback_name
         )
 
@@ -83,39 +83,41 @@ class SharepointApiAdapter:
 
     @staticmethod
     def _is_empty_entity(entity: Folder | File | None) -> bool:
-        return not entity or (not entity.name and not entity.serverRelativeUrl)
+        return not entity or (not entity.name and not entity.server_relative_url)
 
-    def list_url_content(
+    async def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[SharepointContent]:
         path = urlparse(url).path
         if re.search(r"^/:(\w+):/", path, re.IGNORECASE):
             if re.search(r"^/:f:/", path, re.IGNORECASE):
-                folder = self.sp_client.fetch_folder_by_guest_url(url)
+                folder = await self.sp_client.fetch_folder_by_guest_url(url)
                 if self._is_empty_entity(folder):
                     return []
-                return self.fetch_folder_contents(folder)
-            file = self.sp_client.fetch_file_by_guest_url(url)
+                return await self.fetch_folder_contents(folder)
+            file = await self.sp_client.fetch_file_by_guest_url(url)
             if self._is_empty_entity(file):
                 return []
             return [self.__file_to_content(file, filename, last_modified)]
-        file = self.fetch_file_from_direct_link(url)
+        file = await self.fetch_file_from_direct_link(url)
         if not self._is_empty_entity(file):
             return [self.__file_to_content(file, filename, last_modified)]
         return []
 
-    def fetch_folder_contents(self, folder: Folder) -> list[SharepointContent]:
+    async def fetch_folder_contents(
+        self, folder: Folder
+    ) -> list[SharepointContent]:
         contents = list[SharepointContent]()
-        for file in self.sp_client.fetch_folder_files(folder):
+        for file in await self.sp_client.fetch_folder_files(folder):
             contents.append(self.__file_to_content(file))
-        for sub_folder in self.sp_client.fetch_subfolders(folder):
+        for sub_folder in await self.sp_client.fetch_subfolders(folder):
             if save_name := self.__get_name(sub_folder):
                 safe_sub = safe_path_segment(save_name)
-                for item in self.fetch_folder_contents(sub_folder):
+                for item in await self.fetch_folder_contents(sub_folder):
                     contents.append(item.in_folder(safe_sub))
         return contents
 
-    def fetch_file_from_direct_link(self, link: str):
+    async def fetch_file_from_direct_link(self, link: str):
         query_params = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
         lower_query_keys = {k.lower(): v for k, v in query_params.items()}
 
@@ -126,17 +128,21 @@ class SharepointApiAdapter:
         else:
             return None
 
-        return self.sp_client.fetch_file_by_id(link, file_id)
+        return await self.sp_client.fetch_file_by_id(link, file_id)
 
-    def fetch_recordings(self, course_name: str) -> list[RecordingContent]:
-        search_result = self.sp_client.search_for_recordings(course_name)
+    async def fetch_recordings(
+        self, course_name: str
+    ) -> list[RecordingContent]:
+        search_result = await self.sp_client.search_for_recordings(course_name)
         recording_site = self.__find_recordings_site(course_name, search_result)
         recordings = list[RecordingContent]()
         if recording_site:
-            items = self.sp_client.fetch_document_library_items(recording_site)
+            items = await self.sp_client.fetch_document_library_items(
+                recording_site
+            )
 
             def is_course_recording(item: ListItem):
-                relative_url = item.file.serverRelativeUrl or ""
+                relative_url = item.file.server_relative_url or ""
                 return (
                     Path(urlparse(relative_url).path).parent.name.lower()
                     == self.recordings_folder_name.lower()
@@ -145,7 +151,7 @@ class SharepointApiAdapter:
 
             for item in filter(is_course_recording, items):
                 file = item.file
-                if not file.time_created or not file.serverRelativeUrl:
+                if not file.time_created or not file.server_relative_url:
                     continue
 
                 week = (
@@ -155,7 +161,7 @@ class SharepointApiAdapter:
                 )
                 name = safe_path_segment(self.get_name(file))
                 last_mod = self.get_last_modified(file)
-                share_url = f"https://{self.sharepoint_personal_host}/:v:/r{quote(file.serverRelativeUrl)}?csf=1&web=1"
+                share_url = f"https://{self.sharepoint_personal_host}/:v:/r{quote(file.server_relative_url)}?csf=1&web=1"
                 rec_path = (
                     Path(safe_path_segment(f"{self.week_folder_prefix} {week}"))
                     / name

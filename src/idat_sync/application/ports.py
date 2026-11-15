@@ -40,8 +40,8 @@ class DownloadTask[C: Content]:
     def path(self) -> Path:
         return self.content.path
 
-    def download(self) -> None:
-        self.downloader.download(self.content)
+    async def download(self) -> None:
+        await self.downloader.download(self.content)
 
 
 class Downloader[C: Content](ABC):
@@ -56,7 +56,7 @@ class Downloader[C: Content](ABC):
         return None
 
     @abstractmethod
-    def download(self, content: C) -> None: ...
+    async def download(self, content: C) -> None: ...
 
 
 class FileSystemPort(Protocol):
@@ -68,15 +68,15 @@ class FileSystemPort(Protocol):
 
 
 class CourseGateway(Protocol):
-    def list_courses(self) -> list[Course]:
+    async def list_courses(self) -> list[Course]:
         ...
 
-    def populate_course_sections(self, course: Course) -> Course:
+    async def populate_course_sections(self, course: Course) -> Course:
         ...
 
 
 class RecordingGateway(Protocol):
-    def fetch_recordings(self, course_name: str) -> list[RecordingContent]:
+    async def fetch_recordings(self, course_name: str) -> list[RecordingContent]:
         ...
 
 
@@ -84,14 +84,14 @@ class UrlContentStrategy(Protocol):
     def can_handle(self, url: str) -> bool:
         ...
 
-    def list_url_content(
+    async def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[Content]:
         ...
 
 
 class MoodleTokenPort(Protocol):
-    def fetch_token(self, username: str, password: str) -> str | None:
+    async def fetch_token(self, username: str, password: str) -> str | None:
         ...
 
 

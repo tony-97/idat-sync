@@ -1,17 +1,17 @@
-from collections.abc import Callable
+import asyncio
+from collections.abc import Awaitable, Callable
 import re
-import time
-from typing import Any, BinaryIO, TypeVar
+from typing import BinaryIO, Self, TypeVar
 import urllib.parse
 
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_result import ClientResult
+from office365.runtime.transport.httpx_transport import HttpxTransport
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
-import requests
 
 from idat_sync.application.ports import CookieData, CredentialsExpiredError
 
@@ -46,20 +46,44 @@ class SharepointClient:
         self.client = self.get_client(academic_site_url.rstrip("/"))
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
-        personal_site = self._run_query(
-            lambda: self.personal_client.web.current_user.get_personal_site().execute_query(),
-            sleep_after=False,
+        self.search_client: ClientContext | None = None
+
+    @classmethod
+    async def create(
+        cls,
+        cookies: list[CookieData],
+        sharepoint_personal_host: str,
+        academic_site_url: str,
+        request_delay: float,
+    ) -> Self:
+        client = cls(
+            cookies=cookies,
+            sharepoint_personal_host=sharepoint_personal_host,
+            academic_site_url=academic_site_url,
+            request_delay=request_delay,
         )
-        if personal_site.url:
-            self.search_client = self.get_client(personal_site.url)
-            time.sleep(self.request_delay)
-        else:
+        try:
+            personal_site = (
+                await client.personal_client.web.current_user.get_personal_site().execute_query_async()
+            )
+        except ClientRequestException as exc:
+            if getattr(getattr(exc, "response", None), "status_code", None) in (401, 403):
+                raise CredentialsExpiredError("SharePoint login expired") from exc
+            raise
+        if not personal_site.url:
             raise CredentialsExpiredError("SharePoint login expired")
+        client.search_client = client.get_client(personal_site.url)
+        await asyncio.sleep(client.request_delay)
+        return client
 
     def get_client(self, site_url: str) -> ClientContext:
-        return ClientContext(site_url).with_cookies(
-            lambda: self.sharepoint_cookies
+        ctx = (
+            ClientContext(site_url)
+            .with_cookies(lambda: self.sharepoint_cookies)
+            .with_auto_retry()
         )
+        ctx.pending_request().with_async_transport(HttpxTransport())
+        return ctx
 
     def get_client_from_url(self, url: str) -> ClientContext:
         parsed_url = urllib.parse.urlparse(url)
@@ -94,114 +118,91 @@ class SharepointClient:
                 auth_cookies[name] = cookie.get("value", "")
         return auth_cookies
 
-    @staticmethod
-    def _retry_delay(response: Any, default_delay: float) -> float:
-        headers = getattr(response, "headers", None)
-        retry_after = headers.get("Retry-After") if headers else None
-        if retry_after is not None:
-            try:
-                return max(0, int(retry_after))
-            except (TypeError, ValueError):
-                pass
-        return default_delay
-
-    def _run_query(
-        self,
-        action: Callable[[], _ResultT],
-        *,
-        sleep_after: bool = True,
-        max_retry: int = 5,
-    ) -> _ResultT:
-        for attempt in range(max_retry):
-            try:
-                result = action()
-                break
-            except (ClientRequestException, requests.HTTPError) as exc:
-                response = getattr(exc, "response", None)
-                status_code = getattr(response, "status_code", None)
-                if status_code in (401, 403):
-                    raise CredentialsExpiredError(
-                        f"HTTP {status_code}: SharePoint credentials expired."
-                    ) from exc
-                if status_code in (429, 503) and attempt < max_retry - 1:
-                    time.sleep(self._retry_delay(response, self.request_delay))
-                    continue
-                raise
-        if sleep_after:
-            time.sleep(self.request_delay)
+    async def _await_query(self, coro: Awaitable[_ResultT]) -> _ResultT:
+        try:
+            result = await coro
+        except ClientRequestException as exc:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code in (401, 403):
+                raise CredentialsExpiredError(
+                    f"HTTP {status_code}: SharePoint credentials expired."
+                ) from exc
+            raise
+        await asyncio.sleep(self.request_delay)
         return result
 
-    def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
-        def _load_and_execute() -> None:
-            ctx.load(entity, self.properties_to_retrieve)
-            ctx.execute_query()
-
+    async def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
+        ctx.load(entity, self.properties_to_retrieve)
         try:
-            self._run_query(_load_and_execute)
+            await self._await_query(
+                ctx.execute_query_with_incremental_retry_async()
+            )
         except TypeError:
             # odata.null guest URL responses leave entity.resource_url as None
-            time.sleep(self.request_delay)
+            await asyncio.sleep(self.request_delay)
 
-    def search_for_recordings(
+    async def search_for_recordings(
         self, course_name: str
     ) -> ClientResult[SearchResult]:
-        return self._run_query(
-            lambda: self.search_client.search.query(
+        if self.search_client is None:
+            raise CredentialsExpiredError("SharePoint login expired")
+        return await self._await_query(
+            self.search_client.search.query(
                 course_name,
                 row_limit=15,
-            ).execute_query()
+            ).execute_query_async()
         )
 
-    def fetch_document_library_items(self, site_url: str) -> list[ListItem]:
+    async def fetch_document_library_items(self, site_url: str) -> list[ListItem]:
         client = self.get_client(site_url)
         doc_lib = client.web.default_document_library()
-        items = self._run_query(
-            lambda: doc_lib.items.select(["FileSystemObjectType"])
+        items = await self._await_query(
+            doc_lib.items.select(["FileSystemObjectType"])
             .expand(["File"])
             .select(self.properties_to_retrieve)
-            .get_all(page_size=50)
-            .execute_query()
+            .get_all_async(page_size=50)
         )
         return list(items)
 
-    def _load_entity_at_url(
+    async def _load_entity_at_url(
         self, url: str, resolver: Callable[[ClientContext], _EntityT]
     ) -> _EntityT:
         ctx = self.get_client_from_url(url)
         entity = resolver(ctx)
-        self.load_entity(entity, ctx)
+        await self.load_entity(entity, ctx)
         return entity
 
-    def fetch_folder_by_guest_url(self, url: str) -> Folder:
-        return self._load_entity_at_url(
+    async def fetch_folder_by_guest_url(self, url: str) -> Folder:
+        return await self._load_entity_at_url(
             url, lambda ctx: ctx.web.get_folder_by_guest_url(url)
         )
 
-    def fetch_file_by_guest_url(self, url: str) -> File:
-        return self._load_entity_at_url(
+    async def fetch_file_by_guest_url(self, url: str) -> File:
+        return await self._load_entity_at_url(
             url, lambda ctx: ctx.web.get_file_by_guest_url(url)
         )
 
-    def fetch_file_by_id(self, url: str, file_id: str) -> File:
-        return self._load_entity_at_url(
+    async def fetch_file_by_id(self, url: str, file_id: str) -> File:
+        return await self._load_entity_at_url(
             url, lambda ctx: ctx.web.get_file_by_id(file_id)
         )
 
-    def fetch_folder_files(self, folder: Folder) -> list[File]:
-        files = self._run_query(
-            lambda: folder.get_files()
+    async def fetch_folder_files(self, folder: Folder) -> list[File]:
+        files = await self._await_query(
+            folder.get_files()
             .select(self.properties_to_retrieve)
-            .execute_query()
+            .execute_query_async()
         )
         return list(files)
 
-    def fetch_subfolders(self, folder: Folder) -> list[Folder]:
-        folders = self._run_query(lambda: folder.get_folders().execute_query())
+    async def fetch_subfolders(self, folder: Folder) -> list[Folder]:
+        folders = await self._await_query(
+            folder.get_folders().execute_query_async()
+        )
         return list(folders)
 
-    def download_file(self, file: File, dest: BinaryIO) -> None:
-        self._run_query(
-            lambda: file.download_session(
-                dest, use_path=False
-            ).execute_query()
+    async def download_file(self, file: File, dest: BinaryIO) -> None:
+        await self._await_query(
+            file.download_session_async(dest, use_path=False)
         )

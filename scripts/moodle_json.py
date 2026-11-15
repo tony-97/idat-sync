@@ -1,3 +1,4 @@
+import asyncio
 import getpass
 import json
 from pathlib import Path
@@ -9,7 +10,7 @@ from idat_sync.infrastructure.moodle_adapter import MoodleTokenAdapter
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 
 
-def _get_token(config) -> str | None:
+async def _get_token(config) -> str | None:
     if creds := JsonCredentialStore(config.session_file).load():
         return creds["token"]
 
@@ -19,15 +20,15 @@ def _get_token(config) -> str | None:
         print("Username and password are required.", file=sys.stderr)
         return None
 
-    return MoodleTokenAdapter(
+    return await MoodleTokenAdapter(
         MoodleTokenClient(config.moodle_base_url)
     ).fetch_token(username, password)
 
 
-def main() -> int:
+async def main() -> int:
     """Fetch Moodle courses, contents, and assignments and write them to ./all_courses_contents.json."""
     config = load_config()
-    token = _get_token(config)
+    token = await _get_token(config)
     if not token:
         return 1
 
@@ -37,11 +38,11 @@ def main() -> int:
         request_delay=config.request_delay,
     )
     print("Fetching enrolled courses...")
-    courses = client.fetch_enrolled_courses()
+    courses = await client.fetch_enrolled_courses()
     print(f"Found {len(courses)} courses. Fetching assignments...")
     assignments_by_course = {
         int(item["id"]): item.get("assignments", [])
-        for item in client.fetch_assignments()
+        for item in await client.fetch_assignments()
         if isinstance(item, dict) and item.get("id") is not None
     }
     payload = []
@@ -53,7 +54,7 @@ def main() -> int:
         payload.append(
             {
                 "course": course,
-                "contents": client.fetch_course_contents(int(cid))
+                "contents": await client.fetch_course_contents(int(cid))
                 if cid is not None
                 else [],
                 "assignments": assignments_by_course.get(int(cid), [])
@@ -71,4 +72,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

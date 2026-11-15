@@ -5,8 +5,8 @@ Split every external service integration in `infrastructure/` into a low-level `
 ```python
 # 1. *Client: Raw transport, auth, rate-limiting (request_delay), raw payloads & file streams
 class MoodleClient:
-    def fetch_enrolled_courses(self) -> list[dict]: ...
-    def download_file(self, url: str, dest: BinaryIO) -> None: ...
+    async def fetch_enrolled_courses(self) -> list[dict]: ...
+    async def download_file(self, url: str, dest: BinaryIO) -> None: ...
 
 # 2. *Adapter / *Downloader: Anti-Corruption Layer & port implementations
 class MoodleAdapter(CourseGateway, UrlContentStrategy):
@@ -19,7 +19,7 @@ class MoodleDownloader(Downloader[MoodleContent]):
         self.moodle_client = client
 ```
 
-- **`*Client` responsibilities**: HTTP/SDK transport, auth tokens/cookies, file download streaming (`download_file(..., dest: BinaryIO)`), `time.sleep(self.request_delay)` rate-limiting via injected `request_delay` on `MoodleClient` and `SharepointClient` (single-call pre-auth `MoodleTokenClient(base_url)` omits `request_delay`), and raising transport/vendor exceptions. Returns raw vendor dicts or SDK objects; zero `domain` imports.
+- **`*Client` responsibilities**: Async HTTP/SDK transport (`httpx.AsyncClient`, `office365` with `HttpxTransport` and `.with_auto_retry()`), auth tokens/cookies, file download streaming (`async def download_file(..., dest: BinaryIO)`), `await asyncio.sleep(self.request_delay)` rate-limiting via injected `request_delay` on `MoodleClient` and `SharepointClient` (single-call pre-auth `MoodleTokenClient(base_url)` omits `request_delay`), and raising transport/vendor exceptions. Returns raw vendor dicts or SDK objects; zero `domain` imports. `SharepointClient.__init__` is non-blocking and `@classmethod async def create(...)` resolves `personal_site`.
 - **`*Adapter` & `*Downloader` responsibilities**: Wrap `*Client` via constructor injection (never another `*Adapter`), implement driven ports (`CourseGateway`, `RecordingGateway`, `UrlContentStrategy`, `MoodleTokenPort`, `Downloader[C]`), and delegate all HTTP/SDK queries and `request_delay` throttling to `*Client`. `*Downloader` classes handle local path creation (`mkdir`) and opening the target file stream before calling `*Client.download_file`.
 - **Transformations within Adapters**:
   - `MoodleAdapter` converts section summaries, label module descriptions, and assignment intros into `inline_contents: list[StringContent]` and merges `introattachments` into `CourseModule.contents: list[ModuleContent]`. It does not expose raw auth tokens (`token`). `MoodleTokenAdapter` wraps `MoodleTokenClient` and translates raw login JSON into `str | None` with `[!]` diagnostics.

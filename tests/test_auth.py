@@ -25,7 +25,7 @@ class FakeMoodleTokenPort:
         self.token = token
         self.calls: list[tuple[str, str]] = []
 
-    def fetch_token(self, username: str, password: str) -> str | None:
+    async def fetch_token(self, username: str, password: str) -> str | None:
         self.calls.append((username, password))
         return self.token
 
@@ -96,43 +96,41 @@ class TestAuthService(unittest.TestCase):
 
     def test_login_runs_providers_concurrently_and_offloads_blocking_calls_to_threads(self):
         main_thread_id = threading.get_ident()
-        sp_started = threading.Event()
-        fetch_token_threads: list[int] = []
         save_threads: list[int] = []
 
-        class ConcurrentMoodlePort:
-            def fetch_token(self, username: str, password: str) -> str | None:
-                fetch_token_threads.append(threading.get_ident())
-                if not sp_started.wait(timeout=2.0):
-                    raise TimeoutError("SharePoint login did not start concurrently")
-                return "tok-concurrent"
+        async def exercise() -> bool:
+            sp_started = asyncio.Event()
 
-        class ConcurrentSharepointPort:
-            async def fetch_storage_state(
-                self, username: str, password: str, get_mfa_code
-            ) -> StorageStateData | None:
-                await asyncio.sleep(0)
-                sp_started.set()
-                await get_mfa_code()
-                return {"cookies": []}
+            class ConcurrentMoodlePort:
+                async def fetch_token(self, username: str, password: str) -> str | None:
+                    await asyncio.wait_for(sp_started.wait(), timeout=2.0)
+                    return "tok-concurrent"
 
-        class ThreadCheckingStore(InMemoryCredentialStore):
-            def save(self, credentials: Credentials) -> bool:
-                save_threads.append(threading.get_ident())
-                return super().save(credentials)
+            class ConcurrentSharepointPort:
+                async def fetch_storage_state(
+                    self, username: str, password: str, get_mfa_code
+                ) -> StorageStateData | None:
+                    await asyncio.sleep(0)
+                    sp_started.set()
+                    await get_mfa_code()
+                    return {"cookies": []}
 
-        store = ThreadCheckingStore()
-        service = AuthService(
-            moodle_auth=ConcurrentMoodlePort(),
-            sharepoint_auth=ConcurrentSharepointPort(),
-            credential_store=store,
-        )
+            class ThreadCheckingStore(InMemoryCredentialStore):
+                def save(self, credentials: Credentials) -> bool:
+                    save_threads.append(threading.get_ident())
+                    return super().save(credentials)
 
-        ok = asyncio.run(service.login("jdoe@idat.pe", "secret", _mfa_code))
+            store = ThreadCheckingStore()
+            service = AuthService(
+                moodle_auth=ConcurrentMoodlePort(),
+                sharepoint_auth=ConcurrentSharepointPort(),
+                credential_store=store,
+            )
+            return await service.login("jdoe@idat.pe", "secret", _mfa_code)
+
+        ok = asyncio.run(exercise())
 
         self.assertTrue(ok)
-        self.assertEqual(len(fetch_token_threads), 1)
-        self.assertNotEqual(fetch_token_threads[0], main_thread_id)
         self.assertEqual(len(save_threads), 1)
         self.assertNotEqual(save_threads[0], main_thread_id)
 
@@ -188,39 +186,50 @@ class TestAuthService(unittest.TestCase):
                 list(sig.parameters), ["self", "username", "password", "get_mfa_code"]
             )
 
+    def test_authenticate_strips_domain_and_awaits_moodle_port(self):
+        moodle = FakeMoodleTokenPort(token="tok-auth")
+        service = AuthService(
+            moodle_auth=moodle,
+            sharepoint_auth=FakeSharepointAuthPort(),
+            credential_store=InMemoryCredentialStore(),
+        )
+        token = asyncio.run(service.authenticate("jdoe@custom.edu", "secret"))
+        self.assertEqual(token, "tok-auth")
+        self.assertEqual(moodle.calls, [("jdoe", "secret")])
+
     def test_login_cancels_sharepoint_task_and_raises_exception_group_on_moodle_error(self):
-        sp_started = threading.Event()
         sp_cancelled: list[bool] = []
         sp_cleaned_up: list[bool] = []
-
-        class FailingMoodlePort:
-            def fetch_token(self, username: str, password: str) -> str | None:
-                if not sp_started.wait(timeout=2.0):
-                    raise TimeoutError("SharePoint login did not start")
-                raise RuntimeError("moodle HTTP 500")
-
-        class HangingSharepointPort:
-            async def fetch_storage_state(
-                self, username: str, password: str, get_mfa_code
-            ) -> StorageStateData | None:
-                sp_started.set()
-                try:
-                    await asyncio.get_running_loop().create_future()
-                except asyncio.CancelledError:
-                    sp_cancelled.append(True)
-                    raise
-                finally:
-                    sp_cleaned_up.append(True)
-                return None
-
         store = InMemoryCredentialStore()
-        service = AuthService(
-            moodle_auth=FailingMoodlePort(),
-            sharepoint_auth=HangingSharepointPort(),
-            credential_store=store,
-        )
 
         async def exercise() -> None:
+            sp_started = asyncio.Event()
+
+            class FailingMoodlePort:
+                async def fetch_token(self, username: str, password: str) -> str | None:
+                    await asyncio.wait_for(sp_started.wait(), timeout=2.0)
+                    raise RuntimeError("moodle HTTP 500")
+
+            class HangingSharepointPort:
+                async def fetch_storage_state(
+                    self, username: str, password: str, get_mfa_code
+                ) -> StorageStateData | None:
+                    sp_started.set()
+                    try:
+                        await asyncio.get_running_loop().create_future()
+                    except asyncio.CancelledError:
+                        sp_cancelled.append(True)
+                        raise
+                    finally:
+                        sp_cleaned_up.append(True)
+                    return None
+
+            service = AuthService(
+                moodle_auth=FailingMoodlePort(),
+                sharepoint_auth=HangingSharepointPort(),
+                credential_store=store,
+            )
+
             with self.assertRaises(ExceptionGroup) as ctx:
                 await service.login("jdoe", "secret", _mfa_code)
             self.assertEqual(sp_cancelled, [True])
@@ -679,7 +688,7 @@ class TestLoginFrame(unittest.TestCase):
             for alias in node.names
         }
         self.assertEqual(
-            imported & {"requests", "office365", "yt_dlp", "playwright", "tkinter"},
+            imported & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"},
             set(),
         )
 
@@ -739,175 +748,163 @@ class TestSyncFrame(unittest.TestCase):
                     self.assertFalse(hasattr(sync_frame_mod, "_TreeProgressListener"))
                     frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
                     self.assertFalse(hasattr(frame, "output_text"))
-                    try:
-                        mock_sync = MagicMock()
-                        mock_sync.list_courses.return_value = [
-                            past_course,
+                    self.assertFalse(hasattr(frame, "progress_queue"))
+                    self.assertFalse(hasattr(frame, "update_progress"))
+                    mock_sync = MagicMock()
+                    mock_sync.list_courses = AsyncMock(
+                        return_value=[past_course, current_course]
+                    )
+                    attempts = 0
+
+                    async def fake_create_sync_service(credentials, cfg):
+                        nonlocal attempts
+                        attempts += 1
+                        if attempts == 1:
+                            raise RuntimeError("network offline")
+                        return mock_sync
+
+                    async def fake_sync_courses(root_folder, courses):
+                        self.assertEqual(root_folder, tmpdir)
+                        self.assertEqual(courses, [current_course])
+                        c_dir = Path(tmpdir) / current_course.name
+                        synced_p = c_dir / "S1" / "already.pdf"
+                        ok_p = c_dir / "S1" / "new.pdf"
+                        err_p = c_dir / "S1" / "broken.pdf"
+                        yield CourseSyncStarted(current_course)
+                        yield CourseFilesDiscovered(
                             current_course,
-                        ]
-                        captured_publish = None
+                            c_dir,
+                            (synced_p,),
+                            (ok_p, err_p),
+                        )
+                        yield TaskDownloadStarted(ok_p)
+                        yield TaskDownloadCompleted(ok_p)
+                        yield TaskDownloadStarted(err_p)
+                        yield TaskDownloadFailed(err_p, OSError("disk full"))
+                        yield CourseSyncCompleted(
+                            current_course, RuntimeError("partial")
+                        )
 
-                        def fake_create_sync_service(credentials, cfg, publish=None):
-                            nonlocal captured_publish
-                            if captured_publish is None:
-                                captured_publish = publish
-                                raise RuntimeError("network offline")
-                            captured_publish = publish
-                            return mock_sync
+                    mock_sync.sync_courses.side_effect = fake_sync_courses
 
-                        def fake_sync_courses(root_folder, courses):
-                            self.assertEqual(root_folder, tmpdir)
-                            self.assertEqual(courses, [current_course])
-                            assert captured_publish is not None
-                            c_dir = Path(tmpdir) / current_course.name
-                            synced_p = c_dir / "S1" / "already.pdf"
-                            ok_p = c_dir / "S1" / "new.pdf"
-                            err_p = c_dir / "S1" / "broken.pdf"
-                            captured_publish(CourseSyncStarted(current_course))
-                            captured_publish(
-                                CourseFilesDiscovered(
-                                    current_course,
-                                    c_dir,
-                                    (synced_p,),
-                                    (ok_p, err_p),
-                                )
-                            )
-                            captured_publish(TaskDownloadStarted(ok_p))
-                            captured_publish(TaskDownloadCompleted(ok_p))
-                            captured_publish(TaskDownloadStarted(err_p))
-                            captured_publish(
-                                TaskDownloadFailed(err_p, OSError("disk full"))
-                            )
-                            captured_publish(
-                                CourseSyncCompleted(
-                                    current_course, RuntimeError("partial")
-                                )
-                            )
+                    with patch(
+                        "idat_sync.ui.sync_frame.create_sync_service",
+                        side_effect=fake_create_sync_service,
+                    ) as mock_factory:
+                        # 1. Startup failure recovers controls and preserves credentials
+                        await frame.load_idat_sync(creds)
+                        self.assertIsNone(frame.idat_sync)
+                        self.assertFalse(frame.is_syncing.get())
+                        self.assertEqual(str(frame.browse_button["state"]), "normal")
+                        self.assertEqual(str(frame.logout_button["state"]), "normal")
+                        self.assertEqual(master.switched_to_login, 0)
+                        self.assertTrue(creds_file.exists())
+                        self.assertIn("network offline", frame.status_var.get())
 
-                        mock_sync.sync_courses.side_effect = fake_sync_courses
+                        # 2. Selecting folder and calling do_sync retries create_sync_service
+                        frame.folder_path.set(tmpdir)
+                        self.assertEqual(str(frame.sync_button["state"]), "normal")
+                        await frame.do_sync()
+                        self.assertEqual(mock_factory.call_count, 2)
+                        self.assertFalse(frame.is_syncing.get())
 
-                        with patch(
-                            "idat_sync.ui.sync_frame.create_sync_service",
-                            side_effect=fake_create_sync_service,
-                        ) as mock_factory:
-                            # 1. Startup failure recovers controls and preserves credentials
-                            await frame.load_idat_sync(creds)
-                            await asyncio.sleep(0)
-                            self.assertIsNone(frame.idat_sync)
-                            self.assertFalse(frame.is_syncing.get())
-                            self.assertEqual(str(frame.browse_button["state"]), "normal")
-                            self.assertEqual(str(frame.logout_button["state"]), "normal")
-                            self.assertEqual(master.switched_to_login, 0)
-                            self.assertTrue(creds_file.exists())
-                            self.assertIn("network offline", frame.status_var.get())
+                        # Verify ordering: in-progress first (checked icon), past second (unchecked icon)
+                        top_items = frame.tree.get_children("")
+                        self.assertEqual(len(top_items), 2)
+                        self.assertEqual(
+                            frame.tree.item(top_items[0], "text"),
+                            current_course.name,
+                        )
+                        self.assertEqual(
+                            frame.tree.item(top_items[0], "image"),
+                            (str(frame._checked_icon),),
+                        )
+                        self.assertEqual(
+                            frame.tree.item(top_items[1], "text"),
+                            past_course.name,
+                        )
+                        self.assertEqual(
+                            frame.tree.item(top_items[1], "image"),
+                            (str(frame._unchecked_icon),),
+                        )
 
-                            # 2. Selecting folder and calling do_sync retries create_sync_service
-                            frame.folder_path.set(tmpdir)
-                            self.assertEqual(str(frame.sync_button["state"]), "normal")
-                            await frame.do_sync()
-                            await asyncio.sleep(0)
-                            self.assertEqual(mock_factory.call_count, 2)
-                            self.assertFalse(frame.is_syncing.get())
+                        # Verify parent & nested folder/file progress rows with icons
+                        self.assertEqual(
+                            frame.tree.item(top_items[0], "values"),
+                            ("Failed", "66%"),
+                        )
+                        folder_items = frame.tree.get_children(top_items[0])
+                        self.assertEqual(len(folder_items), 1)
+                        self.assertEqual(
+                            frame.tree.item(folder_items[0], "text"), "S1"
+                        )
+                        self.assertEqual(
+                            frame.tree.item(folder_items[0], "image"),
+                            (str(frame._folder_icon),),
+                        )
+                        file_items = frame.tree.get_children(folder_items[0])
+                        child_rows = {
+                            frame.tree.item(cid, "text"): (
+                                frame.tree.item(cid, "values"),
+                                frame.tree.item(cid, "image"),
+                            )
+                            for cid in file_items
+                        }
+                        self.assertEqual(
+                            child_rows,
+                            {
+                                "already.pdf": (
+                                    ("Synced", "100%"),
+                                    (str(frame._file_icon),),
+                                ),
+                                "new.pdf": (
+                                    ("Completed", "100%"),
+                                    (str(frame._file_icon),),
+                                ),
+                                "broken.pdf": (
+                                    ("Failed", "0%"),
+                                    (str(frame._file_icon),),
+                                ),
+                            },
+                        )
 
-                            # Verify ordering: in-progress first (checked icon), past second (unchecked icon)
-                            top_items = frame.tree.get_children("")
-                            self.assertEqual(len(top_items), 2)
-                            self.assertEqual(
-                                frame.tree.item(top_items[0], "text"),
-                                current_course.name,
+                        # 3. Quick-select buttons & row-click toggling
+                        frame.clear_selection()
+                        self.assertEqual(str(frame.sync_button["state"]), "disabled")
+                        frame.select_all()
+                        self.assertEqual(str(frame.sync_button["state"]), "normal")
+                        self.assertTrue(
+                            all(
+                                frame.tree.item(iid, "image")
+                                == (str(frame._checked_icon),)
+                                for iid in frame.tree.get_children("")
                             )
-                            self.assertEqual(
-                                frame.tree.item(top_items[0], "image"),
-                                (str(frame._checked_icon),),
-                            )
-                            self.assertEqual(
-                                frame.tree.item(top_items[1], "text"),
-                                past_course.name,
-                            )
-                            self.assertEqual(
-                                frame.tree.item(top_items[1], "image"),
-                                (str(frame._unchecked_icon),),
-                            )
+                        )
+                        frame.select_in_progress()
+                        self.assertEqual(
+                            frame.tree.item(top_items[0], "image"),
+                            (str(frame._checked_icon),),
+                        )
+                        self.assertEqual(
+                            frame.tree.item(top_items[1], "image"),
+                            (str(frame._unchecked_icon),),
+                        )
+                        frame.toggle_course_row(top_items[0])
+                        self.assertEqual(str(frame.sync_button["state"]), "disabled")
+                        frame.toggle_course_row(top_items[0])
+                        self.assertEqual(str(frame.sync_button["state"]), "normal")
 
-                            # Verify parent & nested folder/file progress rows with icons
-                            self.assertEqual(
-                                frame.tree.item(top_items[0], "values"),
-                                ("Failed", "66%"),
-                            )
-                            folder_items = frame.tree.get_children(top_items[0])
-                            self.assertEqual(len(folder_items), 1)
-                            self.assertEqual(
-                                frame.tree.item(folder_items[0], "text"), "S1"
-                            )
-                            self.assertEqual(
-                                frame.tree.item(folder_items[0], "image"),
-                                (str(frame._folder_icon),),
-                            )
-                            file_items = frame.tree.get_children(folder_items[0])
-                            child_rows = {
-                                frame.tree.item(cid, "text"): (
-                                    frame.tree.item(cid, "values"),
-                                    frame.tree.item(cid, "image"),
-                                )
-                                for cid in file_items
-                            }
-                            self.assertEqual(
-                                child_rows,
-                                {
-                                    "already.pdf": (
-                                        ("Synced", "100%"),
-                                        (str(frame._file_icon),),
-                                    ),
-                                    "new.pdf": (
-                                        ("Completed", "100%"),
-                                        (str(frame._file_icon),),
-                                    ),
-                                    "broken.pdf": (
-                                        ("Failed", "0%"),
-                                        (str(frame._file_icon),),
-                                    ),
-                                },
-                            )
+                        # 4. CredentialsExpiredError during sync prompts Logout without wiping file
+                        async def fail_sync_courses(_root_folder, _courses):
+                            raise CredentialsExpiredError("401 expired")
+                            yield  # pragma: no cover
 
-                            # 3. Quick-select buttons & row-click toggling
-                            frame.clear_selection()
-                            self.assertEqual(str(frame.sync_button["state"]), "disabled")
-                            frame.select_all()
-                            self.assertEqual(str(frame.sync_button["state"]), "normal")
-                            self.assertTrue(
-                                all(
-                                    frame.tree.item(iid, "image")
-                                    == (str(frame._checked_icon),)
-                                    for iid in frame.tree.get_children("")
-                                )
-                            )
-                            frame.select_in_progress()
-                            self.assertEqual(
-                                frame.tree.item(top_items[0], "image"),
-                                (str(frame._checked_icon),),
-                            )
-                            self.assertEqual(
-                                frame.tree.item(top_items[1], "image"),
-                                (str(frame._unchecked_icon),),
-                            )
-                            frame.toggle_course_row(top_items[0])
-                            self.assertEqual(str(frame.sync_button["state"]), "disabled")
-                            frame.toggle_course_row(top_items[0])
-                            self.assertEqual(str(frame.sync_button["state"]), "normal")
-
-                            # 4. CredentialsExpiredError during sync prompts Logout without wiping file
-                            mock_sync.sync_courses.side_effect = CredentialsExpiredError(
-                                "401 expired"
-                            )
-                            await frame.do_sync()
-                            await asyncio.sleep(0)
-                            self.assertFalse(frame.is_syncing.get())
-                            self.assertEqual(master.switched_to_login, 0)
-                            self.assertTrue(creds_file.exists())
-                            self.assertIn("Logout", frame.status_var.get())
-                    finally:
-                        frame.exit()
-                        await asyncio.sleep(0)
+                        mock_sync.sync_courses.side_effect = fail_sync_courses
+                        await frame.do_sync()
+                        self.assertFalse(frame.is_syncing.get())
+                        self.assertEqual(master.switched_to_login, 0)
+                        self.assertTrue(creds_file.exists())
+                        self.assertIn("Logout", frame.status_var.get())
                 finally:
                     master.destroy()
 

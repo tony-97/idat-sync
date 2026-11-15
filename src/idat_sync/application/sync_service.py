@@ -1,4 +1,6 @@
-from collections.abc import Sequence
+import asyncio
+from collections.abc import AsyncIterator, Sequence
+import contextlib
 from pathlib import Path
 
 from idat_sync.application.course_repository import CourseRepository
@@ -7,11 +9,15 @@ from idat_sync.application.events import (
     CourseFilesDiscovered,
     CourseSyncCompleted,
     CourseSyncStarted,
-    EventPublisher,
-    noop_publisher,
+    SyncEvent,
+    TaskDownloadCompleted,
+    TaskDownloadFailed,
+    TaskDownloadStarted,
+    log_sync_event,
 )
 from idat_sync.application.ports import (
     CredentialsExpiredError,
+    DownloadTask,
     FileSystemPort,
 )
 from idat_sync.application.task_orchestrator import TaskOrchestrator
@@ -19,6 +25,11 @@ from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
 from idat_sync.domain.path_utils import safe_filename
 from idat_sync.domain.sync import SyncDiff
+
+
+def _emit(event: SyncEvent) -> SyncEvent:
+    log_sync_event(event)
+    return event
 
 
 class IDATSync:
@@ -29,58 +40,56 @@ class IDATSync:
         task_orchestrator: TaskOrchestrator,
         file_system: FileSystemPort,
         recordings_folder_name: str,
-        publish: EventPublisher = noop_publisher,
     ) -> None:
         self.course_repository = course_repository
         self.download_manager = download_manager
         self.task_orchestrator = task_orchestrator
         self.file_system = file_system
         self.recordings_folder_name = recordings_folder_name
-        self.publish = publish
 
-    def list_courses(self) -> list[Course]:
-        return self.course_repository.list_courses()
+    async def list_courses(self) -> list[Course]:
+        return await self.course_repository.list_courses()
 
-    def get_course_remote_tree(
+    async def get_course_remote_tree(
         self, course: Course, course_dir: str | Path
     ) -> list[Content]:
         course_path = Path(course_dir)
         recordings_folder = course_path / self.recordings_folder_name
-        remote_tree = self.course_repository.get_course_content(
+        remote_tree = await self.course_repository.get_course_content(
             course, course_path
         )
-        recordings_content = self.course_repository.get_recordings(
+        recordings_content = await self.course_repository.get_recordings(
             course.name, recordings_folder
         )
         remote_tree.extend(recordings_content)
         return remote_tree
 
-    def check_course_sync(
+    async def check_course_sync(
         self, course: Course, course_dir: str | Path
     ) -> SyncDiff:
-        remote_tree = self.get_course_remote_tree(course, course_dir)
+        remote_tree = await self.get_course_remote_tree(course, course_dir)
         return self.download_manager.diff_trees(course_dir, remote_tree)
 
-    def sync_course(
+    async def sync_course(
         self,
         course: Course,
         course_dir: str | Path,
-    ) -> SyncDiff:
+    ) -> AsyncIterator[SyncEvent]:
         course_path = Path(course_dir)
         recordings_folder = course_path / self.recordings_folder_name
-        self.publish(CourseSyncStarted(course))
+        yield _emit(CourseSyncStarted(course))
 
         try:
             if not course.sections:
-                self.course_repository.populate_course_sections(course)
+                await self.course_repository.populate_course_sections(course)
             self.file_system.ensure_dir(course_path)
             self.file_system.ensure_dir(recordings_folder)
 
-            diff = self.check_course_sync(course, course_path)
+            diff = await self.check_course_sync(course, course_path)
             tasks = self.download_manager.prepare_download_tasks(
                 diff.pending_contents
             )
-            self.publish(
+            yield _emit(
                 CourseFilesDiscovered(
                     course,
                     course_path,
@@ -88,24 +97,63 @@ class IDATSync:
                     tuple(t.path for t in tasks),
                 )
             )
-            errors = self.task_orchestrator.run(tasks)
+
+            event_queue: asyncio.Queue[SyncEvent | None] = asyncio.Queue()
+            errors: list[Exception] = []
+
+            async def _run_task(task: DownloadTask) -> None:
+                await event_queue.put(TaskDownloadStarted(task.path))
+                try:
+                    await task.download()
+                except CredentialsExpiredError as exc:
+                    await event_queue.put(TaskDownloadFailed(task.path, exc))
+                    raise
+                except Exception as exc:
+                    errors.append(exc)
+                    await event_queue.put(TaskDownloadFailed(task.path, exc))
+                else:
+                    await event_queue.put(TaskDownloadCompleted(task.path))
+
+            async def _run_all() -> None:
+                try:
+                    async with asyncio.TaskGroup() as tg:
+                        for coro in self.task_orchestrator.create_coroutines(
+                            tasks, _run_task
+                        ):
+                            tg.create_task(coro)
+                finally:
+                    await event_queue.put(None)
+
+            runner = asyncio.create_task(_run_all())
+            try:
+                try:
+                    while (event := await event_queue.get()) is not None:
+                        yield _emit(event)
+                    await runner
+                except* CredentialsExpiredError as eg:
+                    raise eg.exceptions[0]
+            finally:
+                if not runner.done():
+                    runner.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await runner
         except Exception as exc:
-            self.publish(CourseSyncCompleted(course, exc))
+            yield _emit(CourseSyncCompleted(course, exc))
             raise
 
-        self.publish(CourseSyncCompleted(course, errors[0] if errors else None))
-        return diff
+        yield _emit(CourseSyncCompleted(course, errors[0] if errors else None))
 
-    def sync_courses(
+    async def sync_courses(
         self,
         root_folder: str | Path,
         courses: Sequence[Course],
-    ) -> None:
+    ) -> AsyncIterator[SyncEvent]:
         root_path = Path(root_folder)
         for course in courses:
             course_dir = root_path / safe_filename(course.name)
             try:
-                self.sync_course(course, course_dir)
+                async for event in self.sync_course(course, course_dir):
+                    yield event
             except CredentialsExpiredError:
                 raise
             except Exception:

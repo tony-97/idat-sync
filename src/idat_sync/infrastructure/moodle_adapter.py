@@ -22,8 +22,8 @@ class MoodleTokenAdapter:
     def __init__(self, client: MoodleTokenClient) -> None:
         self.client = client
 
-    def fetch_token(self, username: str, password: str) -> str | None:
-        payload = self.client.request_token(username, password)
+    async def fetch_token(self, username: str, password: str) -> str | None:
+        payload = await self.client.request_token(username, password)
         if isinstance(payload, dict):
             if "error" in payload:
                 _logger.warning("[!] Token error: %s", payload.get("error"))
@@ -55,7 +55,7 @@ class MoodleAdapter:
     def can_handle(self, url: str) -> bool:
         return (urlparse(url).hostname or "").lower() == self.moodle_host
 
-    def list_url_content(
+    async def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[MoodleContent]:
         # TODO: list recursive moodle folder url
@@ -170,9 +170,9 @@ class MoodleAdapter:
     # Domain-facing Retrieval Methods
     # -------------------------------------------------------------------------
 
-    def list_courses(self) -> list[Course]:
+    async def list_courses(self) -> list[Course]:
         """List all enrolled courses with basic metadata (id, name, category)."""
-        raw_courses = self.client.fetch_enrolled_courses()
+        raw_courses = await self.client.fetch_enrolled_courses()
         courses: list[Course] = []
         for raw in raw_courses:
             if not isinstance(raw, dict):
@@ -190,9 +190,9 @@ class MoodleAdapter:
                 )
         return courses
 
-    def _get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
+    async def _get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
         """Fetch assignments across all enrolled courses organized by course_id -> {cmid: raw_assignment}."""
-        raw_courses = self.client.fetch_assignments()
+        raw_courses = await self.client.fetch_assignments()
         courses_assignments: dict[int, dict[int, dict]] = {}
         for raw_course in raw_courses:
             if not isinstance(raw_course, dict):
@@ -208,23 +208,23 @@ class MoodleAdapter:
             courses_assignments[int(cid)] = module_assignments
         return courses_assignments
 
-    def get_course_sections(
+    async def get_course_sections(
         self, course_id: int, assignments: dict[int, Any] | None = None
     ) -> list[CourseSection]:
         """Retrieve sections and modules for a specific course as domain models."""
-        raw_sections = self.client.fetch_course_contents(course_id)
+        raw_sections = await self.client.fetch_course_contents(course_id)
         return [
             self._to_course_section(raw_sec, assignments)
             for raw_sec in raw_sections
             if isinstance(raw_sec, dict)
         ]
 
-    def populate_course_sections(self, course: Course) -> Course:
+    async def populate_course_sections(self, course: Course) -> Course:
         """Populate sections and modules for a single course, caching assignments once."""
         if self._assignments_cache is None:
-            self._assignments_cache = self._get_assignments_by_course()
+            self._assignments_cache = await self._get_assignments_by_course()
         course_assignments = self._assignments_cache.get(course.id, {})
-        course.sections = self.get_course_sections(
+        course.sections = await self.get_course_sections(
             course.id, assignments=course_assignments
         )
         return course

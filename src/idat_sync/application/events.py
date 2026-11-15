@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -54,12 +53,6 @@ SyncEvent = (
     | CourseSyncCompleted
 )
 
-EventPublisher = Callable[[SyncEvent], None]
-
-
-def noop_publisher(_event: SyncEvent) -> None:
-    """Default no-op event publisher."""
-
 
 def log_sync_event(event: SyncEvent) -> None:
     """Log a sync lifecycle event to the application logger."""
@@ -91,11 +84,9 @@ __all__ = [
     "CourseFilesDiscovered",
     "CourseSyncCompleted",
     "CourseSyncStarted",
-    "EventPublisher",
     "SyncEvent",
     "TaskDownloadCompleted",
     "TaskDownloadFailed",
     "TaskDownloadStarted",
     "log_sync_event",
-    "noop_publisher",
 ]

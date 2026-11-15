@@ -22,20 +22,19 @@ from idat_sync.domain.course import (
 )
 
 
-class TestCourseRepository(unittest.TestCase):
+class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.mock_course_gateway = MagicMock(spec=CourseGateway)
         self.mock_recording_gateway = MagicMock(spec=RecordingGateway)
+
+        async def _moodle_list_url(url, filename, last_mod):
+            return [MoodleContent(Path(filename), last_mod, url)]
 
         self.mock_moodle_strategy = MagicMock(spec=UrlContentStrategy)
         self.mock_moodle_strategy.can_handle.side_effect = (
             lambda url: "aulavirtual" in url
         )
-        self.mock_moodle_strategy.list_url_content.side_effect = (
-            lambda url, filename, last_mod: [
-                MoodleContent(Path(filename), last_mod, url)
-            ]
-        )
+        self.mock_moodle_strategy.list_url_content.side_effect = _moodle_list_url
 
         self.mock_sp_strategy = MagicMock(spec=UrlContentStrategy)
         self.mock_sp_strategy.can_handle.side_effect = (
@@ -49,7 +48,7 @@ class TestCourseRepository(unittest.TestCase):
             url_strategies=self.strategies,
         )
 
-    def test_list_courses_and_populate_course_sections_delegate_to_course_gateway(
+    async def test_list_courses_and_populate_course_sections_delegate_to_course_gateway(
         self,
     ):
         domain_courses = [
@@ -57,18 +56,22 @@ class TestCourseRepository(unittest.TestCase):
             Course(id=2, name="Databases", category="III.01.2026-II"),
         ]
         self.mock_course_gateway.list_courses.return_value = domain_courses
+
+        async def _return_course(c):
+            return c
+
         self.mock_course_gateway.populate_course_sections.side_effect = (
-            lambda c: c
+            _return_course
         )
 
-        result = self.repo.list_courses()
+        result = await self.repo.list_courses()
 
         self.assertEqual(result, domain_courses)
         for c in result:
             self.assertIsInstance(c, Course)
             self.assertNotIsInstance(c, dict)
 
-        populated = self.repo.populate_course_sections(domain_courses[0])
+        populated = await self.repo.populate_course_sections(domain_courses[0])
         self.assertIs(populated, domain_courses[0])
         self.mock_course_gateway.populate_course_sections.assert_called_once_with(
             domain_courses[0]
@@ -76,7 +79,7 @@ class TestCourseRepository(unittest.TestCase):
         self.assertFalse(hasattr(self.repo, "get_courses"))
         self.assertFalse(hasattr(self.repo, "get_all_courses_contents"))
 
-    def test_get_recordings_delegates_to_recording_gateway_and_wraps_in_folder(
+    async def test_get_recordings_delegates_to_recording_gateway_and_wraps_in_folder(
         self,
     ):
         rec_items = [
@@ -93,7 +96,7 @@ class TestCourseRepository(unittest.TestCase):
         ]
         self.mock_recording_gateway.fetch_recordings.return_value = rec_items
 
-        results = self.repo.get_recordings(
+        results = await self.repo.get_recordings(
             "Cloud Computing", recordings_folder="CloudComputingDir/Grabaciones"
         )
 
@@ -107,7 +110,7 @@ class TestCourseRepository(unittest.TestCase):
             Path("CloudComputingDir/Grabaciones/Semana 2/video2.mp4"),
         )
 
-    def test_list_url_content_with_domain_module_content(self):
+    async def test_list_url_content_with_domain_module_content(self):
         items = [
             ModuleContent(
                 filename="document.pdf",
@@ -121,14 +124,14 @@ class TestCourseRepository(unittest.TestCase):
             ),
         ]
 
-        contents = self.repo.list_url_content(items)
+        contents = await self.repo.list_url_content(items)
 
         self.assertEqual(len(contents), 2)
         self.assertIsInstance(contents[0], MoodleContent)
         self.assertEqual(contents[0].path, Path("document.pdf"))
         self.assertEqual(contents[1].path, Path("slides.pptx"))
 
-    def test_get_course_content_builds_all_content_types_from_domain_model(
+    async def test_get_course_content_builds_all_content_types_from_domain_model(
         self,
     ):
         course = Course(
@@ -217,7 +220,7 @@ class TestCourseRepository(unittest.TestCase):
             ],
         )
 
-        contents = self.repo.get_course_content(
+        contents = await self.repo.get_course_content(
             course, course_dir="CloudComputingDir"
         )
 
@@ -282,7 +285,7 @@ class TestCourseRepository(unittest.TestCase):
             Path("CloudComputingDir/Semana 01/Project Submission/spec.pdf"),
         )
 
-    def test_get_course_content_sanitizes_section_and_module_names_and_skips_empty(self):
+    async def test_get_course_content_sanitizes_section_and_module_names_and_skips_empty(self):
         course = Course(
             id=1,
             name="C1",
@@ -313,7 +316,7 @@ class TestCourseRepository(unittest.TestCase):
             ],
         )
 
-        items = self.repo.get_course_content(course, Path("CourseDir"))
+        items = await self.repo.get_course_content(course, Path("CourseDir"))
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].path, Path("CourseDir/Sesión 1 2/_CON/nota.html"))
 

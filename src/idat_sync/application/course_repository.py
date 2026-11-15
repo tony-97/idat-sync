@@ -38,7 +38,7 @@ class CourseRepository:
                 return strategy
         return None
 
-    def list_url_content(
+    async def list_url_content(
         self, contents: Sequence[ModuleContent]
     ) -> list[Content]:
         resolved_contents = list[Content]()
@@ -46,7 +46,7 @@ class CourseRepository:
             if content.fileurl and content.filename:
                 if strategy := self._get_strategy(content.fileurl):
                     resolved_contents.extend(
-                        strategy.list_url_content(
+                        await strategy.list_url_content(
                             content.fileurl,
                             content.filename,
                             content.timemodified,
@@ -55,36 +55,38 @@ class CourseRepository:
                     )
         return resolved_contents
 
-    def get_recordings(
+    async def get_recordings(
         self, course_name: str, recordings_folder: str | Path = ""
     ) -> list[RecordingContent]:
-        recordings = self.recording_gateway.fetch_recordings(course_name)
+        recordings = await self.recording_gateway.fetch_recordings(course_name)
         folder = Path(recordings_folder)
         return [r.in_folder(folder) for r in recordings]
 
-    def list_courses(self) -> list[Course]:
+    async def list_courses(self) -> list[Course]:
         """Retrieve all enrolled courses with basic metadata."""
-        return self.course_gateway.list_courses()
+        return await self.course_gateway.list_courses()
 
-    def populate_course_sections(self, course: Course) -> Course:
+    async def populate_course_sections(self, course: Course) -> Course:
         """Populate sections and modules for a single course."""
-        return self.course_gateway.populate_course_sections(course)
+        return await self.course_gateway.populate_course_sections(course)
 
-    def _get_module_content(self, module: CourseModule) -> list[Content]:
+    async def _get_module_content(self, module: CourseModule) -> list[Content]:
         items: list[Content] = list(module.inline_contents)
-        items.extend(self.list_url_content(module.contents))
+        items.extend(await self.list_url_content(module.contents))
         safe_name = safe_path_segment(module.name)
         return [item.in_folder(safe_name) for item in items]
 
-    def _get_section_content(self, section: CourseSection) -> list[Content]:
+    async def _get_section_content(
+        self, section: CourseSection
+    ) -> list[Content]:
         items: list[Content] = list(section.inline_contents)
         for module in section.modules:
             if module.name:
-                items.extend(self._get_module_content(module))
+                items.extend(await self._get_module_content(module))
         safe_name = safe_path_segment(section.name)
         return [item.in_folder(safe_name) for item in items]
 
-    def get_course_content(
+    async def get_course_content(
         self, course: Course, course_dir: str | Path = ""
     ) -> list[Content]:
         """Generate download tasks / Content objects for a course using domain models."""
@@ -92,7 +94,7 @@ class CourseRepository:
         for section in course.sections:
             if section.name:
                 course_modules_contents.extend(
-                    self._get_section_content(section)
+                    await self._get_section_content(section)
                 )
         return [
             item.in_folder(course_dir) for item in course_modules_contents

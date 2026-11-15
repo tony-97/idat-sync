@@ -3,7 +3,7 @@ from datetime import date, datetime
 import io
 from pathlib import Path
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import quote
 
 from idat_sync.domain.content import RecordingContent, SharepointContent
@@ -11,7 +11,7 @@ from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
-class TestSharepointAdapter(unittest.TestCase):
+class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.mock_client = MagicMock(spec=SharepointClient)
         self.semester_start = date(2025, 9, 22)
@@ -44,12 +44,12 @@ class TestSharepointAdapter(unittest.TestCase):
     ):
         item = MagicMock()
         item.file.name = name
-        item.file.serverRelativeUrl = relative_url
+        item.file.server_relative_url = relative_url
         item.file.time_created = time_created
         item.file.time_last_modified = time_last_modified
         return item
 
-    def test_fetch_recordings_projects_into_weekly_domain_recording_content(self):
+    async def test_fetch_recordings_projects_into_weekly_domain_recording_content(self):
         course_name = "Algorithms"
         site_name = "https://idat628.sharepoint.com/sites/Algorithms"
 
@@ -69,7 +69,7 @@ class TestSharepointAdapter(unittest.TestCase):
         )
         self.mock_client.fetch_document_library_items.return_value = [item]
 
-        recordings = self.adapter.fetch_recordings(course_name)
+        recordings = await self.adapter.fetch_recordings(course_name)
 
         self.assertEqual(len(recordings), 1)
         rec = recordings[0]
@@ -81,7 +81,7 @@ class TestSharepointAdapter(unittest.TestCase):
         )
         self.assertEqual(rec.url, expected_url)
 
-    def test_fetch_recordings_skips_missing_timestamp_without_shifting_weeks(self):
+    async def test_fetch_recordings_skips_missing_timestamp_without_shifting_weeks(self):
         course_name = "Algorithms"
         site_name = "https://idat628.sharepoint.com/sites/Algorithms"
 
@@ -117,13 +117,13 @@ class TestSharepointAdapter(unittest.TestCase):
             valid_item,
         ]
 
-        recordings = self.adapter.fetch_recordings(course_name)
+        recordings = await self.adapter.fetch_recordings(course_name)
 
         self.assertEqual(len(recordings), 1)
         rec = recordings[0]
         self.assertEqual(rec.path, Path("Semana 3") / "valid.mp4")
 
-    def test_custom_hosts_folder_name_and_week_prefix(self):
+    async def test_custom_hosts_folder_name_and_week_prefix(self):
         custom_adapter = SharepointApiAdapter(
             client=self.mock_client,
             semester_start=self.semester_start,
@@ -156,7 +156,7 @@ class TestSharepointAdapter(unittest.TestCase):
         )
         self.mock_client.fetch_document_library_items.return_value = [item]
 
-        recordings = custom_adapter.fetch_recordings(course_name)
+        recordings = await custom_adapter.fetch_recordings(course_name)
 
         self.assertEqual(len(recordings), 1)
         self.assertEqual(recordings[0].path, Path("Week 2") / "lecture.mp4")
@@ -200,7 +200,7 @@ class TestSharepointAdapter(unittest.TestCase):
         self.assertNotIn("ClientContext", imported)
         self.assertNotIn("office365.sharepoint.client_context", imported)
 
-    def test_fetch_folder_contents_delegates_files_then_subfolders_to_client(self):
+    async def test_fetch_folder_contents_delegates_files_then_subfolders_to_client(self):
         root_folder = MagicMock()
         sub_folder = MagicMock()
         sub_folder.name = "Week 1"
@@ -215,35 +215,38 @@ class TestSharepointAdapter(unittest.TestCase):
 
         call_order: list[str] = []
 
-        def fake_files(folder):
+        async def fake_files(folder):
             call_order.append("files")
             return [root_file] if folder is root_folder else [nested_file]
 
-        def fake_subfolders(folder):
+        async def fake_subfolders(folder):
             call_order.append("subfolders")
             return [sub_folder] if folder is root_folder else []
 
         self.mock_client.fetch_folder_files.side_effect = fake_files
         self.mock_client.fetch_subfolders.side_effect = fake_subfolders
 
-        contents = self.adapter.fetch_folder_contents(root_folder)
+        contents = await self.adapter.fetch_folder_contents(root_folder)
 
         self.assertEqual(call_order, ["files", "subfolders", "files", "subfolders"])
         self.assertEqual(len(contents), 2)
         self.assertTrue(all(isinstance(c, SharepointContent) for c in contents))
         self.assertEqual([c.path for c in contents], [Path("syllabus.pdf"), Path("Week 1") / "notes.docx"])
 
-    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    def test_sharepoint_client_uses_injected_hosts_and_delay(self, mock_ctx_cls, mock_sleep):
+    async def test_sharepoint_client_uses_injected_hosts_and_delay(self, mock_ctx_cls, mock_sleep):
         mock_ctx = MagicMock()
         mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/user"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=mock_personal_site
+        )
         mock_ctx_cls.return_value = mock_ctx
 
-        client = SharepointClient(
+        client = await SharepointClient.create(
             cookies=[],
             sharepoint_personal_host="contoso-my.sharepoint.com",
             academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
@@ -254,23 +257,26 @@ class TestSharepointAdapter(unittest.TestCase):
         self.assertIn("https://contoso.sharepoint.com/sites/ACAD", called_urls)
         self.assertIn("https://contoso-my.sharepoint.com", called_urls)
         self.assertEqual(client.request_delay, 2.5)
-        mock_sleep.assert_called_once_with(2.5)
+        mock_sleep.assert_awaited_once_with(2.5)
 
-    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    def test_single_label_host_does_not_wildcard_match_unrelated_cookies(self, mock_ctx_cls, mock_sleep):
+    async def test_single_label_host_does_not_wildcard_match_unrelated_cookies(self, mock_ctx_cls, mock_sleep):
         mock_ctx = MagicMock()
         mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://intranet/personal/user"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=mock_personal_site
+        )
         mock_ctx_cls.return_value = mock_ctx
 
         cookies = [
             {"name": "FedAuth", "value": "foreign", "domain": ".sharepoint.com"},
             {"name": "rtFa", "value": "exact", "domain": "intranet"},
         ]
-        client = SharepointClient(
+        client = await SharepointClient.create(
             cookies=cookies,  # type: ignore[arg-type]
             sharepoint_personal_host="intranet",
             academic_site_url="https://intranet/sites/ACAD",
@@ -279,19 +285,23 @@ class TestSharepointAdapter(unittest.TestCase):
 
         self.assertEqual(client.sharepoint_cookies, {"rtFa": "exact"})
 
-    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    def test_sharepoint_client_sdk_queries_and_download_file_sleep_request_delay(
+    async def test_sharepoint_client_sdk_queries_and_download_file_sleep_request_delay(
         self, mock_ctx_cls, mock_sleep
     ):
         mock_ctx = MagicMock()
         mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
         mock_personal_site = MagicMock()
         mock_personal_site.url = "https://contoso-my.sharepoint.com/personal/user"
-        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=mock_personal_site
+        )
+        mock_ctx.execute_query_with_incremental_retry_async = AsyncMock()
         mock_ctx_cls.return_value = mock_ctx
 
-        client = SharepointClient(
+        client = await SharepointClient.create(
             cookies=[],
             sharepoint_personal_host="contoso-my.sharepoint.com",
             academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
@@ -302,35 +312,39 @@ class TestSharepointAdapter(unittest.TestCase):
         mock_folder = MagicMock()
         mock_ctx.web.get_folder_by_guest_url.return_value = mock_folder
         folder_url = "https://contoso.sharepoint.com/:f:/s/Course/folder"
-        self.assertIs(client.fetch_folder_by_guest_url(folder_url), mock_folder)
+        self.assertIs(await client.fetch_folder_by_guest_url(folder_url), mock_folder)
         mock_ctx.web.get_folder_by_guest_url.assert_called_once_with(folder_url)
         mock_ctx.load.assert_called_with(mock_folder, client.properties_to_retrieve)
 
         mock_guest_file = MagicMock()
         mock_ctx.web.get_file_by_guest_url.return_value = mock_guest_file
         file_url = "https://contoso.sharepoint.com/:b:/s/Course/file"
-        self.assertIs(client.fetch_file_by_guest_url(file_url), mock_guest_file)
+        self.assertIs(await client.fetch_file_by_guest_url(file_url), mock_guest_file)
         mock_ctx.web.get_file_by_guest_url.assert_called_once_with(file_url)
 
         mock_id_file = MagicMock()
         mock_ctx.web.get_file_by_id.return_value = mock_id_file
         direct_url = "https://contoso.sharepoint.com/sites/Course/doc.aspx?sourcedoc=%7BABC-123%7D"
-        self.assertIs(client.fetch_file_by_id(direct_url, "ABC-123"), mock_id_file)
+        self.assertIs(await client.fetch_file_by_id(direct_url, "ABC-123"), mock_id_file)
         mock_ctx.web.get_file_by_id.assert_called_once_with("ABC-123")
 
         child_file = MagicMock()
-        mock_folder.get_files.return_value.select.return_value.execute_query.return_value = [child_file]
-        self.assertEqual(client.fetch_folder_files(mock_folder), [child_file])
+        mock_folder.get_files.return_value.select.return_value.execute_query_async = AsyncMock(
+            return_value=[child_file]
+        )
+        self.assertEqual(await client.fetch_folder_files(mock_folder), [child_file])
         mock_folder.get_files.return_value.select.assert_called_once_with(client.properties_to_retrieve)
 
         sub_folder = MagicMock()
-        mock_folder.get_folders.return_value.execute_query.return_value = [sub_folder]
-        self.assertEqual(client.fetch_subfolders(mock_folder), [sub_folder])
+        mock_folder.get_folders.return_value.execute_query_async = AsyncMock(
+            return_value=[sub_folder]
+        )
+        self.assertEqual(await client.fetch_subfolders(mock_folder), [sub_folder])
 
         dest = io.BytesIO()
-        client.download_file(mock_guest_file, dest)
-        mock_guest_file.download_session.assert_called_once_with(dest, use_path=False)
-        mock_guest_file.download_session.return_value.execute_query.assert_called_once_with()
+        mock_guest_file.download_session_async = AsyncMock()
+        await client.download_file(mock_guest_file, dest)
+        mock_guest_file.download_session_async.assert_awaited_once_with(dest, use_path=False)
 
         self.assertEqual(mock_sleep.call_count, 6)
         mock_sleep.assert_called_with(1.75)
@@ -340,12 +354,15 @@ class TestSharepointAdapter(unittest.TestCase):
         (
             mock_ctx.web.default_document_library.return_value.items
             .select.return_value.expand.return_value.select.return_value
-            .get_all.return_value.execute_query.return_value
-        ) = [mock_doc_lib_item]
-        self.assertEqual(client.fetch_document_library_items("https://contoso.sharepoint.com/sites/Course"), [mock_doc_lib_item])
-        mock_sleep.assert_called_once_with(1.75)
+            .get_all_async
+        ) = AsyncMock(return_value=[mock_doc_lib_item])
+        self.assertEqual(
+            await client.fetch_document_library_items("https://contoso.sharepoint.com/sites/Course"),
+            [mock_doc_lib_item],
+        )
+        mock_sleep.assert_awaited_once_with(1.75)
 
-    def test_list_url_content_matches_guest_urls_case_insensitively(self):
+    async def test_list_url_content_matches_guest_urls_case_insensitively(self):
         custom_adapter = SharepointApiAdapter(
             client=self.mock_client,
             semester_start=self.semester_start,
@@ -361,7 +378,7 @@ class TestSharepointAdapter(unittest.TestCase):
 
         guest_url = "https://CONTOSO.SHAREPOINT.COM/:b:/s/Course/abc"
         self.assertTrue(custom_adapter.can_handle(guest_url))
-        items = custom_adapter.list_url_content(guest_url, "slides.pdf", 100)
+        items = await custom_adapter.list_url_content(guest_url, "slides.pdf", 100)
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].path, Path("slides.pdf"))
@@ -373,44 +390,44 @@ class TestSharepointAdapter(unittest.TestCase):
         self.mock_client.fetch_subfolders.return_value = []
 
         folder_url = "https://CONTOSO.SHAREPOINT.COM/:f:/s/Course/folder"
-        custom_adapter.list_url_content(folder_url, "folder", 100)
+        await custom_adapter.list_url_content(folder_url, "folder", 100)
         self.mock_client.fetch_folder_by_guest_url.assert_called_once_with(folder_url)
 
-    def test_list_url_content_direct_links_extract_id_or_skip_without_calling_client(self):
+    async def test_list_url_content_direct_links_extract_id_or_skip_without_calling_client(self):
         mock_file = MagicMock()
         mock_file.name = "handout.docx"
         mock_file.time_last_modified = None
         self.mock_client.fetch_file_by_id.return_value = mock_file
 
         uniqueid_url = "https://idat628.sharepoint.com/sites/C/Doc.aspx?UniqueId=%7B111-222%7D"
-        items_uid = self.adapter.list_url_content(uniqueid_url, "fallback.docx", 50)
+        items_uid = await self.adapter.list_url_content(uniqueid_url, "fallback.docx", 50)
         self.assertEqual(len(items_uid), 1)
         self.assertEqual(items_uid[0].path, Path("handout.docx"))
         self.mock_client.fetch_file_by_id.assert_called_once_with(uniqueid_url, "111-222")
 
         self.mock_client.fetch_file_by_id.reset_mock()
         sourcedoc_url = "https://idat628.sharepoint.com/sites/C/Doc.aspx?sourcedoc=%7B333-444%7D"
-        items_src = self.adapter.list_url_content(sourcedoc_url, "fallback.docx", 50)
+        items_src = await self.adapter.list_url_content(sourcedoc_url, "fallback.docx", 50)
         self.assertEqual(len(items_src), 1)
         self.mock_client.fetch_file_by_id.assert_called_once_with(sourcedoc_url, "333-444")
 
         self.mock_client.fetch_file_by_id.reset_mock()
         no_id_url = "https://idat628.sharepoint.com/sites/C/SitePages/Home.aspx"
-        self.assertIsNone(self.adapter.fetch_file_from_direct_link(no_id_url))
-        self.assertEqual(self.adapter.list_url_content(no_id_url, "Home.aspx", 50), [])
+        self.assertIsNone(await self.adapter.fetch_file_from_direct_link(no_id_url))
+        self.assertEqual(await self.adapter.list_url_content(no_id_url, "Home.aspx", 50), [])
         self.mock_client.fetch_file_by_id.assert_not_called()
 
-    def test_sanitizes_unsafe_sharepoint_folder_file_and_recording_segments(self):
+    async def test_sanitizes_unsafe_sharepoint_folder_file_and_recording_segments(self):
         from datetime import datetime
 
         # Shared folder + file sanitization preserving UTF-8
         root_folder = MagicMock()
         sub_folder = MagicMock()
         sub_folder.name = "CON"
-        sub_folder.serverRelativeUrl = "/sites/C/CON"
+        sub_folder.server_relative_url = "/sites/C/CON"
         shared_file = MagicMock()
         shared_file.name = "Sesión: 01/Parte?.pdf"
-        shared_file.serverRelativeUrl = "/sites/C/CON/Sesión.pdf"
+        shared_file.server_relative_url = "/sites/C/CON/Sesión.pdf"
         shared_file.time_last_modified = None
 
         self.mock_client.fetch_folder_by_guest_url.return_value = root_folder
@@ -418,7 +435,7 @@ class TestSharepointAdapter(unittest.TestCase):
         self.mock_client.fetch_subfolders.side_effect = [[sub_folder], []]
 
         folder_url = "https://idat628.sharepoint.com/:f:/s/Course/folder"
-        items = self.adapter.list_url_content(folder_url, "folder", 100)
+        items = await self.adapter.list_url_content(folder_url, "folder", 100)
         self.assertEqual(items[0].path, Path("_CON") / "Sesión 01 Parte.pdf")
 
         # Recording filename sanitization
@@ -433,16 +450,16 @@ class TestSharepointAdapter(unittest.TestCase):
         self.mock_client.search_for_recordings.return_value = search_res
 
         rec_item = MagicMock()
-        rec_item.file.serverRelativeUrl = "/sites/Algebra/Grabaciones/video.mp4"
+        rec_item.file.server_relative_url = "/sites/Algebra/Grabaciones/video.mp4"
         rec_item.file.time_created = datetime(2025, 9, 22, 10, 0, 0)
         rec_item.file.time_last_modified = datetime(2025, 9, 22, 11, 0, 0)
         rec_item.file.name = "Sesión: 01/Parte?.mp4"
         self.mock_client.fetch_document_library_items.return_value = [rec_item]
 
-        recs = self.adapter.fetch_recordings("Algebra")
+        recs = await self.adapter.fetch_recordings("Algebra")
         self.assertEqual(recs[0].path, Path("Semana 1") / "Sesión 01 Parte.mp4")
 
-    def test_personal_host_can_handle_path_dispatch_and_empty_odata_null_skip(self):
+    async def test_personal_host_can_handle_path_dispatch_and_empty_odata_null_skip(self):
         personal_file_url = (
             "https://idat628-my.sharepoint.com/:b:/g/personal/user_idat_pe/Ea7D?e=1"
         )
@@ -455,37 +472,37 @@ class TestSharepointAdapter(unittest.TestCase):
 
         mock_personal_file = MagicMock()
         mock_personal_file.name = "CLASE1.pdf"
-        mock_personal_file.serverRelativeUrl = "/personal/user/Documents/CLASE1.pdf"
+        mock_personal_file.server_relative_url = "/personal/user/Documents/CLASE1.pdf"
         mock_personal_file.time_last_modified = None
         self.mock_client.fetch_file_by_guest_url.return_value = mock_personal_file
 
-        items = self.adapter.list_url_content(personal_file_url, "Clase 1", 100)
+        items = await self.adapter.list_url_content(personal_file_url, "Clase 1", 100)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].path, Path("CLASE1.pdf"))
         self.mock_client.fetch_file_by_guest_url.assert_called_once_with(
             personal_file_url
         )
 
-        # Dead/expired odata.null entities (both name and serverRelativeUrl falsy) -> []
+        # Dead/expired odata.null entities (both name and server_relative_url falsy) -> []
         dead_entity = MagicMock()
         dead_entity.name = None
-        dead_entity.serverRelativeUrl = None
+        dead_entity.server_relative_url = None
         self.mock_client.fetch_file_by_guest_url.return_value = dead_entity
         self.assertEqual(
-            self.adapter.list_url_content(personal_file_url, "fallback.pdf", 100),
+            await self.adapter.list_url_content(personal_file_url, "fallback.pdf", 100),
             [],
         )
 
         self.mock_client.fetch_folder_by_guest_url.return_value = dead_entity
         self.assertEqual(
-            self.adapter.list_url_content(personal_folder_url, "fallback", 100),
+            await self.adapter.list_url_content(personal_folder_url, "fallback", 100),
             [],
         )
         self.mock_client.fetch_folder_files.assert_not_called()
 
         self.mock_client.fetch_file_by_id.return_value = dead_entity
         self.assertEqual(
-            self.adapter.list_url_content(
+            await self.adapter.list_url_content(
                 "https://idat628.sharepoint.com/sites/C/_layouts/15/embed.aspx?UniqueId=111",
                 "fallback.mp4",
                 100,
@@ -494,10 +511,10 @@ class TestSharepointAdapter(unittest.TestCase):
         )
 
 
-class TestSharepointClient(unittest.TestCase):
-    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    def test_sharepoint_client_maps_empty_personal_site_and_http_401_403_to_credentials_expired(
+    async def test_sharepoint_client_maps_empty_personal_site_and_http_401_403_to_credentials_expired(
         self, mock_ctx_cls, _mock_sleep
     ):
         from office365.runtime.client_request_exception import ClientRequestException
@@ -508,11 +525,15 @@ class TestSharepointClient(unittest.TestCase):
         personal_site_empty = MagicMock()
         personal_site_empty.url = ""
         ctx_empty = MagicMock()
-        ctx_empty.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_empty
-        mock_ctx_cls.return_value.with_cookies.return_value = ctx_empty
+        ctx_empty.with_cookies.return_value = ctx_empty
+        ctx_empty.with_auto_retry.return_value = ctx_empty
+        ctx_empty.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=personal_site_empty
+        )
+        mock_ctx_cls.return_value = ctx_empty
 
         with self.assertRaises(CredentialsExpiredError):
-            SharepointClient(
+            await SharepointClient.create(
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
                 academic_site_url="https://idat628.sharepoint.com/sites/Academic",
@@ -523,10 +544,14 @@ class TestSharepointClient(unittest.TestCase):
         personal_site_ok = MagicMock()
         personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
         ctx_ok = MagicMock()
-        ctx_ok.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_ok
-        mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
+        ctx_ok.with_cookies.return_value = ctx_ok
+        ctx_ok.with_auto_retry.return_value = ctx_ok
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=personal_site_ok
+        )
+        mock_ctx_cls.return_value = ctx_ok
 
-        client = SharepointClient(
+        client = await SharepointClient.create(
             cookies=[],
             sharepoint_personal_host="idat628-my.sharepoint.com",
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
@@ -536,32 +561,39 @@ class TestSharepointClient(unittest.TestCase):
         for status in (401, 403):
             resp = MagicMock(status_code=status)
             err = ClientRequestException(response=resp)
-            ctx_ok.search.query.return_value.execute_query.side_effect = err
+            ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
+                side_effect=err
+            )
             with self.assertRaises(CredentialsExpiredError):
-                client.search_for_recordings("Algebra")
-            self.assertEqual(ctx_ok.search.query.return_value.execute_query.call_count, 1)
-            ctx_ok.search.query.return_value.execute_query.reset_mock()
+                await client.search_for_recordings("Algebra")
+            self.assertEqual(ctx_ok.search.query.return_value.execute_query_async.call_count, 1)
 
         resp_404 = MagicMock(status_code=404)
         err_404 = ClientRequestException(response=resp_404)
-        ctx_ok.search.query.return_value.execute_query.side_effect = err_404
+        ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
+            side_effect=err_404
+        )
         with self.assertRaises(ClientRequestException) as ctx:
-            client.search_for_recordings("Algebra")
+            await client.search_for_recordings("Algebra")
         self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
-        self.assertEqual(ctx_ok.search.query.return_value.execute_query.call_count, 1)
+        self.assertEqual(ctx_ok.search.query.return_value.execute_query_async.call_count, 1)
 
-    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    def test_get_client_from_url_routes_personal_and_load_entity_handles_odata_null_type_error(
+    async def test_get_client_from_url_routes_personal_and_load_entity_handles_odata_null_type_error(
         self, mock_ctx_cls, mock_sleep
     ):
         personal_site_ok = MagicMock()
         personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
         ctx_ok = MagicMock()
-        ctx_ok.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_ok
-        mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
+        ctx_ok.with_cookies.return_value = ctx_ok
+        ctx_ok.with_auto_retry.return_value = ctx_ok
+        ctx_ok.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=personal_site_ok
+        )
+        mock_ctx_cls.return_value = ctx_ok
 
-        client = SharepointClient(
+        client = await SharepointClient.create(
             cookies=[],
             sharepoint_personal_host="idat628-my.sharepoint.com",
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
@@ -585,36 +617,33 @@ class TestSharepointClient(unittest.TestCase):
             "https://idat628.sharepoint.com/sites/MATERIALESTED"
         )
 
-        # odata.null leaves entity.resource_url=None -> execute_query raises TypeError
-        ctx_ok.execute_query.side_effect = TypeError(
-            "unsupported operand type(s) for +: 'NoneType' and 'str'"
+        # odata.null leaves entity.resource_url=None -> execute_query_with_incremental_retry_async raises TypeError
+        ctx_ok.execute_query_with_incremental_retry_async = AsyncMock(
+            side_effect=TypeError("unsupported operand type(s) for +: 'NoneType' and 'str'")
         )
-        client.load_entity(MagicMock(), ctx_ok)
-        mock_sleep.assert_called_once_with(1.25)
+        await client.load_entity(MagicMock(), ctx_ok)
+        mock_sleep.assert_awaited_once_with(1.25)
 
         # CredentialsExpiredError must still propagate
         from office365.runtime.client_request_exception import ClientRequestException
         from idat_sync.application.ports import CredentialsExpiredError
 
-        ctx_ok.execute_query.side_effect = ClientRequestException(
-            response=MagicMock(status_code=401)
+        ctx_ok.execute_query_with_incremental_retry_async = AsyncMock(
+            side_effect=ClientRequestException(response=MagicMock(status_code=401))
         )
         with self.assertRaises(CredentialsExpiredError):
-            client.load_entity(MagicMock(), ctx_ok)
+            await client.load_entity(MagicMock(), ctx_ok)
 
-    @patch("idat_sync.infrastructure.sharepoint_client.time.sleep")
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    def test_run_query_retries_429_and_503_with_retry_after_and_reraises_on_exhaustion(
-        self, mock_ctx_cls, mock_sleep
+    async def test_init_is_non_blocking_and_get_client_configures_auto_retry_and_httpx_transport(
+        self, mock_ctx_cls, mock_transport_cls, mock_sleep
     ):
-        from office365.runtime.client_request_exception import ClientRequestException
-        from idat_sync.infrastructure.sharepoint_client import SharepointClient
-
-        personal_site_ok = MagicMock()
-        personal_site_ok.url = "https://idat628-my.sharepoint.com/personal/user"
-        ctx_ok = MagicMock()
-        ctx_ok.web.current_user.get_personal_site.return_value.execute_query.return_value = personal_site_ok
-        mock_ctx_cls.return_value.with_cookies.return_value = ctx_ok
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
+        mock_ctx_cls.return_value = mock_ctx
 
         client = SharepointClient(
             cookies=[],
@@ -622,30 +651,18 @@ class TestSharepointClient(unittest.TestCase):
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
             request_delay=2.0,
         )
-        mock_sleep.reset_mock()
 
-        # 429 with Retry-After header -> sleeps Retry-After then succeeds and sleeps request_delay
-        resp_429 = MagicMock(status_code=429, headers={"Retry-After": "7"})
-        err_429 = ClientRequestException(response=resp_429)
-        ok_result = MagicMock()
-        ctx_ok.search.query.return_value.execute_query.side_effect = [err_429, ok_result]
-
-        self.assertIs(client.search_for_recordings("Algebra"), ok_result)
-        self.assertEqual(ctx_ok.search.query.return_value.execute_query.call_count, 2)
-        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [7, 2.0])
-
-        # 503 without Retry-After -> sleeps request_delay, retries up to 5 attempts, re-raises on exhaustion
-        mock_sleep.reset_mock()
-        ctx_ok.load.reset_mock()
-        resp_503 = MagicMock(status_code=503, headers={})
-        err_503 = ClientRequestException(response=resp_503)
-        ctx_ok.execute_query.side_effect = err_503
-
-        with self.assertRaises(ClientRequestException):
-            client.load_entity(MagicMock(), ctx_ok)
-        self.assertEqual(ctx_ok.execute_query.call_count, 5)
-        self.assertEqual(ctx_ok.load.call_count, 5)
-        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [2.0, 2.0, 2.0, 2.0])
+        self.assertIsNone(client.search_client)
+        mock_sleep.assert_not_called()
+        mock_ctx.web.current_user.get_personal_site.assert_not_called()
+        self.assertEqual(mock_ctx.with_auto_retry.call_count, 2)
+        self.assertEqual(
+            mock_ctx.pending_request.return_value.with_async_transport.call_count,
+            2,
+        )
+        mock_ctx.pending_request.return_value.with_async_transport.assert_called_with(
+            mock_transport_cls.return_value
+        )
 
 
 if __name__ == "__main__":
