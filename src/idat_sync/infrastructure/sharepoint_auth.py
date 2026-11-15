@@ -27,12 +27,7 @@ class SharepointBrowserAuth:
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> StorageStateData | None:
         site_url = f"https://{self.sharepoint_host}/_layouts/15/sharepoint.aspx"
-        channel = "chromium"
-        if (os_name := platform.system()) == "Windows":
-            channel = "msedge"
-        elif os_name == "Darwin":
-            channel = "webkit"
-
+        os_name = platform.system()
         login_email = username if "@" in username else f"{username}@{self.email_domain}"
         cancelled = False
         storage_state: StorageStateData | None = None
@@ -41,7 +36,11 @@ class SharepointBrowserAuth:
                 browser = None
                 context = None
                 try:
-                    browser = await p.chromium.launch(headless=False, channel=channel)
+                    if os_name == "Darwin":
+                        browser = await p.webkit.launch(headless=False)
+                    else:
+                        channel = "msedge" if os_name == "Windows" else "chromium"
+                        browser = await p.chromium.launch(headless=False, channel=channel)
                     context = await browser.new_context(
                         **p.devices["Galaxy A55 landscape"]
                     )
@@ -64,7 +63,9 @@ class SharepointBrowserAuth:
                         timeout=timeout,
                     )
                     await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(2)")
-                    mfa_code = await get_mfa_code()
+                    mfa_code = (await get_mfa_code()).strip()
+                    if not mfa_code:
+                        return None
                     await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
                     await page.click("#idChkBx_SAOTCC_TD")
                     await page.click("#idSubmit_SAOTCC_Continue")

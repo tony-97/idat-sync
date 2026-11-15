@@ -9,7 +9,7 @@ class LocalFileSystemAdapter(FileSystemPort):
         local_map: dict[Path, int] = {}
         if root_path.exists():
             for p in root_path.rglob("*"):
-                if p.is_file():
+                if p.is_file() and not p.name.endswith(".part"):
                     local_map[p] = int(p.stat().st_mtime)
         return local_map
 

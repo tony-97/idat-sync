@@ -40,9 +40,7 @@ class SharepointClient:
         self.sharepoint_cookies = self._load_auth_cookies(
             cookies, sharepoint_personal_host, subdomain
         )
-        self.onedrive_cookies = self._load_auth_cookies(
-            cookies, sharepoint_personal_host, subdomain
-        )
+        self._transport = HttpxTransport()
         self.client = self.get_client(academic_site_url.rstrip("/"))
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
@@ -62,13 +60,20 @@ class SharepointClient:
             academic_site_url=academic_site_url,
             request_delay=request_delay,
         )
-        personal_site = await client._await_query(
-            client.personal_client.web.current_user.get_personal_site().execute_query_async()
-        )
-        if not personal_site.url:
-            raise CredentialsExpiredError("SharePoint login expired")
-        client.search_client = client.get_client(personal_site.url)
-        return client
+        try:
+            personal_site = await client._await_query(
+                client.personal_client.web.current_user.get_personal_site().execute_query_async()
+            )
+            if not personal_site.url:
+                raise CredentialsExpiredError("SharePoint login expired")
+            client.search_client = client.get_client(personal_site.url)
+            return client
+        except Exception:
+            await client.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
 
     def get_client(self, site_url: str) -> ClientContext:
         ctx = (
@@ -76,7 +81,7 @@ class SharepointClient:
             .with_cookies(lambda: self.sharepoint_cookies)
             .with_auto_retry()
         )
-        ctx.pending_request().with_async_transport(HttpxTransport())
+        ctx.pending_request().with_async_transport(self._transport)
         return ctx
 
     def get_client_from_url(self, url: str) -> ClientContext:

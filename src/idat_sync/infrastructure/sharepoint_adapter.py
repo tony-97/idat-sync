@@ -33,6 +33,15 @@ class SharepointApiAdapter:
         self.recordings_folder_name = recordings_folder_name
         self.week_folder_prefix = week_folder_prefix
 
+    @staticmethod
+    def _matches_course_name(course_name: str, text: str) -> bool:
+        return bool(
+            re.search(
+                rf"(?<![0-9A-Za-zÀ-ÿ]){re.escape(course_name)}(?![0-9A-Za-zÀ-ÿ])",
+                text,
+            )
+        )
+
     def __find_recordings_site(
         self, course_name: str, search_result: ClientResult[SearchResult]
     ):
@@ -42,7 +51,7 @@ class SharepointApiAdapter:
             parent_link: str = cells.get("ParentLink") or ""
             site_name: str = cells.get("SiteName") or ""
             if (
-                course_name in title
+                self._matches_course_name(course_name, title)
                 and parent_link.lower().endswith(self.recordings_folder_name.lower())
                 and site_name
             ):
@@ -63,15 +72,12 @@ class SharepointApiAdapter:
         else:
             return fallback_last_modified
 
-    __get_name = get_name
-    __get_last_modified = get_last_modified
-
     def __file_to_content(
         self, f: File, file_name: str = "", last_modified: int = 0
     ):
         return SharepointContent(
-            Path(safe_path_segment(self.__get_name(f, file_name))),
-            self.__get_last_modified(f, last_modified),
+            Path(safe_path_segment(self.get_name(f, file_name))),
+            self.get_last_modified(f, last_modified),
             f,
         )
 
@@ -111,7 +117,7 @@ class SharepointApiAdapter:
         for file in await self.sp_client.fetch_folder_files(folder):
             contents.append(self.__file_to_content(file))
         for sub_folder in await self.sp_client.fetch_subfolders(folder):
-            if save_name := self.__get_name(sub_folder):
+            if save_name := self.get_name(sub_folder):
                 safe_sub = safe_path_segment(save_name)
                 for item in await self.fetch_folder_contents(sub_folder):
                     contents.append(item.in_folder(safe_sub))
@@ -146,7 +152,9 @@ class SharepointApiAdapter:
                 return (
                     Path(urlparse(relative_url).path).parent.name.lower()
                     == self.recordings_folder_name.lower()
-                    and course_name in relative_url
+                    and self._matches_course_name(
+                        course_name, urllib.parse.unquote(relative_url)
+                    )
                 )
 
             for item in filter(is_course_recording, items):

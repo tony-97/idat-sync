@@ -60,7 +60,7 @@ class LoginFrame(AppFrame):
         )
         self.login_button.config(state=state)
 
-    async def get_mfa_code_ui(self):
+    async def get_mfa_code(self):
         """Creates a Tkinter popup that pauses the async function until submitted."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
@@ -75,22 +75,23 @@ class LoginFrame(AppFrame):
         entry = tk.Entry(popup)
         entry.pack(pady=5)
 
-        # The button callback simply fulfills the Future
         def on_submit():
-            code = entry.get()
-            future.set_result(code)  # This resumes the async function!
-            popup.destroy()  # Close the popup
+            if not future.done():
+                future.set_result(entry.get())
+            popup.destroy()
 
+        def on_close():
+            if not future.done():
+                future.set_result("")
+            popup.destroy()
+
+        entry.bind("<Return>", lambda _e: on_submit())
+        popup.protocol("WM_DELETE_WINDOW", on_close)
         tk.Button(popup, text="Submit", command=on_submit).pack(pady=10)
 
         # Pause the async execution here until the user clicks Submit
         return await future
 
-    async def get_mfa_code(self):
-        code = await self.get_mfa_code_ui()
-        return code
-
-    # TODO add loading dialog until MFA auth
     async def do_login(self, event=None):
         if (
             not self.is_login.get()
@@ -104,12 +105,9 @@ class LoginFrame(AppFrame):
                 )
                 if await login_task:
                     cast(MainApp, self.master).switch_to_sync()
-                # loading_dialog.remove()
             except Exception as e:
                 errors = e.exceptions if isinstance(e, ExceptionGroup) else (e,)
                 for err in errors:
                     _logger.error("Login error: %s", err)
             finally:
                 self.is_login.set(False)
-        else:
-            ...

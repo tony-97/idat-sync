@@ -35,6 +35,19 @@ if TYPE_CHECKING:
     from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
+async def _atomic_download(target_path: Path | str, writer) -> None:
+    target = Path(target_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part_path = target.with_name(f"{target.name}.part")
+    try:
+        with open(part_path, "wb") as f:
+            await writer(f)
+        os.replace(part_path, target)
+    except BaseException:
+        part_path.unlink(missing_ok=True)
+        raise
+
+
 class MoodleDownloader(Downloader[MoodleContent]):
     content_type = MoodleContent
 
@@ -42,9 +55,10 @@ class MoodleDownloader(Downloader[MoodleContent]):
         self.moodle_client = client
 
     async def download(self, content: MoodleContent) -> None:
-        Path(content.path).parent.mkdir(parents=True, exist_ok=True)
-        with open(content.path, "wb") as f:
-            await self.moodle_client.download_file(content.url, f)
+        await _atomic_download(
+            content.path,
+            lambda f: self.moodle_client.download_file(content.url, f),
+        )
 
 
 class SharepointDownloader(Downloader[SharepointContent]):
@@ -54,9 +68,10 @@ class SharepointDownloader(Downloader[SharepointContent]):
         self.sharepoint_client = client
 
     async def download(self, content: SharepointContent) -> None:
-        Path(content.path).parent.mkdir(parents=True, exist_ok=True)
-        with open(content.path, "wb") as local_file:
-            await self.sharepoint_client.download_file(content.file, local_file)
+        await _atomic_download(
+            content.path,
+            lambda f: self.sharepoint_client.download_file(content.file, f),
+        )
 
 
 class StringDownloader(Downloader[StringContent]):

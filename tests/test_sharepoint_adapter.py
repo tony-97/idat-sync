@@ -165,6 +165,52 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             f"https://contoso-my.sharepoint.com/:v:/r{quote(rel_url)}?csf=1&web=1",
         )
 
+    async def test_fetch_recordings_matches_course_name_at_boundaries_and_removes_aliases(self):
+        self.assertFalse(hasattr(SharepointApiAdapter, "_SharepointApiAdapter__get_name"))
+        self.assertFalse(
+            hasattr(SharepointApiAdapter, "_SharepointApiAdapter__get_last_modified")
+        )
+
+        course_name = "Matemática I"
+        search_result = MagicMock()
+        row_ii = MagicMock()
+        row_ii.Cells = {
+            "Title": "Matemática II - Grabaciones",
+            "ParentLink": "https://idat628.sharepoint.com/Grabaciones",
+            "SiteName": "https://idat628.sharepoint.com/sites/MatII",
+        }
+        row_i = MagicMock()
+        row_i.Cells = {
+            "Title": "Matemática I - Grabaciones",
+            "ParentLink": "https://idat628.sharepoint.com/Grabaciones",
+            "SiteName": "https://idat628.sharepoint.com/sites/MatI",
+        }
+        search_result.value.PrimaryQueryResult.RelevantResults.Table.Rows = [row_ii, row_i]
+        self.mock_client.search_for_recordings.return_value = search_result
+
+        created_dt = datetime(2025, 9, 22, 10, 0)
+        item_ii = self._create_mock_item(
+            name="mat2.mp4",
+            relative_url="/personal/u/Documents/Matemática II/Grabaciones/mat2.mp4",
+            time_created=created_dt,
+            time_last_modified=created_dt,
+        )
+        item_i_encoded = self._create_mock_item(
+            name="mat1.mp4",
+            relative_url="/personal/u/Documents/Matem%C3%A1tica%20I/Grabaciones/mat1.mp4",
+            time_created=created_dt,
+            time_last_modified=created_dt,
+        )
+        self.mock_client.fetch_document_library_items.return_value = [item_ii, item_i_encoded]
+
+        recordings = await self.adapter.fetch_recordings(course_name)
+
+        self.mock_client.fetch_document_library_items.assert_awaited_once_with(
+            "https://idat628.sharepoint.com/sites/MatI"
+        )
+        self.assertEqual(len(recordings), 1)
+        self.assertEqual(recordings[0].path.name, "mat1.mp4")
+
     def test_adapter_does_not_accept_request_delay_or_import_time_or_client_context(self):
         with self.assertRaises(TypeError):
             SharepointApiAdapter(
@@ -653,8 +699,10 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(client.search_client)
+        self.assertFalse(hasattr(client, "onedrive_cookies"))
         mock_sleep.assert_not_called()
         mock_ctx.web.current_user.get_personal_site.assert_not_called()
+        mock_transport_cls.assert_called_once_with()
         self.assertEqual(mock_ctx.with_auto_retry.call_count, 2)
         self.assertEqual(
             mock_ctx.pending_request.return_value.with_async_transport.call_count,
@@ -663,6 +711,38 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         mock_ctx.pending_request.return_value.with_async_transport.assert_called_with(
             mock_transport_cls.return_value
         )
+
+        mock_transport_cls.return_value.aclose = AsyncMock()
+        await client.aclose()
+        mock_transport_cls.return_value.aclose.assert_awaited_once_with()
+
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    async def test_failed_create_closes_shared_transport(
+        self, mock_ctx_cls, mock_transport_cls, _mock_sleep
+    ):
+        from idat_sync.application.ports import CredentialsExpiredError
+
+        mock_transport_cls.return_value.aclose = AsyncMock()
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
+        personal_site = MagicMock(url="")
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            return_value=personal_site
+        )
+        mock_ctx_cls.return_value = mock_ctx
+
+        with self.assertRaises(CredentialsExpiredError):
+            await SharepointClient.create(
+                cookies=[],
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+                request_delay=0.0,
+            )
+
+        mock_transport_cls.return_value.aclose.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

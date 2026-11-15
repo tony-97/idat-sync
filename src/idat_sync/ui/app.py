@@ -10,7 +10,7 @@ from idat_sync.config import SyncConfig, load_config
 
 
 class AppFrame(tk.Frame):
-    def exit(self): ...
+    pass
 
 
 class MainApp(tk.Tk):
@@ -37,8 +37,7 @@ class MainApp(tk.Tk):
 
     def __change(self, frame: type[AppFrame], **kwargs):
         if self.__frame:
-            self.__frame.pack_forget()
-            self.__frame.exit()
+            self.__frame.destroy()
         self.__frame = frame(self, **kwargs)
         self.__frame.pack()
 

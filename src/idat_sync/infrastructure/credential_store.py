@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import cast
 
@@ -38,6 +39,7 @@ class JsonCredentialStore:
             self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.credentials_file, "w", encoding="utf-8") as f:
                 json.dump(credentials, f)
+            os.chmod(self.credentials_file, 0o600)
             return True
         except OSError as e:
             _logger.error("Could not create credentials file: %s", e)

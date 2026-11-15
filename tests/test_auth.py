@@ -316,6 +316,19 @@ class TestJsonCredentialStore(unittest.TestCase):
                 self.assertFalse(store.save(creds))
             self.assertIn("credentials file", " ".join(cm.output))
 
+    def test_save_restricts_credentials_file_permissions_to_owner(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            credentials_path = Path(tmpdir) / "session.json"
+            store = JsonCredentialStore(credentials_file=credentials_path)
+            creds: Credentials = {
+                "token": "tok",
+                "sharepoint_storage_state": {"cookies": []},
+            }
+            with patch("idat_sync.infrastructure.credential_store.os.chmod") as mock_chmod:
+                self.assertTrue(store.save(creds))
+
+            mock_chmod.assert_called_once_with(credentials_path, 0o600)
+
 
 def _make_mock_playwright():
     mock_page = MagicMock()
@@ -541,6 +554,55 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             expect_browser_close=True,
         )
 
+    def test_fetch_storage_state_launches_webkit_on_darwin_and_aborts_on_blank_mfa(self):
+        auth = SharepointBrowserAuth(
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            email_domain="example.edu",
+        )
+
+        for os_name, expected_engine, expected_kwargs in [
+            ("Darwin", "webkit", {"headless": False}),
+            ("Windows", "chromium", {"headless": False, "channel": "msedge"}),
+            ("Linux", "chromium", {"headless": False, "channel": "chromium"}),
+        ]:
+            with self.subTest(os_name=os_name):
+                mock_pw_cm, mock_browser, mock_context, _ = _make_mock_playwright()
+                mock_pw = mock_pw_cm.__aenter__.return_value
+                mock_pw.webkit = MagicMock()
+                mock_pw.webkit.launch = AsyncMock(return_value=mock_browser)
+                with (
+                    patch("idat_sync.infrastructure.sharepoint_auth.platform.system", return_value=os_name),
+                    patch("idat_sync.infrastructure.sharepoint_auth.async_playwright", return_value=mock_pw_cm),
+                    patch("idat_sync.infrastructure.sharepoint_auth.asyncio.sleep", new=AsyncMock()),
+                ):
+                    state = asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+
+                self.assertIsNotNone(state)
+                getattr(mock_pw, expected_engine).launch.assert_awaited_once_with(**expected_kwargs)
+                other_engine = "chromium" if expected_engine == "webkit" else "webkit"
+                getattr(mock_pw, other_engine).launch.assert_not_awaited()
+
+        # Blank/whitespace MFA code aborts before filling OTP and closes context & browser
+        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+        async def _blank_mfa() -> str:
+            return "   "
+
+        with (
+            patch("idat_sync.infrastructure.sharepoint_auth.platform.system", return_value="Linux"),
+            patch("idat_sync.infrastructure.sharepoint_auth.async_playwright", return_value=mock_pw_cm),
+            patch("idat_sync.infrastructure.sharepoint_auth.asyncio.sleep", new=AsyncMock()),
+        ):
+            state = asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
+
+        self.assertIsNone(state)
+        self.assertNotIn(
+            "#idTxtBx_SAOTCC_OTC",
+            [call.args[0] for call in mock_page.fill.call_args_list],
+        )
+        mock_context.close.assert_awaited_once()
+        mock_browser.close.assert_awaited_once()
+
 
 class TestLoginFrame(unittest.TestCase):
     def _create_master(self):
@@ -691,6 +753,63 @@ class TestLoginFrame(unittest.TestCase):
             imported & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"},
             set(),
         )
+
+    def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):
+        import idat_sync.ui as ui_pkg
+        from idat_sync.ui.app import AppFrame
+
+        self.assertFalse(hasattr(LoginFrame, "get_mfa_code_ui"))
+        self.assertFalse(hasattr(AppFrame, "exit"))
+        self.assertNotIn("LoadingDialog", ui_pkg.__all__)
+        self.assertFalse(hasattr(ui_pkg, "LoadingDialog"))
+        self.assertFalse((Path(ui_pkg.__file__).resolve().parent / "dialogs.py").exists())
+
+        master = self._create_master()
+        auth = AuthService(
+            moodle_auth=FakeMoodleTokenPort(),
+            sharepoint_auth=FakeSharepointAuthPort(),
+            credential_store=InMemoryCredentialStore(),
+        )
+        frame = LoginFrame(master, auth)  # type: ignore[arg-type]
+
+        async def exercise_mfa() -> None:
+            # 1. Submitting via <Return> on MFA entry
+            task = asyncio.create_task(frame.get_mfa_code())
+            await asyncio.sleep(0)
+            popup = next(w for w in master.winfo_children() if isinstance(w, tk.Toplevel))
+            entry = next(w for w in popup.winfo_children() if isinstance(w, tk.Entry))
+            entry.insert(0, "654321")
+            popup.update()
+            entry.focus_force()
+            entry.event_generate("<Return>")
+            master.update()
+            self.assertEqual(await task, "654321")
+            self.assertFalse(popup.winfo_exists())
+
+            # 2. Dismissing via WM_DELETE_WINDOW resolves to "" without hanging
+            task2 = asyncio.create_task(frame.get_mfa_code())
+            await asyncio.sleep(0)
+            popup2 = next(w for w in master.winfo_children() if isinstance(w, tk.Toplevel))
+            close_cmd = popup2.protocol("WM_DELETE_WINDOW")
+            self.assertTrue(close_cmd)
+            popup2.tk.call(close_cmd)
+            master.update()
+            self.assertEqual(await task2, "")
+            self.assertFalse(popup2.winfo_exists())
+
+        asyncio.run(exercise_mfa())
+
+        # MainApp.__change destroys old frame instead of leaking via pack_forget
+        from idat_sync.config import SyncConfig
+        from idat_sync.ui.app import MainApp
+
+        app = MainApp(SyncConfig())
+        self.addCleanup(app.destroy)
+        app.withdraw()
+        first_frame = app._MainApp__frame  # type: ignore[attr-defined]
+        assert first_frame is not None
+        app.switch_to_login()
+        self.assertFalse(first_frame.winfo_exists())
 
 
 class TestSyncFrame(unittest.TestCase):

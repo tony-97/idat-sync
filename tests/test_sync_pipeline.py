@@ -327,9 +327,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             test_file = test_sub / "test.txt"
             test_file.write_text("content", encoding="utf-8")
             os.utime(test_file, (1234567890, 1234567890))
+            part_file = test_sub / "test.txt.part"
+            part_file.write_text("partial", encoding="utf-8")
 
             mtimes = fs.scan_mtimes(tmp_path)
             self.assertEqual(mtimes.get(test_file), 1234567890)
+            self.assertNotIn(part_file, mtimes)
 
             mgr = DownloadManager(self.downloaders, file_system=fs)
             content = MoodleContent(test_file, 1234567890, "http://a")
@@ -572,6 +575,43 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             mock_sp.download_file.assert_called_once()
             self.assertIs(mock_sp.download_file.call_args.args[0], mock_file)
             self.assertTrue(mock_sp.download_file.call_args.args[1].closed)
+
+    async def test_downloaders_use_atomic_part_files_and_clean_up_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            moodle_target = tmp / "moodle" / "a.pdf"
+            sp_target = tmp / "sp" / "b.pdf"
+            observed_paths: list[str] = []
+
+            async def ok_moodle(_url, fh):
+                observed_paths.append(fh.name)
+                self.assertTrue(fh.name.endswith(".part"))
+                self.assertFalse(moodle_target.exists())
+                fh.write(b"ok")
+
+            async def failing_sp(_file, fh):
+                observed_paths.append(fh.name)
+                fh.write(b"partial")
+                raise RuntimeError("network drop")
+
+            mock_moodle = MagicMock()
+            mock_moodle.download_file = AsyncMock(side_effect=ok_moodle)
+            mock_sp = MagicMock()
+            mock_sp.download_file = AsyncMock(side_effect=failing_sp)
+
+            await MoodleDownloader(mock_moodle).download(
+                MoodleContent(moodle_target, 0, "https://example.com/a.pdf")
+            )
+            self.assertEqual(moodle_target.read_bytes(), b"ok")
+            self.assertFalse(moodle_target.with_name("a.pdf.part").exists())
+
+            with self.assertRaises(RuntimeError):
+                await SharepointDownloader(mock_sp).download(
+                    SharepointContent(sp_target, 0, MagicMock())
+                )
+            self.assertFalse(sp_target.exists())
+            self.assertFalse(sp_target.with_name("b.pdf.part").exists())
+            self.assertEqual(len(observed_paths), 2)
 
     async def test_idat_sync_uses_injected_recordings_folder_name(self):
         from idat_sync.application.course_repository import CourseRepository
