@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import io
+import logging
 import os
 from pathlib import Path
 import platform
@@ -120,8 +121,8 @@ class RecordingDownloader(Downloader[RecordingContent]):
         return "\n".join(lines)
 
     def download(self, content: RecordingContent) -> None:
-        print(
-            f"downloading share url: {content.url}",
+        logging.getLogger(__name__).info(
+            "Downloading share url: %s", content.url
         )
         prefix = "\\\\?\\" if platform.system() == "Windows" else ""
         target_path = Path(content.path)

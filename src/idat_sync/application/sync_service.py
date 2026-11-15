@@ -3,11 +3,16 @@ from pathlib import Path
 
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
+from idat_sync.application.events import (
+    CourseFilesDiscovered,
+    CourseSyncCompleted,
+    CourseSyncStarted,
+    EventPublisher,
+    noop_publisher,
+)
 from idat_sync.application.ports import (
     CredentialsExpiredError,
-    DownloadTask,
     FileSystemPort,
-    SyncProgressPort,
 )
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.domain.content import Content
@@ -24,12 +29,14 @@ class IDATSync:
         task_orchestrator: TaskOrchestrator,
         file_system: FileSystemPort,
         recordings_folder_name: str,
+        publish: EventPublisher = noop_publisher,
     ) -> None:
         self.course_repository = course_repository
         self.download_manager = download_manager
         self.task_orchestrator = task_orchestrator
         self.file_system = file_system
         self.recordings_folder_name = recordings_folder_name
+        self.publish = publish
 
     def list_courses(self) -> list[Course]:
         return self.course_repository.list_courses()
@@ -58,14 +65,11 @@ class IDATSync:
         self,
         course: Course,
         course_dir: str | Path,
-        progress_listener: SyncProgressPort | None = None,
     ) -> SyncDiff:
         course_path = Path(course_dir)
         recordings_folder = course_path / self.recordings_folder_name
-        if progress_listener is not None:
-            progress_listener.on_course_start(course)
+        self.publish(CourseSyncStarted(course))
 
-        first_task_error: Exception | None = None
         try:
             if not course.sections:
                 self.course_repository.populate_course_sections(course)
@@ -76,58 +80,36 @@ class IDATSync:
             tasks = self.download_manager.prepare_download_tasks(
                 diff.pending_contents
             )
-            if progress_listener is None:
-                self.task_orchestrator.run(tasks)
-            else:
-                progress_listener.on_course_files(
+            self.publish(
+                CourseFilesDiscovered(
                     course,
                     course_path,
-                    sorted(diff.synced_paths),
-                    [t.path for t in tasks],
+                    tuple(sorted(diff.synced_paths)),
+                    tuple(t.path for t in tasks),
                 )
-
-                def _on_task_error(task: DownloadTask, exc: Exception) -> None:
-                    nonlocal first_task_error
-                    if first_task_error is None:
-                        first_task_error = exc
-                    progress_listener.on_task_error(course, task.path, exc)
-
-                self.task_orchestrator.run(
-                    tasks,
-                    on_task_start=lambda t: progress_listener.on_task_start(
-                        course, t.path
-                    ),
-                    on_task_complete=lambda t: progress_listener.on_task_complete(
-                        course, t.path
-                    ),
-                    on_task_error=_on_task_error,
-                )
+            )
+            errors = self.task_orchestrator.run(tasks)
         except Exception as exc:
-            if progress_listener is not None:
-                progress_listener.on_course_complete(course, exc)
+            self.publish(CourseSyncCompleted(course, exc))
             raise
 
-        if progress_listener is not None:
-            progress_listener.on_course_complete(course, first_task_error)
+        self.publish(CourseSyncCompleted(course, errors[0] if errors else None))
         return diff
 
     def sync_courses(
         self,
         root_folder: str | Path,
         courses: Sequence[Course],
-        progress_listener: SyncProgressPort | None = None,
     ) -> None:
         root_path = Path(root_folder)
         for course in courses:
             course_dir = root_path / safe_filename(course.name)
             try:
-                self.sync_course(
-                    course, course_dir, progress_listener=progress_listener
-                )
+                self.sync_course(course, course_dir)
             except CredentialsExpiredError:
                 raise
-            except Exception as exc:
-                print(f"[!] Failed syncing course '{course.name}': {exc}")
+            except Exception:
+                pass
 
 
 __all__ = ["IDATSync"]

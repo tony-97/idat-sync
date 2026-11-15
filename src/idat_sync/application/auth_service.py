@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import logging
 
 from idat_sync.application.ports import (
     CredentialStorePort,
@@ -9,6 +10,8 @@ from idat_sync.application.ports import (
     MoodleTokenPort,
     SharepointAuthPort,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class AuthService:
@@ -55,7 +58,7 @@ class AuthService:
         )
         saved = await asyncio.to_thread(self.credential_store.save, credentials)
         if saved:
-            print(f"Success: User '{moodle_username}' is now logged in.")
+            _logger.info("User '%s' is now logged in.", moodle_username)
         return saved
 
     def logout(self) -> None:

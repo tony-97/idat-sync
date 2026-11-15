@@ -242,12 +242,11 @@ class TestJsonCredentialStore(unittest.TestCase):
             self.assertEqual(store.credentials_file, credentials_path)
 
             self.assertIsNone(store.load())
-            with patch("builtins.print") as mock_print:
+            with self.assertLogs(
+                "idat_sync.infrastructure.credential_store", level="INFO"
+            ) as cm:
                 store.clear()  # No-op when absent
-            self.assertIn(
-                "credentials file",
-                " ".join(str(call.args[0]) for call in mock_print.call_args_list),
-            )
+            self.assertIn("credentials file", " ".join(cm.output))
 
             creds: Credentials = {
                 "token": "tok123",
@@ -302,12 +301,11 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
-            with patch("builtins.print") as mock_print:
+            with self.assertLogs(
+                "idat_sync.infrastructure.credential_store", level="ERROR"
+            ) as cm:
                 self.assertFalse(store.save(creds))
-            self.assertIn(
-                "credentials file",
-                " ".join(str(call.args[0]) for call in mock_print.call_args_list),
-            )
+            self.assertIn("credentials file", " ".join(cm.output))
 
 
 def _make_mock_playwright():
@@ -728,6 +726,17 @@ class TestSyncFrame(unittest.TestCase):
 
                 master = StubMaster()
                 try:
+                    from idat_sync.application.events import (
+                        CourseFilesDiscovered,
+                        CourseSyncCompleted,
+                        CourseSyncStarted,
+                        TaskDownloadCompleted,
+                        TaskDownloadFailed,
+                        TaskDownloadStarted,
+                    )
+                    import idat_sync.ui.sync_frame as sync_frame_mod
+
+                    self.assertFalse(hasattr(sync_frame_mod, "_TreeProgressListener"))
                     frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
                     self.assertFalse(hasattr(frame, "output_text"))
                     try:
@@ -736,39 +745,50 @@ class TestSyncFrame(unittest.TestCase):
                             past_course,
                             current_course,
                         ]
+                        captured_publish = None
 
-                        def fake_sync_courses(
-                            root_folder, courses, progress_listener=None
-                        ):
+                        def fake_create_sync_service(credentials, cfg, publish=None):
+                            nonlocal captured_publish
+                            if captured_publish is None:
+                                captured_publish = publish
+                                raise RuntimeError("network offline")
+                            captured_publish = publish
+                            return mock_sync
+
+                        def fake_sync_courses(root_folder, courses):
                             self.assertEqual(root_folder, tmpdir)
                             self.assertEqual(courses, [current_course])
-                            assert progress_listener is not None
+                            assert captured_publish is not None
                             c_dir = Path(tmpdir) / current_course.name
                             synced_p = c_dir / "S1" / "already.pdf"
                             ok_p = c_dir / "S1" / "new.pdf"
                             err_p = c_dir / "S1" / "broken.pdf"
-                            progress_listener.on_course_start(current_course)
-                            progress_listener.on_course_files(
-                                current_course,
-                                c_dir,
-                                [synced_p],
-                                [ok_p, err_p],
+                            captured_publish(CourseSyncStarted(current_course))
+                            captured_publish(
+                                CourseFilesDiscovered(
+                                    current_course,
+                                    c_dir,
+                                    (synced_p,),
+                                    (ok_p, err_p),
+                                )
                             )
-                            progress_listener.on_task_start(current_course, ok_p)
-                            progress_listener.on_task_complete(current_course, ok_p)
-                            progress_listener.on_task_start(current_course, err_p)
-                            progress_listener.on_task_error(
-                                current_course, err_p, OSError("disk full")
+                            captured_publish(TaskDownloadStarted(ok_p))
+                            captured_publish(TaskDownloadCompleted(ok_p))
+                            captured_publish(TaskDownloadStarted(err_p))
+                            captured_publish(
+                                TaskDownloadFailed(err_p, OSError("disk full"))
                             )
-                            progress_listener.on_course_complete(
-                                current_course, RuntimeError("partial")
+                            captured_publish(
+                                CourseSyncCompleted(
+                                    current_course, RuntimeError("partial")
+                                )
                             )
 
                         mock_sync.sync_courses.side_effect = fake_sync_courses
 
                         with patch(
                             "idat_sync.ui.sync_frame.create_sync_service",
-                            side_effect=[RuntimeError("network offline"), mock_sync],
+                            side_effect=fake_create_sync_service,
                         ) as mock_factory:
                             # 1. Startup failure recovers controls and preserves credentials
                             await frame.load_idat_sync(creds)
@@ -892,6 +912,26 @@ class TestSyncFrame(unittest.TestCase):
                     master.destroy()
 
             asyncio.run(exercise())
+
+    def test_ui_app_main_configures_logging_without_stdio_hijack(self):
+        import sys
+        from idat_sync.config import SyncConfig
+        import idat_sync.ui.app as app_mod
+
+        orig_stdout = sys.stdout
+        orig_stderr = sys.stderr
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SyncConfig(log_file=Path(tmpdir) / "app.log")
+            with patch("idat_sync.ui.app.load_config", return_value=cfg), patch(
+                "idat_sync.ui.app.configure_logging"
+            ) as mock_cfg_log, patch("idat_sync.ui.app.MainApp") as mock_app:
+                app_mod.main()
+
+            mock_cfg_log.assert_called_once_with(cfg.log_file)
+            mock_app.assert_called_once_with(config=cfg)
+            mock_app.return_value.run.assert_called_once_with()
+            self.assertIs(sys.stdout, orig_stdout)
+            self.assertIs(sys.stderr, orig_stderr)
 
 
 if __name__ == "__main__":

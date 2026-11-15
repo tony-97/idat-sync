@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import sys
 import tkinter as tk
 
 from async_tkinter_loop import async_mainloop
 
-from idat_sync.bootstrap import create_auth_service
+from idat_sync.bootstrap import configure_logging, create_auth_service
 from idat_sync.config import SyncConfig, load_config
 
 
@@ -58,8 +56,6 @@ class MainApp(tk.Tk):
 
 def main():
     config = load_config()
-    sys.stdout = io.StringIO()
-    sys.stderr = open(config.log_file, mode="+w", encoding="utf-8")
+    configure_logging(config.log_file)
     app = MainApp(config=config)
     app.run()
-    sys.stderr.close()

@@ -449,6 +449,26 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertNotIn("RQ_HEADER", downloader_imports)
         self.assertNotIn("REQUEST_HEADER", downloader_imports)
 
+        print_calls: list[str] = []
+        for py_file in src_root.rglob("*.py"):
+            tree = ast.parse(
+                py_file.read_text(encoding="utf-8"), filename=str(py_file)
+            )
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"
+                ):
+                    print_calls.append(
+                        f"{py_file.relative_to(src_root).as_posix()}:{node.lineno}"
+                    )
+        self.assertEqual(
+            print_calls,
+            [],
+            f"Found forbidden print() calls in src/idat_sync/: {print_calls}",
+        )
+
     def test_download_manager_requires_filesystem_port(self):
         with self.assertRaises(TypeError):
             DownloadManager(self.downloaders)  # type: ignore[call-arg]
@@ -775,18 +795,14 @@ class TestSyncPipeline(unittest.TestCase):
         self.assertNotIn("auth:t2_never.txt", executed)
         self.assertNotIn("sib:s2_never.txt", executed)
 
-    def test_task_orchestrator_reports_task_lifecycle_callbacks(self):
-        from idat_sync.application.ports import DownloadTask, SyncProgressPort
-
-        for method in (
-            "on_course_start",
-            "on_course_files",
-            "on_task_start",
-            "on_task_complete",
-            "on_task_error",
-            "on_course_complete",
-        ):
-            self.assertTrue(hasattr(SyncProgressPort, method))
+    def test_task_orchestrator_publishes_task_events_and_returns_errors(self):
+        from idat_sync.application.events import (
+            SyncEvent,
+            TaskDownloadCompleted,
+            TaskDownloadFailed,
+            TaskDownloadStarted,
+        )
+        from idat_sync.application.ports import DownloadTask
 
         class StubDownloader(Downloader[StringContent]):
             content_type = StringContent
@@ -796,27 +812,27 @@ class TestSyncPipeline(unittest.TestCase):
                     raise OSError("disk hiccup")
 
         dl = StubDownloader()
-        orch = TaskOrchestrator([[dl]])
+        events: list[SyncEvent] = []
+        orch = TaskOrchestrator([[dl]], publish=events.append)
         bad_task = DownloadTask(StringContent(Path("bad.txt"), 0, ["x"]), dl)
         good_task = DownloadTask(StringContent(Path("good.txt"), 0, ["x"]), dl)
 
-        events: list[tuple[str, Path, str | None]] = []
-        orch.run(
-            [bad_task, good_task],
-            on_task_start=lambda t: events.append(("start", t.path, None)),
-            on_task_complete=lambda t: events.append(("complete", t.path, None)),
-            on_task_error=lambda t, exc: events.append(("error", t.path, str(exc))),
-        )
+        errors = orch.run([bad_task, good_task])
 
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], OSError)
+        self.assertEqual(str(errors[0]), "disk hiccup")
         self.assertEqual(
             events,
             [
-                ("start", Path("bad.txt"), None),
-                ("error", Path("bad.txt"), "disk hiccup"),
-                ("start", Path("good.txt"), None),
-                ("complete", Path("good.txt"), None),
+                TaskDownloadStarted(Path("bad.txt")),
+                TaskDownloadFailed(Path("bad.txt"), errors[0]),
+                TaskDownloadStarted(Path("good.txt")),
+                TaskDownloadCompleted(Path("good.txt")),
             ],
         )
+        with self.assertRaises(TypeError):
+            orch.run([good_task], on_task_start=lambda _t: None)  # type: ignore[call-arg]
 
     def test_idat_sync_courses_isolates_course_errors_and_aborts_on_credentials_expired(self):
         from idat_sync.application.course_repository import CourseRepository
@@ -877,47 +893,39 @@ class TestSyncPipeline(unittest.TestCase):
             [],
         ]
 
+        from idat_sync.application.events import CourseSyncCompleted, SyncEvent
+
+        events: list[SyncEvent] = []
         str_dl = StubStringDownloader()
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
         dm = DownloadManager([str_dl], StubFileSystem())  # type: ignore[arg-type]
-        orch = TaskOrchestrator([[str_dl]])
-        sync = IDATSync(repo, dm, orch, StubFileSystem(), "Grabaciones")  # type: ignore[arg-type]
-
-        completed_courses: list[tuple[int, Exception | None]] = []
-
-        class RecordingListener:
-            def on_course_start(self, course: Course) -> None:
-                pass
-
-            def on_course_files(self, course, course_dir, synced_paths, pending_paths) -> None:
-                pass
-
-            def on_task_start(self, course: Course, path: Path) -> None:
-                pass
-
-            def on_task_complete(self, course: Course, path: Path) -> None:
-                pass
-
-            def on_task_error(self, course: Course, path: Path, error: Exception) -> None:
-                pass
-
-            def on_course_complete(self, course: Course, error: Exception | None) -> None:
-                completed_courses.append((course.id, error))
-
-        listener = RecordingListener()
+        orch = TaskOrchestrator([[str_dl]], publish=events.append)
+        sync = IDATSync(
+            repo,
+            dm,
+            orch,
+            StubFileSystem(),  # type: ignore[arg-type]
+            "Grabaciones",
+            publish=events.append,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            sync.sync_courses(tmpdir, [c1, c2], progress_listener=listener)
+            sync.sync_courses(tmpdir, [c1, c2])
             self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 2)
             self.assertEqual(
                 str_dl.downloaded,
                 [Path(tmpdir) / "Course Two" / "S2" / "c2.html"],
             )
+            completed_courses = [
+                (e.course.id, e.error)
+                for e in events
+                if isinstance(e, CourseSyncCompleted)
+            ]
             self.assertEqual(completed_courses[0][0], 1)
             self.assertIsInstance(completed_courses[0][1], RuntimeError)
             self.assertEqual(completed_courses[1], (2, None))
 
-            completed_courses.clear()
+            events.clear()
             str_dl.downloaded.clear()
             mock_rec_gw.fetch_recordings.reset_mock()
             mock_rec_gw.fetch_recordings.side_effect = [
@@ -925,9 +933,14 @@ class TestSyncPipeline(unittest.TestCase):
                 [],
             ]
             with self.assertRaises(CredentialsExpiredError):
-                sync.sync_courses(tmpdir, [c1, c2], progress_listener=listener)
+                sync.sync_courses(tmpdir, [c1, c2])
             self.assertEqual(mock_rec_gw.fetch_recordings.call_count, 1)
             self.assertEqual(str_dl.downloaded, [])
+            completed_courses = [
+                (e.course.id, e.error)
+                for e in events
+                if isinstance(e, CourseSyncCompleted)
+            ]
             self.assertEqual(len(completed_courses), 1)
             self.assertEqual(completed_courses[0][0], 1)
             self.assertIsInstance(completed_courses[0][1], CredentialsExpiredError)
@@ -963,35 +976,24 @@ class TestSyncPipeline(unittest.TestCase):
         mock_rec_gw = MagicMock(spec=RecordingGateway)
         mock_rec_gw.fetch_recordings.return_value = []
 
+        from idat_sync.application.events import (
+            CourseFilesDiscovered,
+            CourseSyncCompleted,
+            CourseSyncStarted,
+            SyncEvent,
+            TaskDownloadCompleted,
+            TaskDownloadStarted,
+        )
+
+        events: list[SyncEvent] = []
         fs = LocalFileSystemAdapter()
         str_dl = StringDownloader()
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
         dm = DownloadManager([str_dl], fs)
-        orch = TaskOrchestrator([[str_dl]])
-        sync = IDATSync(repo, dm, orch, fs, "Grabaciones")
+        orch = TaskOrchestrator([[str_dl]], publish=events.append)
+        sync = IDATSync(repo, dm, orch, fs, "Grabaciones", publish=events.append)
 
         self.assertEqual(sync.list_courses(), [c_lazy])
-
-        events: list[tuple] = []
-
-        class Listener:
-            def on_course_start(self, course: Course) -> None:
-                events.append(("course_start", course.id))
-
-            def on_course_files(self, course, course_dir, synced_paths, pending_paths) -> None:
-                events.append(("course_files", course.id, list(synced_paths), list(pending_paths)))
-
-            def on_task_start(self, course: Course, path: Path) -> None:
-                events.append(("task_start", path))
-
-            def on_task_complete(self, course: Course, path: Path) -> None:
-                events.append(("task_complete", path))
-
-            def on_task_error(self, course: Course, path: Path, error: Exception) -> None:
-                events.append(("task_error", path, str(error)))
-
-            def on_course_complete(self, course: Course, error: Exception | None) -> None:
-                events.append(("course_complete", course.id, error))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             course_dir = Path(tmpdir) / "Lazy Course"
@@ -1000,20 +1002,132 @@ class TestSyncPipeline(unittest.TestCase):
             synced_file.write_text("ok", encoding="utf-8")
             os.utime(synced_file, (200, 200))
 
-            sync.sync_course(c_lazy, course_dir, progress_listener=Listener())
+            sync.sync_course(c_lazy, course_dir)
 
             mock_course_gw.populate_course_sections.assert_called_once_with(c_lazy)
             missing_file = course_dir / "S1" / "missing.html"
             self.assertEqual(
                 events,
                 [
-                    ("course_start", 10),
-                    ("course_files", 10, [synced_file], [missing_file]),
-                    ("task_start", missing_file),
-                    ("task_complete", missing_file),
-                    ("course_complete", 10, None),
+                    CourseSyncStarted(c_lazy),
+                    CourseFilesDiscovered(
+                        c_lazy, course_dir, (synced_file,), (missing_file,)
+                    ),
+                    TaskDownloadStarted(missing_file),
+                    TaskDownloadCompleted(missing_file),
+                    CourseSyncCompleted(c_lazy, None),
                 ],
             )
+            with self.assertRaises(TypeError):
+                sync.sync_course(c_lazy, course_dir, progress_listener=None)  # type: ignore[call-arg]
+
+    def test_sync_events_contract_log_sync_event_and_ports_cleanup(self):
+        from dataclasses import is_dataclass
+        import dataclasses
+        from idat_sync.application import events as events_mod
+        from idat_sync.application import ports
+        from idat_sync.domain.course import Course
+
+        self.assertFalse(hasattr(ports, "SyncProgressPort"))
+        self.assertTrue(hasattr(events_mod, "SyncEvent"))
+        self.assertTrue(hasattr(events_mod, "EventPublisher"))
+
+        course = Course(id=1, name="Algebra")
+        started = events_mod.CourseSyncStarted(course=course)
+        discovered = events_mod.CourseFilesDiscovered(
+            course=course,
+            course_dir=Path("/tmp/Algebra"),
+            synced_paths=(Path("/tmp/Algebra/a.pdf"),),
+            pending_paths=(Path("/tmp/Algebra/b.pdf"),),
+        )
+        t_start = events_mod.TaskDownloadStarted(path=Path("/tmp/Algebra/b.pdf"))
+        t_done = events_mod.TaskDownloadCompleted(path=Path("/tmp/Algebra/b.pdf"))
+        t_fail = events_mod.TaskDownloadFailed(
+            path=Path("/tmp/Algebra/b.pdf"), error=OSError("disk full")
+        )
+        c_ok = events_mod.CourseSyncCompleted(course=course)
+        c_err = events_mod.CourseSyncCompleted(
+            course=course, error=RuntimeError("boom")
+        )
+
+        for ev in (started, discovered, t_start, t_done, t_fail, c_ok, c_err):
+            self.assertTrue(is_dataclass(ev))
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                setattr(ev, "course" if hasattr(ev, "course") else "path", None)
+
+        with self.assertLogs("idat_sync", level="INFO") as cm:
+            events_mod.log_sync_event(started)
+            events_mod.log_sync_event(discovered)
+            events_mod.log_sync_event(t_start)
+            events_mod.log_sync_event(t_done)
+            events_mod.log_sync_event(c_ok)
+            events_mod.log_sync_event(t_fail)
+            events_mod.log_sync_event(c_err)
+
+        self.assertEqual(
+            [r.levelname for r in cm.records],
+            ["INFO", "INFO", "INFO", "INFO", "INFO", "ERROR", "ERROR"],
+        )
+
+    def test_bootstrap_configure_logging_and_event_fanout(self):
+        import logging
+        from idat_sync.application.events import CourseSyncStarted, SyncEvent
+        from idat_sync.bootstrap import configure_logging, create_sync_service
+        from idat_sync.config import SyncConfig
+        from idat_sync.domain.course import Course
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_file = Path(tmpdir) / "app.log"
+            logger1 = configure_logging(log_file)
+            logger2 = configure_logging(log_file)
+            try:
+                self.assertIs(logger1, logger2)
+                self.assertEqual(logger2.name, "idat_sync")
+                self.assertEqual(logger2.level, logging.INFO)
+                self.assertFalse(logger2.propagate)
+                self.assertEqual(len(logger2.handlers), 2)
+                self.assertTrue(
+                    any(isinstance(h, logging.FileHandler) for h in logger2.handlers)
+                )
+                self.assertTrue(
+                    any(
+                        type(h) is logging.StreamHandler
+                        for h in logger2.handlers
+                    )
+                )
+            finally:
+                for h in list(logger2.handlers):
+                    h.close()
+                    logger2.removeHandler(h)
+
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_personal_site = MagicMock()
+        mock_personal_site.url = "https://idat628-my.sharepoint.com/personal/u"
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query.return_value = mock_personal_site
+
+        received: list[SyncEvent] = []
+        credentials = {
+            "token": "tok123",
+            "sharepoint_storage_state": {
+                "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
+            },
+        }
+        with patch("idat_sync.infrastructure.sharepoint_client.ClientContext", return_value=mock_ctx), patch(
+            "idat_sync.infrastructure.sharepoint_client.time.sleep"
+        ):
+            service = create_sync_service(
+                credentials,  # type: ignore[arg-type]
+                config=SyncConfig(request_delay=0.0),
+                publish=received.append,
+            )
+
+        self.assertIs(service.publish, service.task_orchestrator.publish)
+        ev = CourseSyncStarted(Course(id=1, name="Algebra"))
+        with self.assertLogs("idat_sync", level="INFO") as cm:
+            service.publish(ev)
+        self.assertEqual(received, [ev])
+        self.assertEqual(len(cm.records), 1)
 
 
 if __name__ == "__main__":

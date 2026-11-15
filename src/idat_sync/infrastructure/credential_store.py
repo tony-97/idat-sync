@@ -1,8 +1,11 @@
 import json
+import logging
 from pathlib import Path
 from typing import cast
 
 from idat_sync.application.ports import Credentials
+
+_logger = logging.getLogger(__name__)
 
 
 class JsonCredentialStore:
@@ -37,15 +40,15 @@ class JsonCredentialStore:
                 json.dump(credentials, f)
             return True
         except OSError as e:
-            print(f"Error: Could not create credentials file: {e}")
+            _logger.error("Could not create credentials file: %s", e)
             return False
 
     def clear(self) -> None:
         try:
             if self.credentials_file.exists():
                 self.credentials_file.unlink()
-                print("Success: User has been logged out.")
+                _logger.info("User has been logged out.")
             else:
-                print("Info: Already logged out (no credentials file found).")
+                _logger.info("Already logged out (no credentials file found).")
         except OSError as e:
-            print(f"Error: Could not remove credentials file: {e}")
+            _logger.error("Could not remove credentials file: %s", e)

@@ -1,8 +1,15 @@
 import asyncio
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 import threading
 
+from idat_sync.application.events import (
+    EventPublisher,
+    TaskDownloadCompleted,
+    TaskDownloadFailed,
+    TaskDownloadStarted,
+    noop_publisher,
+)
 from idat_sync.application.ports import (
     CredentialsExpiredError,
     DownloadTask,
@@ -11,49 +18,43 @@ from idat_sync.application.ports import (
 
 
 class TaskOrchestrator:
-    def __init__(self, task_group: list[list[Downloader]]) -> None:
+    def __init__(
+        self,
+        task_group: list[list[Downloader]],
+        publish: EventPublisher = noop_publisher,
+    ) -> None:
         self.task_group = task_group
+        self.publish = publish
 
     def _run_group(
         self,
         group: Sequence[Downloader],
         tasks_by_downloader: dict[Downloader, list[DownloadTask]],
         abort_event: threading.Event | None = None,
-        on_task_start: Callable[[DownloadTask], None] | None = None,
-        on_task_complete: Callable[[DownloadTask], None] | None = None,
-        on_task_error: Callable[[DownloadTask, Exception], None] | None = None,
-    ) -> None:
+    ) -> list[Exception]:
+        errors: list[Exception] = []
         for downloader in group:
             for task in tasks_by_downloader.get(downloader, []):
                 if abort_event is not None and abort_event.is_set():
-                    return
-                if on_task_start is not None:
-                    on_task_start(task)
+                    return errors
+                self.publish(TaskDownloadStarted(task.path))
                 try:
                     task.download()
                 except CredentialsExpiredError as exc:
-                    if on_task_error is not None:
-                        on_task_error(task, exc)
+                    self.publish(TaskDownloadFailed(task.path, exc))
                     if abort_event is not None:
                         abort_event.set()
                     raise
                 except Exception as exc:
-                    print(f"[!] Failed downloading {task.path}: {exc}")
-                    if on_task_error is not None:
-                        on_task_error(task, exc)
+                    errors.append(exc)
+                    self.publish(TaskDownloadFailed(task.path, exc))
                 else:
-                    if on_task_complete is not None:
-                        on_task_complete(task)
+                    self.publish(TaskDownloadCompleted(task.path))
+        return errors
 
-    async def run_async(
-        self,
-        tasks: Sequence[DownloadTask],
-        on_task_start: Callable[[DownloadTask], None] | None = None,
-        on_task_complete: Callable[[DownloadTask], None] | None = None,
-        on_task_error: Callable[[DownloadTask, Exception], None] | None = None,
-    ) -> None:
+    async def run_async(self, tasks: Sequence[DownloadTask]) -> list[Exception]:
         if not tasks:
-            return
+            return []
         tasks_by_downloader: defaultdict[Downloader, list[DownloadTask]] = (
             defaultdict(list)
         )
@@ -66,38 +67,23 @@ class TaskOrchestrator:
             if any(tasks_by_downloader.get(d) for d in group)
         ]
         if not active_groups:
-            return
+            return []
 
         abort_event = threading.Event()
-        await asyncio.gather(
+        group_errors = await asyncio.gather(
             *(
                 asyncio.to_thread(
                     self._run_group,
                     group,
                     tasks_by_downloader,
                     abort_event,
-                    on_task_start,
-                    on_task_complete,
-                    on_task_error,
                 )
                 for group in active_groups
             )
         )
+        return [err for group in group_errors for err in group]
 
-    def run(
-        self,
-        tasks: Sequence[DownloadTask],
-        on_task_start: Callable[[DownloadTask], None] | None = None,
-        on_task_complete: Callable[[DownloadTask], None] | None = None,
-        on_task_error: Callable[[DownloadTask, Exception], None] | None = None,
-    ) -> None:
+    def run(self, tasks: Sequence[DownloadTask]) -> list[Exception]:
         if not tasks:
-            return
-        asyncio.run(
-            self.run_async(
-                tasks,
-                on_task_start=on_task_start,
-                on_task_complete=on_task_complete,
-                on_task_error=on_task_error,
-            )
-        )
+            return []
+        return asyncio.run(self.run_async(tasks))

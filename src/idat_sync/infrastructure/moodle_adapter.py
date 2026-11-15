@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -12,6 +13,8 @@ from idat_sync.domain.course import (
 from idat_sync.domain.path_utils import safe_path_segment
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 
+_logger = logging.getLogger(__name__)
+
 
 class MoodleTokenAdapter:
     """Adapter implementing MoodleTokenPort over MoodleTokenClient."""
@@ -23,12 +26,12 @@ class MoodleTokenAdapter:
         payload = self.client.request_token(username, password)
         if isinstance(payload, dict):
             if "error" in payload:
-                print(f"[!] Token error: {payload.get('error')}")
+                _logger.warning("[!] Token error: %s", payload.get("error"))
                 return None
             token = payload.get("token")
             if isinstance(token, str) and token:
                 return token
-        print(
+        _logger.warning(
             "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
         )
         return None

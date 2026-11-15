@@ -1,12 +1,20 @@
+import logging
+from pathlib import Path
+
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
+from idat_sync.application.events import (
+    EventPublisher,
+    SyncEvent,
+    log_sync_event,
+    noop_publisher,
+)
 from idat_sync.application.ports import Credentials, Downloader
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.config import SyncConfig
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
-from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.downloaders import (
     MoodleDownloader,
     RecordingDownloader,
@@ -17,12 +25,37 @@ from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
+from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
+def configure_logging(log_file: Path) -> logging.Logger:
+    logger = logging.getLogger("idat_sync")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)
+
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+    return logger
+
+
 def create_sync_service(
-    credentials: Credentials, config: SyncConfig
+    credentials: Credentials,
+    config: SyncConfig,
+    publish: EventPublisher = noop_publisher,
 ) -> IDATSync:
+    def _publish(event: SyncEvent) -> None:
+        log_sync_event(event)
+        publish(event)
+
     sharepoint_storage_state = credentials.get("sharepoint_storage_state")
     cookies = (
         sharepoint_storage_state.get("cookies", [])
@@ -80,7 +113,7 @@ def create_sync_service(
 
     file_system = LocalFileSystemAdapter()
     download_manager = DownloadManager(downloaders, file_system=file_system)
-    task_orchestrator = TaskOrchestrator(download_tasks_group)
+    task_orchestrator = TaskOrchestrator(download_tasks_group, publish=_publish)
 
     return IDATSync(
         course_repository=course_repository,
@@ -88,6 +121,7 @@ def create_sync_service(
         task_orchestrator=task_orchestrator,
         file_system=file_system,
         recordings_folder_name=config.recordings_folder_name,
+        publish=_publish,
     )
 
 
@@ -103,4 +137,4 @@ def create_auth_service(config: SyncConfig) -> AuthService:
     )
 
 
-__all__ = ["create_auth_service", "create_sync_service"]
+__all__ = ["configure_logging", "create_auth_service", "create_sync_service"]

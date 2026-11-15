@@ -330,7 +330,7 @@ class TestMoodleTokenAdapter(unittest.TestCase):
         self.assertEqual(token, "tok123")
         mock_client.request_token.assert_called_once_with("jdoe", "pw")
 
-    def test_fetch_token_returns_none_and_prints_diagnostic_on_error_or_missing_token(self):
+    def test_fetch_token_returns_none_and_logs_warning_on_error_or_missing_token(self):
         for payload in [
             {"error": "Invalid login"},
             {"error": "Invalid login", "token": "ignored"},
@@ -346,14 +346,13 @@ class TestMoodleTokenAdapter(unittest.TestCase):
                 mock_client.request_token.return_value = payload
                 adapter = MoodleTokenAdapter(mock_client)
 
-                with patch("builtins.print") as mock_print:
+                with self.assertLogs(
+                    "idat_sync.infrastructure.moodle_adapter", level="WARNING"
+                ) as cm:
                     token = adapter.fetch_token("jdoe", "bad")
 
                 self.assertIsNone(token)
-                printed = " ".join(
-                    str(call.args[0]) for call in mock_print.call_args_list
-                )
-                self.assertIn("[!]", printed)
+                self.assertTrue(any("[!]" in msg for msg in cm.output))
 
     def test_fetch_token_propagates_client_http_error(self):
         mock_client = MagicMock(spec=MoodleTokenClient)

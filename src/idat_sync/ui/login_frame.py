@@ -1,5 +1,5 @@
 import asyncio
-import sys
+import logging
 import tkinter as tk
 from typing import cast
 
@@ -7,6 +7,8 @@ from async_tkinter_loop import async_handler
 
 from idat_sync.application.auth_service import AuthService
 from idat_sync.ui.app import AppFrame, MainApp
+
+_logger = logging.getLogger(__name__)
 
 
 class LoginFrame(AppFrame):
@@ -106,7 +108,7 @@ class LoginFrame(AppFrame):
             except Exception as e:
                 errors = e.exceptions if isinstance(e, ExceptionGroup) else (e,)
                 for err in errors:
-                    print(f"Error: {err}", file=sys.stderr)
+                    _logger.error("Login error: %s", err)
             finally:
                 self.is_login.set(False)
         else:

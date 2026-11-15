@@ -4,14 +4,22 @@ import os
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, ttk
-from typing import Any, cast
+from typing import cast
 
 from async_tkinter_loop import async_handler
 
+from idat_sync.application.events import (
+    CourseFilesDiscovered,
+    CourseSyncCompleted,
+    CourseSyncStarted,
+    SyncEvent,
+    TaskDownloadCompleted,
+    TaskDownloadFailed,
+    TaskDownloadStarted,
+)
 from idat_sync.application.ports import (
     Credentials,
     CredentialsExpiredError,
-    SyncProgressPort,
 )
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.bootstrap import create_sync_service
@@ -125,57 +133,6 @@ def _make_file_icon() -> tk.PhotoImage:
     return _draw_icon(rows, palette)
 
 
-class _TreeProgressListener(SyncProgressPort):
-    """Marshals worker-thread sync progress callbacks onto the Tkinter event loop."""
-
-    def __init__(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        queue: asyncio.Queue[tuple[Any, ...] | None],
-    ) -> None:
-        self._loop = loop
-        self._queue = queue
-
-    def _emit(self, event: tuple[Any, ...]) -> None:
-        self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
-
-    def on_course_start(self, course: Course) -> None:
-        self._emit(("course_start", course.id, course.name))
-
-    def on_course_files(
-        self,
-        course: Course,
-        course_dir: Path,
-        synced_paths: Sequence[Path],
-        pending_paths: Sequence[Path],
-    ) -> None:
-        self._emit(
-            (
-                "course_files",
-                course.id,
-                Path(course_dir),
-                list(synced_paths),
-                list(pending_paths),
-            )
-        )
-
-    def on_task_start(self, course: Course, path: Path) -> None:
-        self._emit(("task_start", course.id, Path(path)))
-
-    def on_task_complete(self, course: Course, path: Path) -> None:
-        self._emit(("task_complete", course.id, Path(path)))
-
-    def on_task_error(
-        self, course: Course, path: Path, error: Exception
-    ) -> None:
-        self._emit(("task_error", course.id, Path(path), str(error)))
-
-    def on_course_complete(
-        self, course: Course, error: Exception | None
-    ) -> None:
-        self._emit(("course_complete", course.id, error))
-
-
 class SyncFrame(AppFrame):
     def __init__(
         self,
@@ -198,7 +155,7 @@ class SyncFrame(AppFrame):
         self._course_iids: dict[int, str] = {}
         self._iid_to_course_id: dict[str, int] = {}
         self._folder_iids: dict[tuple[int, tuple[str, ...]], str] = {}
-        self._file_iids: dict[tuple[int, Path], str] = {}
+        self._file_iids: dict[Path, tuple[int, str]] = {}
         self._course_progress: dict[int, list[int]] = {}
 
         # Icons must be retained on self so Tkinter does not garbage-collect them.
@@ -293,7 +250,7 @@ class SyncFrame(AppFrame):
         self.is_syncing.trace_add("write", self.validate_buttons)
         self.folder_path.trace_add("write", self.validate_buttons)
 
-        self.progress_queue: asyncio.Queue[tuple[Any, ...] | None] = (
+        self.progress_queue: asyncio.Queue[SyncEvent | tuple[str, str] | None] = (
             asyncio.Queue()
         )
         self.after_idle(
@@ -454,8 +411,14 @@ class SyncFrame(AppFrame):
 
     async def _ensure_sync_service(self) -> IDATSync:
         if self.idat_sync is None:
+            loop = cast(MainApp, self.master).loop
             self.idat_sync = await asyncio.to_thread(
-                create_sync_service, self.credentials, self.config
+                create_sync_service,
+                self.credentials,
+                self.config,
+                publish=lambda event: loop.call_soon_threadsafe(
+                    self.progress_queue.put_nowait, event
+                ),
             )
         if not self.courses_loaded:
             courses = await asyncio.to_thread(self.idat_sync.list_courses)
@@ -486,73 +449,85 @@ class SyncFrame(AppFrame):
             event = await self.progress_queue.get()
             if event is None:
                 return
-            kind = event[0]
-            if kind == "status":
-                self.status_var.set(event[1])
-            elif kind == "course_start":
-                _, course_id, course_name = event
-                if iid := self._course_iids.get(course_id):
-                    self.tree.item(iid, values=("Fetching contents...", "0%"))
-                self.status_var.set(f"Fetching contents for {course_name}...")
-            elif kind == "course_files":
-                _, course_id, course_dir, synced_paths, pending_paths = event
-                if iid := self._course_iids.get(course_id):
-                    self._clear_children(iid)
-                    for key in [k for k in self._folder_iids if k[0] == course_id]:
-                        del self._folder_iids[key]
-                    for path in synced_paths:
-                        self._insert_file_node(
-                            course_id, iid, course_dir, path, "Synced", "100%"
-                        )
-                    for path in pending_paths:
-                        child_iid = self._insert_file_node(
-                            course_id, iid, course_dir, path, "Pending", "0%"
-                        )
-                        self._file_iids[(course_id, path)] = child_iid
-                    total = len(synced_paths) + len(pending_paths)
-                    done = len(synced_paths)
-                    self._course_progress[course_id] = [done, total]
-                    self.tree.item(
-                        iid,
-                        values=("Syncing", self._format_progress(done, total)),
-                        open=True,
-                    )
-            elif kind == "task_start":
-                _, course_id, path = event
-                if child_iid := self._file_iids.get((course_id, path)):
-                    self.tree.item(child_iid, values=("Downloading", "0%"))
-                self.status_var.set(f"Downloading {path.name}...")
-            elif kind == "task_complete":
-                _, course_id, path = event
-                if child_iid := self._file_iids.get((course_id, path)):
-                    self.tree.item(child_iid, values=("Completed", "100%"))
-                if counts := self._course_progress.get(course_id):
-                    counts[0] += 1
-                    if iid := self._course_iids.get(course_id):
+            match event:
+                case ("status", msg):
+                    self.status_var.set(msg)
+                case CourseSyncStarted(course=course):
+                    if iid := self._course_iids.get(course.id):
+                        self.tree.item(iid, values=("Fetching contents...", "0%"))
+                    self.status_var.set(f"Fetching contents for {course.name}...")
+                case CourseFilesDiscovered(
+                    course=course,
+                    course_dir=course_dir,
+                    synced_paths=synced_paths,
+                    pending_paths=pending_paths,
+                ):
+                    if iid := self._course_iids.get(course.id):
+                        self._clear_children(iid)
+                        for key in [
+                            k for k in self._folder_iids if k[0] == course.id
+                        ]:
+                            del self._folder_iids[key]
+                        for p in [
+                            p
+                            for p, (cid, _) in self._file_iids.items()
+                            if cid == course.id
+                        ]:
+                            del self._file_iids[p]
+                        for path in synced_paths:
+                            self._insert_file_node(
+                                course.id, iid, course_dir, path, "Synced", "100%"
+                            )
+                        for path in pending_paths:
+                            child_iid = self._insert_file_node(
+                                course.id, iid, course_dir, path, "Pending", "0%"
+                            )
+                            self._file_iids[path] = (course.id, child_iid)
+                        total = len(synced_paths) + len(pending_paths)
+                        done = len(synced_paths)
+                        self._course_progress[course.id] = [done, total]
                         self.tree.item(
                             iid,
-                            values=(
-                                "Syncing",
-                                self._format_progress(counts[0], counts[1]),
-                            ),
+                            values=("Syncing", self._format_progress(done, total)),
+                            open=True,
                         )
-            elif kind == "task_error":
-                _, course_id, path, _err = event
-                if child_iid := self._file_iids.get((course_id, path)):
-                    self.tree.item(child_iid, values=("Failed", "0%"))
-            elif kind == "course_complete":
-                _, course_id, error = event
-                if iid := self._course_iids.get(course_id):
-                    counts = self._course_progress.get(course_id)
-                    if error is None:
-                        self.tree.item(iid, values=("Completed", "100%"))
-                    else:
-                        pct = (
-                            self._format_progress(counts[0], counts[1])
-                            if counts
-                            else "0%"
-                        )
-                        self.tree.item(iid, values=("Failed", pct))
+                case TaskDownloadStarted(path=path):
+                    if entry := self._file_iids.get(path):
+                        _, child_iid = entry
+                        self.tree.item(child_iid, values=("Downloading", "0%"))
+                    self.status_var.set(f"Downloading {path.name}...")
+                case TaskDownloadCompleted(path=path):
+                    if entry := self._file_iids.get(path):
+                        course_id, child_iid = entry
+                        self.tree.item(child_iid, values=("Completed", "100%"))
+                        if counts := self._course_progress.get(course_id):
+                            counts[0] += 1
+                            if iid := self._course_iids.get(course_id):
+                                self.tree.item(
+                                    iid,
+                                    values=(
+                                        "Syncing",
+                                        self._format_progress(
+                                            counts[0], counts[1]
+                                        ),
+                                    ),
+                                )
+                case TaskDownloadFailed(path=path):
+                    if entry := self._file_iids.get(path):
+                        _, child_iid = entry
+                        self.tree.item(child_iid, values=("Failed", "0%"))
+                case CourseSyncCompleted(course=course, error=error):
+                    if iid := self._course_iids.get(course.id):
+                        counts = self._course_progress.get(course.id)
+                        if error is None:
+                            self.tree.item(iid, values=("Completed", "100%"))
+                        else:
+                            pct = (
+                                self._format_progress(counts[0], counts[1])
+                                if counts
+                                else "0%"
+                            )
+                            self.tree.item(iid, values=("Failed", pct))
             self.progress_queue.task_done()
 
     async def do_sync(self):
@@ -574,14 +549,10 @@ class SyncFrame(AppFrame):
                     self.tree.item(iid, values=("Queued", "0%"))
                 self._course_progress.pop(course.id, None)
 
-            listener = _TreeProgressListener(
-                cast(MainApp, self.master).loop, self.progress_queue
-            )
             await asyncio.to_thread(
                 idat_sync.sync_courses,
                 path,
                 selected,
-                progress_listener=listener,
             )
             await self.progress_queue.put(("status", "Sync done."))
         except Exception as exc:
