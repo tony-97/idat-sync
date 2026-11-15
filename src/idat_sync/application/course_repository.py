@@ -70,6 +70,10 @@ class CourseRepository:
         """Populate sections and modules for a single course."""
         return await self.course_gateway.populate_course_sections(course)
 
+    def invalidate_cache(self) -> None:
+        """Invalidate cached course gateway state before a fresh sync."""
+        self.course_gateway.invalidate_cache()
+
     async def _get_module_content(self, module: CourseModule) -> list[Content]:
         items: list[Content] = list(module.inline_contents)
         items.extend(await self.list_url_content(module.contents))

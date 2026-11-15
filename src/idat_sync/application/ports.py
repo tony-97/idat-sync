@@ -74,6 +74,9 @@ class CourseGateway(Protocol):
     async def populate_course_sections(self, course: Course) -> Course:
         ...
 
+    def invalidate_cache(self) -> None:
+        ...
+
 
 class RecordingGateway(Protocol):
     async def fetch_recordings(self, course_name: str) -> list[RecordingContent]:

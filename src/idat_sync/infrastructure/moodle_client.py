@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Self
 import httpx
 
 from idat_sync.application.ports import CredentialsExpiredError
@@ -52,6 +52,16 @@ class MoodleClient:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.request_delay = request_delay
+        self._client = httpx.AsyncClient()
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
     async def call_ws(self, function: str, **kwargs: Any) -> Any:
         """Call a Moodle web service endpoint with the provided parameters."""
@@ -62,8 +72,7 @@ class MoodleClient:
             "moodlewsrestformat": "json",
             **kwargs,
         }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, data=payload, timeout=45)
+        response = await self._client.post(url, data=payload, timeout=45)
         if response.status_code in (401, 403):
             raise CredentialsExpiredError(
                 f"HTTP {response.status_code}: Moodle credentials expired."
@@ -112,25 +121,24 @@ class MoodleClient:
 
     async def download_file(self, url: str, dest: BinaryIO) -> None:
         """Stream an authenticated Moodle file into dest and await request_delay."""
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "GET",
-                url,
-                params={"wstoken": self.token, "token": self.token},
-                follow_redirects=True,
-                timeout=60,
-                headers=REQUEST_HEADER,
-            ) as response:
-                if response.status_code == 401:
-                    raise CredentialsExpiredError(
-                        "401 Unauthorized: your session cookie/token is missing/expired."
-                    )
-                if response.status_code == 403:
-                    raise CredentialsExpiredError(
-                        "403 Forbidden: your session cookie is missing/expired."
-                    )
-                response.raise_for_status()
-                async for part in response.aiter_bytes(chunk_size=1024 * 256):
-                    if part:
-                        dest.write(part)
-                await asyncio.sleep(self.request_delay)
+        async with self._client.stream(
+            "GET",
+            url,
+            params={"wstoken": self.token, "token": self.token},
+            follow_redirects=True,
+            timeout=60,
+            headers=REQUEST_HEADER,
+        ) as response:
+            if response.status_code == 401:
+                raise CredentialsExpiredError(
+                    "401 Unauthorized: your session cookie/token is missing/expired."
+                )
+            if response.status_code == 403:
+                raise CredentialsExpiredError(
+                    "403 Forbidden: your session cookie is missing/expired."
+                )
+            response.raise_for_status()
+            async for part in response.aiter_bytes(chunk_size=1024 * 256):
+                if part:
+                    dest.write(part)
+            await asyncio.sleep(self.request_delay)

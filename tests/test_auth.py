@@ -478,9 +478,13 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                     with self.assertRaises(expected_exception):
                         asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
                 else:
-                    self.assertIsNone(
-                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                    )
+                    with self.assertLogs(
+                        "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
+                    ) as log_cm:
+                        self.assertIsNone(
+                            asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+                        )
+                    self.assertTrue(any(r.exc_info is not None for r in log_cm.records))
             if expect_context_close:
                 mock_context.close.assert_awaited_once()
             else:
@@ -704,19 +708,28 @@ class TestLoginFrame(unittest.TestCase):
                 await task
 
             self.assertIn("sso boom", stderr_buf.getvalue())
+            self.assertIn("sso boom", frame.error_var.get())
             self.assertEqual(str(login_button["state"]), "normal")
             self.assertEqual(master.switched_to_sync, 0)
 
-            # Successful submission strips username, preserves password, switches to sync
+            # Returning False displays an actionable failure message; starting a valid login clears it
+            moodle.token = None
+            await frame.do_login()
+            self.assertTrue(bool(frame.error_var.get()))
+            self.assertEqual(master.switched_to_sync, 0)
+
+            # Successful submission strips username, preserves password, clears error_var, switches to sync
+            moodle.token = "tok123"
             sharepoint.started = None
             sharepoint.release = None
             sharepoint.error = None
             await frame.do_login()
 
-            self.assertEqual(moodle.calls, [("jdoe", " secret "), ("jdoe", " secret ")])
+            self.assertEqual(frame.error_var.get(), "")
+            self.assertEqual(moodle.calls, [("jdoe", " secret "), ("jdoe", " secret "), ("jdoe", " secret ")])
             self.assertEqual(
                 sharepoint.calls,
-                [("jdoe@custom.edu", " secret "), ("jdoe@custom.edu", " secret ")],
+                [("jdoe@custom.edu", " secret "), ("jdoe@custom.edu", " secret "), ("jdoe@custom.edu", " secret ")],
             )
             self.assertEqual(master.switched_to_sync, 1)
             self.assertEqual(str(login_button["state"]), "normal")
@@ -725,8 +738,15 @@ class TestLoginFrame(unittest.TestCase):
             self._set_entry(frame.user_entry, "   ")
             self.assertEqual(str(login_button["state"]), "disabled")
             await frame.do_login()
-            self.assertEqual(len(moodle.calls), 2)
+            self.assertEqual(len(moodle.calls), 3)
             self.assertEqual(str(login_button["state"]), "disabled")
+
+        error_labels = [
+            w for w in frame.winfo_children()
+            if isinstance(w, tk.Label) and str(w.cget("textvariable")) == str(frame.error_var)
+        ]
+        self.assertEqual(len(error_labels), 1)
+        self.assertEqual(str(error_labels[0].cget("fg")), "red")
 
         asyncio.run(exercise_do_login())
 
@@ -869,6 +889,7 @@ class TestSyncFrame(unittest.TestCase):
                     self.assertFalse(hasattr(frame, "progress_queue"))
                     self.assertFalse(hasattr(frame, "update_progress"))
                     mock_sync = MagicMock()
+                    mock_sync.aclose = AsyncMock()
                     mock_sync.list_courses = AsyncMock(
                         return_value=[past_course, current_course]
                     )
@@ -1023,6 +1044,83 @@ class TestSyncFrame(unittest.TestCase):
                         self.assertEqual(master.switched_to_login, 0)
                         self.assertTrue(creds_file.exists())
                         self.assertIn("Logout", frame.status_var.get())
+
+                        # 5. Repeat do_sync clears only checked Course.sections without recreating IDATSync
+                        from idat_sync.domain.course import CourseSection
+
+                        current_course.sections = [CourseSection(id=1, name="Cached")]
+                        past_course.sections = [CourseSection(id=2, name="Kept")]
+                        mock_sync.sync_courses.side_effect = fake_sync_courses
+                        await frame.do_sync()
+                        self.assertEqual(current_course.sections, [])
+                        self.assertEqual(len(past_course.sections), 1)
+                        self.assertEqual(mock_factory.call_count, 2)
+
+                        # 6. Logout ignores while syncing, otherwise closes IDATSync and switches to login
+                        frame.is_syncing.set(True)
+                        await frame.do_logout()
+                        mock_sync.aclose.assert_not_awaited()
+                        self.assertEqual(master.switched_to_login, 0)
+
+                        frame.is_syncing.set(False)
+                        await frame.do_logout()
+                        mock_sync.aclose.assert_awaited_once_with()
+                        self.assertIsNone(frame.idat_sync)
+                        self.assertEqual(master.switched_to_login, 1)
+                finally:
+                    master.destroy()
+
+            asyncio.run(exercise())
+
+    def test_sync_frame_closes_partial_service_on_list_courses_failure_and_logout_switches_even_if_aclose_raises(self):
+        from idat_sync.application.ports import Credentials
+        from idat_sync.config import SyncConfig
+        from idat_sync.ui.sync_frame import SyncFrame
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds_file = Path(tmpdir) / "session.json"
+            creds_file.write_text('{"token":"t"}', encoding="utf-8")
+            creds: Credentials = {"token": "t", "sharepoint_storage_state": {"cookies": []}}
+            config = SyncConfig(session_file=creds_file, request_delay=0.0)
+
+            async def exercise():
+                class StubMaster(tk.Tk):
+                    def __init__(self) -> None:
+                        super().__init__()
+                        self.withdraw()
+                        self.loop = asyncio.get_running_loop()
+                        self.switched_to_login = 0
+
+                    def center_window(self, w: int, h: int) -> None:
+                        pass
+
+                    def switch_to_login(self) -> None:
+                        self.switched_to_login += 1
+
+                master = StubMaster()
+                try:
+                    frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
+                    partial_sync = MagicMock()
+                    partial_sync.aclose = AsyncMock()
+                    partial_sync.list_courses = AsyncMock(side_effect=RuntimeError("list failed"))
+
+                    with patch(
+                        "idat_sync.ui.sync_frame.create_sync_service",
+                        new=AsyncMock(return_value=partial_sync),
+                    ):
+                        await frame.load_idat_sync(creds)
+
+                    partial_sync.aclose.assert_awaited_once_with()
+                    self.assertIsNone(frame.idat_sync)
+                    self.assertIn("list failed", frame.status_var.get())
+
+                    failing_sync = MagicMock()
+                    failing_sync.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
+                    frame.idat_sync = failing_sync
+                    with self.assertRaisesRegex(RuntimeError, "close boom"):
+                        await frame.do_logout()
+                    self.assertIsNone(frame.idat_sync)
+                    self.assertEqual(master.switched_to_login, 1)
                 finally:
                     master.destroy()
 
@@ -1047,6 +1145,39 @@ class TestSyncFrame(unittest.TestCase):
             mock_app.return_value.run.assert_called_once_with()
             self.assertIs(sys.stdout, orig_stdout)
             self.assertIs(sys.stderr, orig_stderr)
+
+    def test_app_frame_aclose_and_main_app_on_close_closes_frame_before_destroy(self):
+        from idat_sync.config import SyncConfig
+        from idat_sync.ui.app import AppFrame, MainApp
+
+        async def exercise():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "missing_session.json")
+                app = MainApp(config=cfg)
+                app.withdraw()
+                try:
+                    self.assertTrue(bool(app.protocol("WM_DELETE_WINDOW")))
+                    base_frame = AppFrame(app)
+                    await base_frame.aclose()
+                    base_frame.destroy()
+
+                    active_frame = MagicMock()
+                    active_frame.aclose = AsyncMock(side_effect=RuntimeError("close error"))
+                    app._MainApp__frame = active_frame  # type: ignore[attr-defined]
+
+                    with patch.object(app, "destroy", wraps=app.destroy) as mock_destroy:
+                        with self.assertRaisesRegex(RuntimeError, "close error"):
+                            await app.on_close()
+                        await app.on_close()
+
+                    active_frame.aclose.assert_awaited_once_with()
+                    mock_destroy.assert_called_once_with()
+                finally:
+                    with contextlib.suppress(tk.TclError):
+                        app.destroy()
+                    app.loop.close()
+
+        asyncio.run(exercise())
 
 
 if __name__ == "__main__":

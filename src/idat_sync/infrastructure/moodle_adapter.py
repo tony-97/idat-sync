@@ -228,3 +228,7 @@ class MoodleAdapter:
             course.id, assignments=course_assignments
         )
         return course
+
+    def invalidate_cache(self) -> None:
+        """Clear cached Moodle assignment metadata so the next sync refreshes it."""
+        self._assignments_cache = None

@@ -228,7 +228,7 @@ class SyncFrame(AppFrame):
         self.logout_button = tk.Button(
             button_frame,
             text="Logout",
-            command=lambda: cast(MainApp, self.master).switch_to_login(),
+            command=async_handler(self.do_logout),
         )
         self.logout_button.pack(side=tk.LEFT)
         self.sync_button = tk.Button(
@@ -401,15 +401,34 @@ class SyncFrame(AppFrame):
         if row_id and self.tree.parent(row_id) == "":
             self.toggle_course_row(row_id)
 
+    async def aclose(self) -> None:
+        service, self.idat_sync = self.idat_sync, None
+        if service is not None:
+            await service.aclose()
+
+    async def do_logout(self) -> None:
+        if self.is_syncing.get():
+            return
+        try:
+            await self.aclose()
+        finally:
+            cast(MainApp, self.master).switch_to_login()
+
     async def _ensure_sync_service(self) -> IDATSync:
-        if self.idat_sync is None:
+        created = self.idat_sync is None
+        if created:
             self.idat_sync = await create_sync_service(
                 self.credentials,
                 self.config,
             )
-        if not self.courses_loaded:
-            courses = await self.idat_sync.list_courses()
-            self._populate_courses(courses)
+        try:
+            if not self.courses_loaded:
+                courses = await self.idat_sync.list_courses()
+                self._populate_courses(courses)
+        except Exception:
+            if created:
+                await self.aclose()
+            raise
         return self.idat_sync
 
     def _set_error_status(self, exc: Exception) -> None:
@@ -425,7 +444,7 @@ class SyncFrame(AppFrame):
         try:
             await self._ensure_sync_service()
         except Exception as exc:
-            self.idat_sync = None
+            await self.aclose()
             self.courses_loaded = False
             self._set_error_status(exc)
         finally:
@@ -524,6 +543,7 @@ class SyncFrame(AppFrame):
                 return
 
             for course in selected:
+                course.sections.clear()
                 if iid := self._course_iids.get(course.id):
                     self._clear_children(iid)
                     self.tree.item(iid, values=("Queued", "0%"))

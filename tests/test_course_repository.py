@@ -320,6 +320,10 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].path, Path("CourseDir/Sesión 1 2/_CON/nota.html"))
 
+    def test_invalidate_cache_delegates_to_course_gateway(self):
+        self.repo.invalidate_cache()
+        self.mock_course_gateway.invalidate_cache.assert_called_once_with()
+
 
 class TestInProgressCourseDetection(unittest.TestCase):
     def test_ranks_academic_terms_and_groups_split_sections(self):

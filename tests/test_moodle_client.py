@@ -12,23 +12,25 @@ from idat_sync.infrastructure.moodle_client import (
 
 
 def _mock_async_client(mock_client_cls, *, post_return=None, stream_cm=None):
-    mock_async_client = MagicMock()
+    mock_async_client = mock_client_cls.return_value
+    mock_async_client.aclose = AsyncMock()
     if post_return is not None:
         mock_async_client.post = AsyncMock(return_value=post_return)
     if stream_cm is not None:
         mock_async_client.stream = MagicMock(return_value=stream_cm)
-    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_async_client)
-    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
     return mock_async_client
 
 
 class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.token = "fake_test_token"
-        self.client = MoodleClient(
+        self.base_url = "https://aulavirtual.idat.edu.pe"
+
+    def _make_client(self, *, request_delay: float = 30.0) -> MoodleClient:
+        return MoodleClient(
             token=self.token,
-            base_url="https://aulavirtual.idat.edu.pe",
-            request_delay=30.0,
+            base_url=self.base_url,
+            request_delay=request_delay,
         )
 
     @patch("idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock)
@@ -37,8 +39,9 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_response = MagicMock()
         mock_response.json.return_value = {"courses": [{"id": 1, "fullname": "Test Course"}]}
         mock_async_client = _mock_async_client(mock_client_cls, post_return=mock_response)
+        client = self._make_client()
 
-        result = await self.client.call_ws("core_course_get_enrolled_courses", classification="all")
+        result = await client.call_ws("core_course_get_enrolled_courses", classification="all")
 
         mock_async_client.post.assert_awaited_once()
         _, kwargs = mock_async_client.post.call_args
@@ -60,9 +63,10 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             "message": "Invalid token",
         }
         _mock_async_client(mock_client_cls, post_return=mock_response)
+        client = self._make_client()
 
         with self.assertRaises(RuntimeError) as ctx:
-            await self.client.call_ws("any_function")
+            await client.call_ws("any_function")
 
         self.assertIn("invalidtoken", str(ctx.exception))
         self.assertIn("Invalid token", str(ctx.exception))
@@ -72,7 +76,8 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         raw_courses = [{"id": 101, "fullname": "Course 101"}]
         mock_call_ws.return_value = {"courses": raw_courses}
 
-        courses = await self.client.fetch_enrolled_courses()
+        async with self._make_client() as client:
+            courses = await client.fetch_enrolled_courses()
         mock_call_ws.assert_awaited_once_with(
             "core_course_get_enrolled_courses_by_timeline_classification",
             classification="all",
@@ -88,7 +93,8 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         raw_assignments = [{"id": 101, "assignments": [{"id": 5, "cmid": 12, "name": "Tarea"}]}]
         mock_call_ws.return_value = {"courses": raw_assignments}
 
-        result = await self.client.fetch_assignments()
+        async with self._make_client() as client:
+            result = await client.fetch_assignments()
         mock_call_ws.assert_awaited_once_with("mod_assign_get_assignments")
         self.assertEqual(result, raw_assignments)
         self.assertIsInstance(result, list)
@@ -99,7 +105,8 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         raw_sections = [{"id": 1, "name": "General", "modules": []}]
         mock_call_ws.return_value = raw_sections
 
-        result = await self.client.fetch_course_contents(course_id=101)
+        async with self._make_client() as client:
+            result = await client.fetch_course_contents(course_id=101)
         mock_call_ws.assert_awaited_once_with("core_course_get_contents", courseid=101)
         self.assertEqual(result, raw_sections)
         self.assertIsInstance(result, list)
@@ -138,10 +145,11 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
         stream_cm.__aexit__ = AsyncMock(return_value=None)
         mock_async_client = _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+        client = self._make_client()
 
         dest = io.BytesIO()
         target_url = "https://aulavirtual.idat.edu.pe/pluginfile.php/123/file.pdf"
-        await self.client.download_file(target_url, dest)
+        await client.download_file(target_url, dest)
 
         mock_async_client.stream.assert_called_once_with(
             "GET",
@@ -165,10 +173,11 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
         stream_cm.__aexit__ = AsyncMock(return_value=None)
         _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+        client = self._make_client()
 
         dest = io.BytesIO()
         with self.assertRaises(RuntimeError) as ctx:
-            await self.client.download_file("https://aulavirtual.idat.edu.pe/secret.pdf", dest)
+            await client.download_file("https://aulavirtual.idat.edu.pe/secret.pdf", dest)
 
         self.assertIn("403 Forbidden", str(ctx.exception))
         self.assertEqual(dest.getvalue(), b"")
@@ -186,10 +195,11 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
         stream_cm.__aexit__ = AsyncMock(return_value=None)
         _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+        client = self._make_client()
 
         dest = io.BytesIO()
         with self.assertRaises(httpx.HTTPStatusError):
-            await self.client.download_file("https://aulavirtual.idat.edu.pe/missing.pdf", dest)
+            await client.download_file("https://aulavirtual.idat.edu.pe/missing.pdf", dest)
 
         mock_sleep.assert_not_awaited()
 
@@ -200,12 +210,13 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
     ):
         from idat_sync.application.ports import CredentialsExpiredError
 
+        client = self._make_client()
         for status in (401, 403):
             mock_resp = MagicMock()
             mock_resp.status_code = status
             _mock_async_client(mock_client_cls, post_return=mock_resp)
             with self.assertRaises(CredentialsExpiredError):
-                await self.client.call_ws("core_course_get_contents")
+                await client.call_ws("core_course_get_contents")
 
             mock_dl = MagicMock()
             mock_dl.status_code = status
@@ -214,7 +225,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             stream_cm.__aexit__ = AsyncMock(return_value=None)
             _mock_async_client(mock_client_cls, stream_cm=stream_cm)
             with self.assertRaises(CredentialsExpiredError):
-                await self.client.download_file("https://aulavirtual.idat.edu.pe/f", io.BytesIO())
+                await client.download_file("https://aulavirtual.idat.edu.pe/f", io.BytesIO())
 
         token_resp = MagicMock()
         token_resp.status_code = 200
@@ -225,7 +236,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         }
         _mock_async_client(mock_client_cls, post_return=token_resp)
         with self.assertRaises(CredentialsExpiredError):
-            await self.client.call_ws("core_course_get_contents")
+            await client.call_ws("core_course_get_contents")
 
         other_resp = MagicMock()
         other_resp.status_code = 200
@@ -236,10 +247,41 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         }
         _mock_async_client(mock_client_cls, post_return=other_resp)
         with self.assertRaises(RuntimeError) as ctx:
-            await self.client.call_ws("core_course_get_contents")
+            await client.call_ws("core_course_get_contents")
         self.assertNotIsInstance(ctx.exception, CredentialsExpiredError)
 
         mock_sleep.assert_not_awaited()
+
+    @patch("idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
+    async def test_reuses_single_shared_async_client_and_closes_via_aclose_and_context_manager(
+        self, mock_client_cls, mock_sleep
+    ):
+        async def _aiter_bytes(chunk_size: int):
+            yield b"data"
+
+        post_resp = MagicMock()
+        post_resp.json.return_value = {"courses": []}
+        dl_resp = MagicMock(status_code=200)
+        dl_resp.aiter_bytes = MagicMock(side_effect=_aiter_bytes)
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=dl_resp)
+        stream_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_async_client = _mock_async_client(
+            mock_client_cls, post_return=post_resp, stream_cm=stream_cm
+        )
+
+        async with self._make_client(request_delay=0.0) as client:
+            await client.call_ws("core_webservice_get_site_info")
+            await client.download_file(
+                "https://aulavirtual.idat.edu.pe/pluginfile.php/1/a.pdf",
+                io.BytesIO(),
+            )
+
+        mock_client_cls.assert_called_once_with()
+        mock_async_client.post.assert_awaited_once()
+        mock_async_client.stream.assert_called_once()
+        mock_async_client.aclose.assert_awaited_once_with()
 
 
 class TestMoodleTokenClient(unittest.TestCase):

@@ -321,6 +321,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         cookies = [
             {"name": "FedAuth", "value": "foreign", "domain": ".sharepoint.com"},
             {"name": "rtFa", "value": "exact", "domain": "intranet"},
+            {"name": "FedAuth", "value": "evil", "domain": "evil.sharepoint.com.attacker.test"},
         ]
         client = await SharepointClient.create(
             cookies=cookies,  # type: ignore[arg-type]
@@ -329,7 +330,53 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             request_delay=0.0,
         )
 
-        self.assertEqual(client.sharepoint_cookies, {"rtFa": "exact"})
+        self.assertFalse(hasattr(client, "sharepoint_cookies"))
+        self.assertEqual(client.cookies_for_host("intranet"), {"rtFa": "exact"})
+
+    @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    async def test_cookies_for_host_isolates_hosts_and_prefers_exact_match(self, mock_ctx_cls, mock_sleep):
+        captured_callbacks = []
+
+        def build_ctx(site_url):
+            ctx = MagicMock()
+            ctx.with_cookies.side_effect = lambda cb: (captured_callbacks.append((site_url, cb)), ctx)[1]
+            ctx.with_auto_retry.return_value = ctx
+            personal_site = MagicMock()
+            personal_site.url = "https://contoso-my.sharepoint.com/personal/user"
+            ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+                return_value=personal_site
+            )
+            return ctx
+
+        mock_ctx_cls.side_effect = build_ctx
+
+        cookies = [
+            {"name": "FedAuth", "value": "exact-acad-first", "domain": "Contoso.SharePoint.com"},
+            {"name": "FedAuth", "value": "wildcard", "domain": ".sharepoint.com"},
+            {"name": "rtFa", "value": "personal-rtfa", "domain": "contoso-my.sharepoint.com"},
+            {"name": "FedAuth", "value": "personal-fedauth", "domain": "contoso-my.sharepoint.com"},
+            {"name": "SPOIDCRL", "value": "evil", "domain": "evil.sharepoint.com.attacker.test"},
+            {"name": "rtFa", "value": "exact-acad-last", "domain": "contoso.sharepoint.com"},
+        ]
+        client = await SharepointClient.create(
+            cookies=cookies,  # type: ignore[arg-type]
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
+            request_delay=0.0,
+        )
+
+        acad_cookies = client.cookies_for_host("contoso.sharepoint.com")
+        self.assertEqual(acad_cookies, {"FedAuth": "exact-acad-first", "rtFa": "exact-acad-last"})
+        personal_cookies = client.cookies_for_host("contoso-my.sharepoint.com")
+        self.assertEqual(personal_cookies, {"FedAuth": "personal-fedauth", "rtFa": "personal-rtfa"})
+        self.assertEqual(client.cookies_for_host("other.sharepoint.com"), {"FedAuth": "wildcard"})
+        self.assertEqual(client.cookies_for_host("evil.sharepoint.com.attacker.test"), {"SPOIDCRL": "evil"})
+
+        acad_cb = next(cb for url, cb in captured_callbacks if url == "https://contoso.sharepoint.com/sites/ACAD")
+        personal_cb = next(cb for url, cb in captured_callbacks if url == "https://contoso-my.sharepoint.com")
+        self.assertEqual(acad_cb(), {"FedAuth": "exact-acad-first", "rtFa": "exact-acad-last"})
+        self.assertEqual(personal_cb(), {"FedAuth": "personal-fedauth", "rtFa": "personal-rtfa"})
 
     @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -741,6 +788,27 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
                 academic_site_url="https://idat628.sharepoint.com/sites/Academic",
                 request_delay=0.0,
             )
+
+        mock_transport_cls.return_value.aclose.assert_awaited_once_with()
+
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    async def test_async_context_manager_closes_shared_transport(
+        self, mock_ctx_cls, mock_transport_cls
+    ):
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
+        mock_ctx_cls.return_value = mock_ctx
+        mock_transport_cls.return_value.aclose = AsyncMock()
+
+        async with SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+            request_delay=0.0,
+        ) as client:
+            self.assertIsInstance(client, SharepointClient)
 
         mock_transport_cls.return_value.aclose.assert_awaited_once_with()
 

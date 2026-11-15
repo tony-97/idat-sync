@@ -62,12 +62,16 @@ async def create_sync_service(
         moodle_base_url=config.moodle_base_url,
     )
 
-    sharepoint_raw_client = await SharepointClient.create(
-        cookies,
-        sharepoint_personal_host=config.sharepoint_personal_host,
-        academic_site_url=config.sharepoint_academic_site_url,
-        request_delay=config.request_delay,
-    )
+    try:
+        sharepoint_raw_client = await SharepointClient.create(
+            cookies,
+            sharepoint_personal_host=config.sharepoint_personal_host,
+            academic_site_url=config.sharepoint_academic_site_url,
+            request_delay=config.request_delay,
+        )
+    except BaseException:
+        await moodle_client.aclose()
+        raise
     sharepoint_adapter = SharepointApiAdapter(
         sharepoint_raw_client,
         semester_start=config.semester_start,
@@ -110,6 +114,7 @@ async def create_sync_service(
         task_orchestrator=task_orchestrator,
         file_system=file_system,
         recordings_folder_name=config.recordings_folder_name,
+        closers=[moodle_client.aclose, sharepoint_raw_client.aclose],
     )
 
 

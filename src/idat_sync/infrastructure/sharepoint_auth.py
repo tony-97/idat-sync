@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import platform
 from typing import Awaitable, Callable, cast
 
 from playwright.async_api import async_playwright
 
 from idat_sync.application.ports import StorageStateData
+
+_logger = logging.getLogger(__name__)
 
 
 class SharepointBrowserAuth:
@@ -115,5 +118,6 @@ class SharepointBrowserAuth:
                     if cleanup_error is not None and not cancelled:
                         raise cleanup_error
         except Exception:
+            _logger.exception("SharePoint browser authentication failed")
             storage_state = None
         return storage_state

@@ -1,7 +1,8 @@
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import contextlib
 from pathlib import Path
+from typing import Self
 
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
@@ -40,12 +41,32 @@ class IDATSync:
         task_orchestrator: TaskOrchestrator,
         file_system: FileSystemPort,
         recordings_folder_name: str,
+        closers: Sequence[Callable[[], Awaitable[None]]] = (),
     ) -> None:
         self.course_repository = course_repository
         self.download_manager = download_manager
         self.task_orchestrator = task_orchestrator
         self.file_system = file_system
         self.recordings_folder_name = recordings_folder_name
+        self._closers = list(closers)
+
+    async def aclose(self) -> None:
+        closers, self._closers = self._closers, []
+        first_error: BaseException | None = None
+        for closer in closers:
+            try:
+                await closer()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
     async def list_courses(self) -> list[Course]:
         return await self.course_repository.list_courses()
@@ -148,6 +169,7 @@ class IDATSync:
         root_folder: str | Path,
         courses: Sequence[Course],
     ) -> AsyncIterator[SyncEvent]:
+        self.course_repository.invalidate_cache()
         root_path = Path(root_folder)
         for course in courses:
             course_dir = root_path / safe_filename(course.name)

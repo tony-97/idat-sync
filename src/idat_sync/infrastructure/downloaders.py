@@ -83,10 +83,12 @@ class StringDownloader(Downloader[StringContent]):
         return bool("".join(content.contents).strip())
 
     async def download(self, content: StringContent) -> None:
-        text = "".join(content.contents).strip()
-        Path(content.path).parent.mkdir(parents=True, exist_ok=True)
-        with open(content.path, "w", encoding="utf-8") as f:
-            f.write(text)
+        data = "".join(content.contents).strip().encode("utf-8")
+
+        async def _write(f: BinaryIO) -> None:
+            f.write(data)
+
+        await _atomic_download(content.path, _write)
 
 
 class RecordingDownloader(Downloader[RecordingContent]):

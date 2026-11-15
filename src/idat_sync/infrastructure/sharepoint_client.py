@@ -35,11 +35,7 @@ class SharepointClient:
             "ServerRelativeUrl",
             "TimeLastModified",
         ]
-        host_parts = sharepoint_personal_host.split(".", 1)
-        subdomain = f".{host_parts[1]}" if len(host_parts) > 1 else ""
-        self.sharepoint_cookies = self._load_auth_cookies(
-            cookies, sharepoint_personal_host, subdomain
-        )
+        self._cookies = list(cookies)
         self._transport = HttpxTransport()
         self.client = self.get_client(academic_site_url.rstrip("/"))
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
@@ -75,10 +71,17 @@ class SharepointClient:
     async def aclose(self) -> None:
         await self._transport.aclose()
 
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
     def get_client(self, site_url: str) -> ClientContext:
+        target_host = urllib.parse.urlparse(site_url).hostname or ""
         ctx = (
             ClientContext(site_url)
-            .with_cookies(lambda: self.sharepoint_cookies)
+            .with_cookies(lambda host=target_host: self.cookies_for_host(host))
             .with_auto_retry()
         )
         ctx.pending_request().with_async_transport(self._transport)
@@ -101,21 +104,25 @@ class SharepointClient:
             return self.get_client(site_url)
         return self.client
 
-    def _load_auth_cookies(
-        self,
-        cookies: list[CookieData],
-        domain: str,
-        subdomain: str = "",
-    ) -> dict[str, str]:
-        auth_cookies: dict[str, str] = {}
-        for cookie in cookies:
+    def cookies_for_host(self, host: str) -> dict[str, str]:
+        target_host = host.lower()
+        if not target_host:
+            return {}
+        wildcard_cookies: dict[str, str] = {}
+        exact_cookies: dict[str, str] = {}
+        for cookie in self._cookies:
             name = cookie.get("name")
-            cookie_domain = cookie.get("domain", "")
-            if (name in {"FedAuth", "rtFa", "SPOIDCRL"}) and (
-                domain == cookie_domain or (bool(subdomain) and subdomain in cookie_domain)
+            if name not in {"FedAuth", "rtFa", "SPOIDCRL"}:
+                continue
+            cookie_domain = cookie.get("domain", "").lower()
+            if cookie_domain == target_host:
+                exact_cookies[name] = cookie.get("value", "")
+            elif cookie_domain.startswith(".") and (
+                target_host == cookie_domain.lstrip(".")
+                or target_host.endswith(cookie_domain)
             ):
-                auth_cookies[name] = cookie.get("value", "")
-        return auth_cookies
+                wildcard_cookies[name] = cookie.get("value", "")
+        return {**wildcard_cookies, **exact_cookies}
 
     async def _await_query(self, coro: Awaitable[_ResultT]) -> _ResultT:
         try:

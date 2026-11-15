@@ -17,7 +17,7 @@ class LoginFrame(AppFrame):
         self.auth = auth
         self.auth.logout()
         window_width = 300
-        window_height = 150
+        window_height = 185
         master.center_window(window_width, window_height)
         master.title("IDAT Sync Login")
 
@@ -36,6 +36,11 @@ class LoginFrame(AppFrame):
         )
         self.pass_entry.pack()
         self.pass_entry.bind("<Return>", self.do_login)
+
+        self.error_var = tk.StringVar(value="")
+        tk.Label(
+            self, textvariable=self.error_var, fg="red", wraplength=270
+        ).pack(pady=(5, 0))
 
         self.login_button = tk.Button(
             self,
@@ -98,6 +103,7 @@ class LoginFrame(AppFrame):
             and (user := self.user_var.get().strip())
             and (password := self.pass_var.get())
         ):
+            self.error_var.set("")
             self.is_login.set(True)
             try:
                 login_task = asyncio.create_task(
@@ -105,9 +111,16 @@ class LoginFrame(AppFrame):
                 )
                 if await login_task:
                     cast(MainApp, self.master).switch_to_sync()
+                else:
+                    self.error_var.set(
+                        "Login failed. Check your credentials or MFA and try again."
+                    )
             except Exception as e:
                 errors = e.exceptions if isinstance(e, ExceptionGroup) else (e,)
                 for err in errors:
                     _logger.error("Login error: %s", err)
+                self.error_var.set(
+                    "; ".join(str(err) for err in errors) or "Login failed."
+                )
             finally:
                 self.is_login.set(False)

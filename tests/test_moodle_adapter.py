@@ -334,6 +334,37 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertFalse(hasattr(MoodleAdapter, "token"))
         self.assertFalse(hasattr(self.adapter, "token"))
 
+    def test_invalidate_cache_resets_cached_assignments_so_next_populate_refetches(self):
+        self.assertTrue(hasattr(CourseGateway, "invalidate_cache"))
+        self.mock_client.fetch_assignments = AsyncMock(
+            side_effect=[
+                [{"id": 10, "assignments": [{"id": 1, "cmid": 50, "name": "Old", "intro": "<p>old</p>"}]}],
+                [{"id": 10, "assignments": [{"id": 1, "cmid": 50, "name": "New", "intro": "<p>new</p>"}]}],
+            ]
+        )
+        self.mock_client.fetch_course_contents = AsyncMock(
+            return_value=[
+                {"id": 1, "name": "S1", "summary": "", "modules": [{"id": 50, "modname": "assign", "name": "A1"}]}
+            ]
+        )
+
+        async def exercise():
+            c1 = Course(id=10, name="C10")
+            c2 = Course(id=20, name="C20")
+            await self.adapter.populate_course_sections(c1)
+            await self.adapter.populate_course_sections(c2)
+            self.assertEqual(self.mock_client.fetch_assignments.await_count, 1)
+
+            self.adapter.invalidate_cache()
+            c1_refreshed = Course(id=10, name="C10")
+            await self.adapter.populate_course_sections(c1_refreshed)
+            return c1, c1_refreshed
+
+        c1, c1_refreshed = asyncio.run(exercise())
+        self.assertEqual(self.mock_client.fetch_assignments.await_count, 2)
+        self.assertEqual(c1.sections[0].modules[0].inline_contents[0].contents, ["<p>old</p>"])
+        self.assertEqual(c1_refreshed.sections[0].modules[0].inline_contents[0].contents, ["<p>new</p>"])
+
 
 class TestMoodleTokenAdapter(unittest.TestCase):
     def test_requires_client_without_base_url(self):

@@ -725,6 +725,33 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(sp_dl, "request_delay"))
         self.assertEqual(rec_dl.sharepoint_personal_host, "contoso-my.sharepoint.com")
 
+        with patch.object(
+            sp_adapter.sp_client._transport, "aclose", new_callable=AsyncMock
+        ) as mock_sp_transport_aclose:
+            await service.aclose()
+        self.assertTrue(moodle_adapter.client._client.is_closed)
+        mock_sp_transport_aclose.assert_awaited_once_with()
+
+    async def test_create_sync_service_closes_moodle_client_when_sharepoint_create_fails(self):
+        from idat_sync.application.ports import CredentialsExpiredError
+        from idat_sync.bootstrap import create_sync_service
+        from idat_sync.config import SyncConfig
+
+        mock_moodle_client = MagicMock()
+        mock_moodle_client.aclose = AsyncMock()
+        with patch("idat_sync.bootstrap.MoodleClient", return_value=mock_moodle_client), patch(
+            "idat_sync.bootstrap.SharepointClient.create",
+            new_callable=AsyncMock,
+            side_effect=CredentialsExpiredError("expired"),
+        ):
+            with self.assertRaises(CredentialsExpiredError):
+                await create_sync_service(
+                    {"token": "tok123", "sharepoint_storage_state": {"cookies": []}},  # type: ignore[arg-type]
+                    config=SyncConfig(request_delay=0.0),
+                )
+
+        mock_moodle_client.aclose.assert_awaited_once_with()
+
     def test_create_auth_service_wires_sync_config_and_ui_avoids_infrastructure(self):
         from idat_sync.application.auth_service import AuthService
         from idat_sync.bootstrap import create_auth_service
@@ -1242,6 +1269,86 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(hasattr(service, "publish"))
         self.assertFalse(hasattr(service.task_orchestrator, "publish"))
+
+    async def test_string_downloader_writes_atomically_via_part_file_and_cleans_up_on_error(self):
+        from idat_sync.infrastructure.downloaders import StringDownloader
+
+        dl = StringDownloader()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "sub" / "note.html"
+            part_path = target.with_name("note.html.part")
+
+            with patch("idat_sync.infrastructure.downloaders.os.replace", wraps=os.replace) as mock_replace:
+                await dl.download(StringContent(target, 0, ["  <p>Hola</p>  "]))
+
+            mock_replace.assert_called_once_with(part_path, target)
+            self.assertEqual(target.read_text(encoding="utf-8"), "<p>Hola</p>")
+            self.assertFalse(part_path.exists())
+
+            with patch("idat_sync.infrastructure.downloaders.os.replace", side_effect=OSError("disk error")):
+                with self.assertRaises(OSError):
+                    await dl.download(StringContent(target, 0, ["<p>Corrupted</p>"]))
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "<p>Hola</p>")
+            self.assertFalse(part_path.exists())
+
+    async def test_idat_sync_sync_courses_invalidates_repository_cache_once_before_iterating(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.domain.course import Course
+        from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
+
+        call_order: list[str] = []
+        mock_repo = MagicMock(spec=CourseRepository)
+        mock_repo.invalidate_cache.side_effect = lambda: call_order.append("invalidate")
+
+        async def _populate(course: Course) -> Course:
+            call_order.append(f"populate:{course.id}")
+            return course
+
+        mock_repo.populate_course_sections = AsyncMock(side_effect=_populate)
+        mock_repo.get_course_content = AsyncMock(return_value=[])
+        mock_repo.get_recordings = AsyncMock(return_value=[])
+
+        fs = LocalFileSystemAdapter()
+        dm = DownloadManager([], fs)
+        orch = TaskOrchestrator([])
+        sync = IDATSync(mock_repo, dm, orch, fs, "Grabaciones")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            courses = [Course(id=1, name="C1"), Course(id=2, name="C2")]
+            _ = [event async for event in sync.sync_courses(tmpdir, courses)]
+
+        mock_repo.invalidate_cache.assert_called_once_with()
+        self.assertEqual(call_order, ["invalidate", "populate:1", "populate:2"])
+
+    async def test_idat_sync_aclose_and_context_manager_run_all_closers_once(self):
+        from idat_sync.application.course_repository import CourseRepository
+        from idat_sync.application.sync_service import IDATSync
+        from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
+
+        mock_repo = MagicMock(spec=CourseRepository)
+        fs = LocalFileSystemAdapter()
+        dm = DownloadManager([], fs)
+        orch = TaskOrchestrator([])
+
+        closer_a = AsyncMock(side_effect=RuntimeError("closer_a failed"))
+        closer_b = AsyncMock()
+        sync = IDATSync(mock_repo, dm, orch, fs, "Grabaciones", closers=[closer_a, closer_b])
+
+        with self.assertRaisesRegex(RuntimeError, "closer_a failed"):
+            await sync.aclose()
+
+        closer_a.assert_awaited_once_with()
+        closer_b.assert_awaited_once_with()
+        await sync.aclose()
+        closer_a.assert_awaited_once_with()
+        closer_b.assert_awaited_once_with()
+
+        closer_c = AsyncMock()
+        async with IDATSync(mock_repo, dm, orch, fs, "Grabaciones", closers=[closer_c]) as ctx_sync:
+            self.assertIsInstance(ctx_sync, IDATSync)
+        closer_c.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

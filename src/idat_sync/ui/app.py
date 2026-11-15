@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import tkinter as tk
 
-from async_tkinter_loop import async_mainloop
+from async_tkinter_loop import async_handler, async_mainloop
 
 from idat_sync.bootstrap import configure_logging, create_auth_service
 from idat_sync.config import SyncConfig, load_config
 
 
 class AppFrame(tk.Frame):
-    pass
+    async def aclose(self) -> None:
+        pass
 
 
 class MainApp(tk.Tk):
@@ -20,10 +21,22 @@ class MainApp(tk.Tk):
         self.config = config
         self.auth = create_auth_service(self.config)
         self.__frame: AppFrame | None = None
+        self._closing = False
+        self.protocol("WM_DELETE_WINDOW", async_handler(self.on_close))
         if self.auth.is_authenticated():
             self.switch_to_sync()
         else:
             self.switch_to_login()
+
+    async def on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            if self.__frame is not None:
+                await self.__frame.aclose()
+        finally:
+            self.destroy()
 
     def run(self):
         async_mainloop(self, self.loop)
