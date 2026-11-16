@@ -1230,12 +1230,19 @@ class TestSyncFrame(unittest.TestCase):
         orig_stdout = sys.stdout
         orig_stderr = sys.stderr
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_root = Path(tmpdir) / "app_data"
             cfg = SyncConfig(log_file=Path(tmpdir) / "app.log")
-            with patch("idat_sync.ui.app.load_config", return_value=cfg), patch(
+            with patch(
+                "idat_sync.ui.app.user_data_path", return_value=fake_root
+            ) as mock_user_data_path, patch(
+                "idat_sync.ui.app.load_config", return_value=cfg
+            ) as mock_load_cfg, patch(
                 "idat_sync.ui.app.configure_logging"
             ) as mock_cfg_log, patch("idat_sync.ui.app.MainApp") as mock_app:
                 app_mod.main()
 
+            mock_user_data_path.assert_called_once_with("idat-sync", appauthor=False)
+            mock_load_cfg.assert_called_once_with(fake_root)
             mock_cfg_log.assert_called_once_with(cfg.log_file)
             mock_app.assert_called_once_with(config=cfg)
             mock_app.return_value.run.assert_called_once_with()

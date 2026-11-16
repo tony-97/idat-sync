@@ -1,0 +1,3 @@
+# Platformdirs GUI Root and File-Based Credentials
+
+We keep `./` defaults in `SyncConfig` and `load_config(root=".")` for developer scripts and tests while having `ui.app.main()` pass `user_data_path("idat-sync", appauthor=False)` as `root` so `config.json`, `session.json`, and `log.err` live in a writable per-user directory rather than `/` (Finder LaunchServices CWD on macOS) or the read-only, code-signed `.app` bundle. `Credentials` continue to be stored via `JsonCredentialStore` with `0o600` permissions inside that folder instead of `keyring` / macOS Keychain because ad-hoc signed `.app` releases (`codesign -s -`) trigger repeated Keychain ACL prompts across updates and Windows Credential Locker imposes tight payload limits on Playwright cookie state.

@@ -159,23 +159,15 @@ def _coerce_field(name: str, value: Any) -> Any:
     return value
 
 
-def load_config(config_path: str | Path | None = None) -> SyncConfig:
-    """Load SyncConfig with precedence: IDAT_SYNC_* env vars > JSON file > defaults."""
-    if config_path is not None and (
-        not str(config_path).strip()
-    ):
-        raise ValueError("config_path must not be empty")
+def load_config(root: str | Path = ".") -> SyncConfig:
+    """Load SyncConfig with precedence: IDAT_SYNC_* env vars > JSON file > root defaults."""
+    root_dir = _normalize_path(root, "root")
+    if root_dir.exists() and not root_dir.is_dir():
+        raise ValueError(f"root is not a directory: {root_dir}")
 
     raw_env_config = os.environ.get("IDAT_SYNC_CONFIG")
     env_config_path = raw_env_config.strip() if raw_env_config and raw_env_config.strip() else None
-    is_explicit = config_path is not None or env_config_path is not None
-    target_path = (
-        Path(config_path)
-        if config_path is not None
-        else Path(env_config_path)
-        if env_config_path is not None
-        else Path("./config.json")
-    )
+    target_path = Path(env_config_path) if env_config_path is not None else root_dir / "config.json"
 
     raw_json: dict[str, Any] = {}
     if target_path.exists():
@@ -185,7 +177,7 @@ def load_config(config_path: str | Path | None = None) -> SyncConfig:
         if not isinstance(loaded, dict):
             raise ValueError("Config JSON root must be a JSON object")
         raw_json = loaded
-    elif is_explicit:
+    elif env_config_path is not None:
         raise FileNotFoundError(f"Config file not found: {target_path}")
 
     valid_fields = {f.name for f in fields(SyncConfig)}
@@ -193,7 +185,10 @@ def load_config(config_path: str | Path | None = None) -> SyncConfig:
     if unknown_keys:
         raise ValueError(f"Unknown configuration keys: {unknown_keys}")
 
-    overrides: dict[str, Any] = {}
+    overrides: dict[str, Any] = {
+        "session_file": root_dir / "session.json",
+        "log_file": root_dir / "log.err",
+    }
     for field_name in valid_fields:
         env_key = f"IDAT_SYNC_{field_name.upper()}"
         if env_key in os.environ:

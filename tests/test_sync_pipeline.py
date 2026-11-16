@@ -1266,7 +1266,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         from idat_sync.config import SyncConfig
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_file = Path(tmpdir) / "app.log"
+            log_file = Path(tmpdir) / "nested" / "logs" / "app.log"
             logger1 = configure_logging(log_file)
             logger2 = configure_logging(log_file)
             try:

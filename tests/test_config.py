@@ -96,49 +96,73 @@ class TestLoadConfig(unittest.TestCase):
                 os.chdir(tmpdir)
                 with patch.dict(os.environ, {}, clear=True):
                     cfg = load_config()
+                    missing_root = Path(tmpdir) / "missing_app_dir"
+                    root_cfg = load_config(missing_root)
             finally:
                 os.chdir(old_cwd)
 
         self.assertEqual(cfg, SyncConfig())
+        self.assertEqual(
+            root_cfg,
+            SyncConfig(
+                session_file=missing_root / "session.json",
+                log_file=missing_root / "log.err",
+            ),
+        )
 
-    def test_raises_file_not_found_for_missing_explicit_path_or_env(self):
+    def test_raises_file_not_found_for_missing_env_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "missing.json"
-            with self.assertRaises(FileNotFoundError):
-                load_config(missing)
-
             with patch.dict(os.environ, {"IDAT_SYNC_CONFIG": str(missing)}, clear=True):
                 with self.assertRaises(FileNotFoundError):
                     load_config()
 
     def test_precedence_env_over_json_over_defaults(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = Path(tmpdir) / "custom.json"
-            cfg_path.write_text(
+            root_dir = Path(tmpdir)
+            (root_dir / "config.json").write_text(
                 json.dumps(
                     {
                         "semester_start": "2026-03-16",
                         "request_delay": 5,
-                        "session_file": "./custom_session.json",
                     }
                 ),
                 encoding="utf-8",
             )
             env = {
-                "IDAT_SYNC_CONFIG": str(cfg_path),
                 "IDAT_SYNC_REQUEST_DELAY": "1.5",
                 "IDAT_SYNC_RECORDINGS_FOLDER_NAME": "Videos",
                 "IDAT_SYNC_TIMEZONE": "UTC",
             }
             with patch.dict(os.environ, env, clear=True):
-                cfg = load_config()
+                cfg = load_config(root_dir)
 
         self.assertEqual(cfg.semester_start, date(2026, 3, 16))
         self.assertEqual(cfg.request_delay, 1.5)
         self.assertEqual(cfg.recordings_folder_name, "Videos")
-        self.assertEqual(cfg.session_file, Path("./custom_session.json"))
+        self.assertEqual(cfg.session_file, root_dir / "session.json")
+        self.assertEqual(cfg.log_file, root_dir / "log.err")
         self.assertEqual(cfg.week_folder_prefix, "Semana")
         self.assertEqual(cfg.timezone, "UTC")
+
+    def test_env_config_overrides_root_config_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_dir = Path(tmpdir)
+            (root_dir / "config.json").write_text(
+                json.dumps({"request_delay": 99}),
+                encoding="utf-8",
+            )
+            custom_cfg = root_dir / "custom.json"
+            custom_cfg.write_text(
+                json.dumps({"request_delay": 5, "session_file": "./custom_session.json"}),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"IDAT_SYNC_CONFIG": str(custom_cfg)}, clear=True):
+                cfg = load_config(root_dir)
+
+        self.assertEqual(cfg.request_delay, 5.0)
+        self.assertEqual(cfg.session_file, Path("./custom_session.json"))
+        self.assertEqual(cfg.log_file, root_dir / "log.err")
 
     def test_rejects_unknown_keys_and_invalid_json_types(self):
         bad_payloads = [
@@ -153,12 +177,13 @@ class TestLoadConfig(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
             for idx, payload in enumerate(bad_payloads):
-                cfg_path = Path(tmpdir) / f"bad_{idx}.json"
-                cfg_path.write_text(payload, encoding="utf-8")
+                sub_dir = Path(tmpdir) / f"case_{idx}"
+                sub_dir.mkdir()
+                (sub_dir / "config.json").write_text(payload, encoding="utf-8")
                 with self.subTest(payload=payload):
                     with patch.dict(os.environ, {}, clear=True):
                         with self.assertRaises(ValueError):
-                            load_config(cfg_path)
+                            load_config(sub_dir)
 
     def test_rejects_invalid_env_var_values(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -174,8 +199,10 @@ class TestLoadConfig(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
 
-    def test_empty_explicit_path_and_directory_raise_value_error_while_empty_env_is_unset(self):
+    def test_empty_root_or_existing_file_raises_value_error_while_empty_env_is_unset(self):
         with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "not_a_dir.txt"
+            file_path.write_text("hi", encoding="utf-8")
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
@@ -185,7 +212,7 @@ class TestLoadConfig(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         load_config("   ")
                     with self.assertRaises(ValueError):
-                        load_config(tmpdir)
+                        load_config(file_path)
 
                 with patch.dict(os.environ, {"IDAT_SYNC_CONFIG": ""}, clear=True):
                     self.assertEqual(load_config(), SyncConfig())

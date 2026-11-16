@@ -5,6 +5,7 @@ import contextlib
 import tkinter as tk
 
 from async_tkinter_loop import async_handler, async_mainloop
+from platformdirs import user_data_path
 
 from idat_sync.bootstrap import configure_logging, create_auth_service
 from idat_sync.config import SyncConfig, load_config
@@ -77,7 +78,7 @@ class MainApp(tk.Tk):
 
 
 def main():
-    config = load_config()
+    config = load_config(user_data_path("idat-sync", appauthor=False))
     configure_logging(config.log_file)
     app = MainApp(config=config)
     app.run()
