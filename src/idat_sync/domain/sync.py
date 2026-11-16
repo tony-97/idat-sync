@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -46,6 +46,8 @@ class SyncDiff:
         cls,
         remote_contents: Sequence[Content],
         local_mtimes: Mapping[Path, int],
+        *,
+        outdated_paths: Collection[Path] = (),
     ) -> "SyncDiff":
         remote_map: dict[Path, Content] = {}
         for content in remote_contents:
@@ -59,21 +61,25 @@ class SyncDiff:
         missing_paths: set[Path] = set(remote_keys - local_keys)
         common_paths: set[Path] = set(remote_keys & local_keys)
         local_only_paths: set[Path] = set(local_keys - remote_keys)
+        extra_outdated = set(outdated_paths)
 
-        outdated_paths: set[Path] = {
+        resolved_outdated: set[Path] = {
             path
             for path in common_paths
-            if remote_map[path].last_modified > 0
-            and remote_map[path].last_modified > local_mtimes[path]
+            if path in extra_outdated
+            or (
+                remote_map[path].last_modified > 0
+                and remote_map[path].last_modified > local_mtimes[path]
+            )
         }
-        synced_paths: set[Path] = common_paths - outdated_paths
+        synced_paths: set[Path] = common_paths - resolved_outdated
 
         entries: list[SyncEntry] = []
         for path in missing_paths:
             entries.append(
                 SyncEntry(path, SyncStatus.MISSING, remote_map[path])
             )
-        for path in outdated_paths:
+        for path in resolved_outdated:
             entries.append(
                 SyncEntry(path, SyncStatus.OUTDATED, remote_map[path])
             )
@@ -89,7 +95,7 @@ class SyncDiff:
         return cls(
             entries=entries,
             missing_paths=missing_paths,
-            outdated_paths=outdated_paths,
+            outdated_paths=resolved_outdated,
             synced_paths=synced_paths,
             local_only_paths=local_only_paths,
         )

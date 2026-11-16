@@ -80,10 +80,10 @@ class StringDownloader(Downloader[StringContent]):
     content_type = StringContent
 
     def can_handle(self, content: StringContent) -> bool:
-        return bool("".join(content.contents).strip())
+        return content.rendered_bytes() is not None
 
     async def download(self, content: StringContent) -> None:
-        data = "".join(content.contents).strip().encode("utf-8")
+        data = content.rendered_bytes() or b""
 
         async def _write(f: BinaryIO) -> None:
             f.write(data)

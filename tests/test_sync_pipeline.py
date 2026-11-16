@@ -308,6 +308,15 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(diff.pending_contents, [c_missing, c_outdated])
         self.assertEqual([e.path for e in diff.entries], sorted([p_missing, p_outdated, p_synced, p_local_only]))
 
+        override_diff = SyncDiff.from_trees(
+            remote_contents,
+            local_mtimes,
+            outdated_paths={p_synced, p_local_only},
+        )
+        self.assertEqual(override_diff.outdated_paths, {p_outdated, p_synced})
+        self.assertEqual(override_diff.synced_paths, set())
+        self.assertEqual(override_diff.local_only_paths, {p_local_only})
+
     def test_sync_diff_from_trees_rejects_duplicate_remote_paths(self):
         dup_path = Path("semana1/Carpeta-[1]/guia.pdf")
         with self.assertRaises(ValueError) as ctx:
@@ -345,11 +354,31 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             mtimes = fs.scan_mtimes(tmp_path)
             self.assertEqual(mtimes.get(test_file), 1234567890)
             self.assertNotIn(part_file, mtimes)
+            self.assertEqual(fs.read_bytes(test_file), b"content")
+            self.assertIsNone(fs.read_bytes(tmp_path / "missing.txt"))
 
             mgr = DownloadManager(self.downloaders, file_system=fs)
             content = MoodleContent(test_file, 1234567890, "http://a")
             diff = mgr.diff_trees(tmp_path, [content])
             self.assertEqual(diff.synced_paths, {test_file})
+
+            unchanged_html = tmp_path / "info.html"
+            unchanged_html.write_text("<p>Same</p>", encoding="utf-8")
+            changed_html = tmp_path / "resumen.html"
+            changed_html.write_text("<p>Old</p>", encoding="utf-8")
+            empty_html = tmp_path / "empty.html"
+            empty_html.write_text("<p>Kept</p>", encoding="utf-8")
+
+            html_diff = mgr.diff_trees(
+                tmp_path,
+                [
+                    StringContent(unchanged_html, 0, ["  <p>Same</p>  "]),
+                    StringContent(changed_html, 0, ["<p>New</p>"]),
+                    StringContent(empty_html, 0, ["   "]),
+                ],
+            )
+            self.assertEqual(html_diff.synced_paths, {unchanged_html, empty_html})
+            self.assertEqual(html_diff.outdated_paths, {changed_html})
 
     async def test_idat_sync_orchestration_with_injected_collaborators(self):
         from idat_sync.application.events import (

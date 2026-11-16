@@ -121,10 +121,12 @@ class MoodleClient:
 
     async def download_file(self, url: str, dest: BinaryIO) -> None:
         """Stream an authenticated Moodle file into dest and await request_delay."""
+        target_url = httpx.URL(url).copy_merge_params(
+            {"wstoken": self.token, "token": self.token}
+        )
         async with self._client.stream(
             "GET",
-            url,
-            params={"wstoken": self.token, "token": self.token},
+            target_url,
             follow_redirects=True,
             timeout=60,
             headers=REQUEST_HEADER,

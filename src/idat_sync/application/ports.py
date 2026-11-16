@@ -66,6 +66,9 @@ class FileSystemPort(Protocol):
     def ensure_dir(self, path: Path | str) -> None:
         ...
 
+    def read_bytes(self, path: Path | str) -> bytes | None:
+        ...
+
 
 class CourseGateway(Protocol):
     async def list_courses(self) -> list[Course]:
@@ -94,7 +97,7 @@ class UrlContentStrategy(Protocol):
 
 
 class MoodleTokenPort(Protocol):
-    async def fetch_token(self, username: str, password: str) -> str | None:
+    async def fetch_token(self, username: str, password: str) -> str:
         ...
 
 
@@ -104,8 +107,12 @@ class SharepointAuthPort(Protocol):
         username: str,
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
-    ) -> StorageStateData | None:
+    ) -> StorageStateData:
         ...
+
+
+class AuthenticationError(RuntimeError):
+    """Raised when Moodle or SharePoint login credentials or MFA are rejected."""
 
 
 class CredentialsExpiredError(RuntimeError):
@@ -124,6 +131,7 @@ class CredentialStorePort(Protocol):
 
 
 __all__ = [
+    "AuthenticationError",
     "CookieData",
     "CourseGateway",
     "CredentialStorePort",

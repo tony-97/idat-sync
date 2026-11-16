@@ -464,6 +464,34 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.mock_moodle_strategy.can_handle.assert_not_called()
         self.mock_sp_strategy.can_handle.assert_not_called()
 
+    async def test_list_url_content_skips_broken_link_with_warning_and_propagates_credentials_expired(
+        self,
+    ):
+        from idat_sync.application.ports import CredentialsExpiredError
+
+        self.mock_sp_strategy.list_url_content.side_effect = [
+            RuntimeError("404 not found"),
+            [MoodleContent(Path("valid.pdf"), 20, "https://sharepoint/valid.pdf")],
+        ]
+        items = [
+            ModuleContent("broken.pdf", "https://sharepoint/broken.pdf", 10),
+            ModuleContent("valid.pdf", "https://sharepoint/valid.pdf", 20),
+        ]
+
+        with self.assertLogs(
+            "idat_sync.application.course_repository", level="WARNING"
+        ) as cm:
+            resolved = await self.repo.list_url_content(items)
+
+        self.assertEqual([c.path for c in resolved], [Path("valid.pdf")])
+        self.assertTrue(any("404 not found" in msg for msg in cm.output))
+
+        self.mock_sp_strategy.list_url_content.side_effect = CredentialsExpiredError(
+            "401 expired"
+        )
+        with self.assertRaises(CredentialsExpiredError):
+            await self.repo.list_url_content(items)
+
 
 class TestInProgressCourseDetection(unittest.TestCase):
     def test_ranks_academic_terms_and_groups_split_sections(self):

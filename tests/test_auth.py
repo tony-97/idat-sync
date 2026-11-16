@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.ports import (
+    AuthenticationError,
     Credentials,
     SharepointAuthPort,
     StorageStateData,
@@ -241,6 +242,99 @@ class TestAuthService(unittest.TestCase):
 
         asyncio.run(exercise())
         self.assertIsNone(store.stored)
+
+    def test_login_cancels_sibling_and_returns_false_on_authentication_error(self):
+        from idat_sync.application.ports import AuthenticationError
+
+        self.assertTrue(issubclass(AuthenticationError, RuntimeError))
+
+        async def exercise_moodle_rejected() -> bool:
+            sp_started = asyncio.Event()
+            sp_cancelled: list[bool] = []
+
+            class RejectedMoodlePort:
+                async def fetch_token(self, username: str, password: str) -> str:
+                    await asyncio.wait_for(sp_started.wait(), timeout=2.0)
+                    raise AuthenticationError("invalid moodle creds")
+
+            class SlowSharepointPort:
+                async def fetch_storage_state(
+                    self, username: str, password: str, get_mfa_code
+                ) -> StorageStateData:
+                    sp_started.set()
+                    try:
+                        await asyncio.get_running_loop().create_future()
+                    except asyncio.CancelledError:
+                        sp_cancelled.append(True)
+                        raise
+                    raise AssertionError("unreachable")
+
+            store = InMemoryCredentialStore()
+            service = AuthService(
+                moodle_auth=RejectedMoodlePort(),  # type: ignore[arg-type]
+                sharepoint_auth=SlowSharepointPort(),  # type: ignore[arg-type]
+                credential_store=store,
+            )
+            ok = await service.login("jdoe", "bad", _mfa_code)
+            self.assertEqual(sp_cancelled, [True])
+            self.assertIsNone(store.stored)
+            return ok
+
+        async def exercise_sharepoint_rejected() -> bool:
+            moodle_started = asyncio.Event()
+            moodle_cancelled: list[bool] = []
+
+            class SlowMoodlePort:
+                async def fetch_token(self, username: str, password: str) -> str:
+                    moodle_started.set()
+                    try:
+                        await asyncio.get_running_loop().create_future()
+                    except asyncio.CancelledError:
+                        moodle_cancelled.append(True)
+                        raise
+                    raise AssertionError("unreachable")
+
+            class RejectedSharepointPort:
+                async def fetch_storage_state(
+                    self, username: str, password: str, get_mfa_code
+                ) -> StorageStateData:
+                    await asyncio.wait_for(moodle_started.wait(), timeout=2.0)
+                    raise AuthenticationError("blank MFA")
+
+            store = InMemoryCredentialStore()
+            service = AuthService(
+                moodle_auth=SlowMoodlePort(),  # type: ignore[arg-type]
+                sharepoint_auth=RejectedSharepointPort(),  # type: ignore[arg-type]
+                credential_store=store,
+            )
+            ok = await service.login("jdoe", "bad", _mfa_code)
+            self.assertEqual(moodle_cancelled, [True])
+            self.assertIsNone(store.stored)
+            return ok
+
+        async def exercise_mixed_error() -> None:
+            class RejectedMoodlePort:
+                async def fetch_token(self, username: str, password: str) -> str:
+                    raise AuthenticationError("rejected")
+
+            class CrashingSharepointPort:
+                async def fetch_storage_state(
+                    self, username: str, password: str, get_mfa_code
+                ) -> StorageStateData:
+                    raise RuntimeError("sp crash")
+
+            service = AuthService(
+                moodle_auth=RejectedMoodlePort(),  # type: ignore[arg-type]
+                sharepoint_auth=CrashingSharepointPort(),  # type: ignore[arg-type]
+                credential_store=InMemoryCredentialStore(),
+            )
+            with self.assertRaises(ExceptionGroup) as ctx:
+                await service.login("jdoe", "bad", _mfa_code)
+            self.assertEqual([str(e) for e in ctx.exception.exceptions], ["sp crash"])
+
+        self.assertFalse(asyncio.run(exercise_moodle_rejected()))
+        self.assertFalse(asyncio.run(exercise_sharepoint_rejected()))
+        asyncio.run(exercise_mixed_error())
 
 
 class TestJsonCredentialStore(unittest.TestCase):
@@ -481,9 +575,8 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                     with self.assertLogs(
                         "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
                     ) as log_cm:
-                        self.assertIsNone(
+                        with self.assertRaises(AuthenticationError):
                             asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                        )
                     self.assertTrue(any(r.exc_info is not None for r in log_cm.records))
             if expect_context_close:
                 mock_context.close.assert_awaited_once()
@@ -597,9 +690,9 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             patch("idat_sync.infrastructure.sharepoint_auth.async_playwright", return_value=mock_pw_cm),
             patch("idat_sync.infrastructure.sharepoint_auth.asyncio.sleep", new=AsyncMock()),
         ):
-            state = asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
+            with self.assertRaises(AuthenticationError):
+                asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
 
-        self.assertIsNone(state)
         self.assertNotIn(
             "#idTxtBx_SAOTCC_OTC",
             [call.args[0] for call in mock_page.fill.call_args_list],
@@ -757,6 +850,9 @@ class TestLoginFrame(unittest.TestCase):
         err_cls = getattr(ports, "CredentialsExpiredError")
         self.assertTrue(issubclass(err_cls, RuntimeError))
         self.assertIn("CredentialsExpiredError", ports.__all__)
+        auth_err_cls = getattr(ports, "AuthenticationError")
+        self.assertTrue(issubclass(auth_err_cls, RuntimeError))
+        self.assertIn("AuthenticationError", ports.__all__)
 
         tree = ast.parse(Path(ports.__file__).read_text(encoding="utf-8"))
         imported = {

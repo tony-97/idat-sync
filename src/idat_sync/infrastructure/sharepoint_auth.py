@@ -5,7 +5,7 @@ from typing import Awaitable, Callable, cast
 
 from playwright.async_api import async_playwright
 
-from idat_sync.application.ports import StorageStateData
+from idat_sync.application.ports import AuthenticationError, StorageStateData
 
 _logger = logging.getLogger(__name__)
 
@@ -28,12 +28,11 @@ class SharepointBrowserAuth:
         username: str,
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
-    ) -> StorageStateData | None:
+    ) -> StorageStateData:
         site_url = f"https://{self.sharepoint_host}/_layouts/15/sharepoint.aspx"
         os_name = platform.system()
         login_email = username if "@" in username else f"{username}@{self.email_domain}"
         cancelled = False
-        storage_state: StorageStateData | None = None
         try:
             async with async_playwright() as p:
                 browser = None
@@ -68,7 +67,7 @@ class SharepointBrowserAuth:
                     await page.click("#idDiv_SAOTCS_Proofs > div:nth-child(2)")
                     mfa_code = (await get_mfa_code()).strip()
                     if not mfa_code:
-                        return None
+                        raise AuthenticationError("MFA code is required")
                     await page.fill("#idTxtBx_SAOTCC_OTC", mfa_code, force=True)
                     await page.click("#idChkBx_SAOTCC_TD")
                     await page.click("#idSubmit_SAOTCC_Continue")
@@ -96,7 +95,7 @@ class SharepointBrowserAuth:
                     )
                     await page.wait_for_load_state("load", timeout=timeout)
                     await asyncio.sleep(3)
-                    storage_state = cast(
+                    return cast(
                         StorageStateData, await context.storage_state()
                     )
                 except asyncio.CancelledError:
@@ -117,7 +116,8 @@ class SharepointBrowserAuth:
                             cleanup_error = cleanup_error or exc
                     if cleanup_error is not None and not cancelled:
                         raise cleanup_error
-        except Exception:
+        except AuthenticationError:
+            raise
+        except Exception as exc:
             _logger.exception("SharePoint browser authentication failed")
-            storage_state = None
-        return storage_state
+            raise AuthenticationError("SharePoint browser authentication failed") from exc

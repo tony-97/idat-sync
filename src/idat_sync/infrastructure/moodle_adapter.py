@@ -5,6 +5,7 @@ from typing import Any
 import unicodedata
 from urllib.parse import urlparse
 
+from idat_sync.application.ports import AuthenticationError
 from idat_sync.domain.content import MoodleContent, StringContent
 from idat_sync.domain.course import (
     Course,
@@ -24,19 +25,18 @@ class MoodleTokenAdapter:
     def __init__(self, client: MoodleTokenClient) -> None:
         self.client = client
 
-    async def fetch_token(self, username: str, password: str) -> str | None:
+    async def fetch_token(self, username: str, password: str) -> str:
         payload = await self.client.request_token(username, password)
         if isinstance(payload, dict):
             if "error" in payload:
                 _logger.warning("[!] Token error: %s", payload.get("error"))
-                return None
+                raise AuthenticationError(str(payload.get("error")))
             token = payload.get("token")
             if isinstance(token, str) and token:
                 return token
-        _logger.warning(
-            "[!] Could not obtain token. Check URL/credentials or if mobile service is enabled."
-        )
-        return None
+        msg = "Could not obtain token. Check URL/credentials or if mobile service is enabled."
+        _logger.warning("[!] %s", msg)
+        raise AuthenticationError(msg)
 
 
 class MoodleAdapter:
@@ -99,7 +99,7 @@ class MoodleAdapter:
                                 assign_name, f"-[{assign_id}]-intro.html"
                             )
                         ),
-                        0,
+                        int(assign.get("timemodified") or 0),
                         [assign_intro],
                     )
                 ]

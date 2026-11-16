@@ -140,6 +140,34 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_client_cls.call_args.args[0], "saved-tok")
             self.assertTrue((Path(tmpdir) / "all_courses_contents.json").is_file())
 
+    async def test_moodle_json_script_returns_one_on_authentication_error(self):
+        from idat_sync.application.ports import AuthenticationError
+
+        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
+        spec = importlib.util.spec_from_file_location("moodle_json_auth_err", script_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        mock_store = MagicMock()
+        mock_store.load.return_value = None
+        mock_token_adapter = MagicMock()
+        mock_token_adapter.fetch_token = AsyncMock(
+            side_effect=AuthenticationError("Invalid login")
+        )
+
+        with (
+            patch("builtins.input", return_value="jdoe@idat.pe"),
+            patch.object(module.getpass, "getpass", return_value="bad"),
+            patch.object(module, "JsonCredentialStore", return_value=mock_store),
+            patch.object(module, "MoodleTokenAdapter", return_value=mock_token_adapter),
+            patch.object(module, "MoodleClient") as mock_client_cls,
+        ):
+            rc = await module.main()
+
+        self.assertEqual(rc, 1)
+        mock_client_cls.assert_not_called()
+
 
 @unittest.skipUnless(
     COURSES_JSON_PATH.is_file(), "Requires ./all_courses_contents.json"

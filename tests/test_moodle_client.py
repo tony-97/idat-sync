@@ -148,13 +148,15 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         client = self._make_client()
 
         dest = io.BytesIO()
-        target_url = "https://aulavirtual.idat.edu.pe/pluginfile.php/123/file.pdf"
+        target_url = "https://aulavirtual.idat.edu.pe/pluginfile.php/123/file.pdf?forcedownload=1&id=42"
         await client.download_file(target_url, dest)
 
+        expected_url = httpx.URL(target_url).copy_merge_params(
+            {"wstoken": self.token, "token": self.token}
+        )
         mock_async_client.stream.assert_called_once_with(
             "GET",
-            target_url,
-            params={"wstoken": self.token, "token": self.token},
+            expected_url,
             follow_redirects=True,
             timeout=60,
             headers=REQUEST_HEADER,

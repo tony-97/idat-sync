@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 import logging
 
 from idat_sync.application.ports import (
+    AuthenticationError,
     CredentialStorePort,
     Credentials,
     MoodleTokenPort,
@@ -27,7 +28,7 @@ class AuthService:
         self.sharepoint_auth = sharepoint_auth
         self.credential_store = credential_store
 
-    async def authenticate(self, username: str, password: str) -> str | None:
+    async def authenticate(self, username: str, password: str) -> str:
         moodle_username = username.split("@", 1)[0]
         return await self.moodle_auth.fetch_token(moodle_username, password)
 
@@ -37,17 +38,23 @@ class AuthService:
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> bool:
-        async with asyncio.TaskGroup() as tg:
-            moodle_task = tg.create_task(
-                self.authenticate(username, password),
-                name="moodle_auth",
-            )
-            sharepoint_task = tg.create_task(
-                self.sharepoint_auth.fetch_storage_state(
-                    username, password, get_mfa_code
-                ),
-                name="sharepoint_auth",
-            )
+        rejected = False
+        try:
+            async with asyncio.TaskGroup() as tg:
+                moodle_task = tg.create_task(
+                    self.authenticate(username, password),
+                    name="moodle_auth",
+                )
+                sharepoint_task = tg.create_task(
+                    self.sharepoint_auth.fetch_storage_state(
+                        username, password, get_mfa_code
+                    ),
+                    name="sharepoint_auth",
+                )
+        except* AuthenticationError:
+            rejected = True
+        if rejected:
+            return False
         token = moodle_task.result()
         sharepoint_storage_state = sharepoint_task.result()
         if not sharepoint_storage_state or not token:

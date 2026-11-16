@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
-from idat_sync.application.ports import CourseGateway
+from idat_sync.application.ports import AuthenticationError, CourseGateway
 from idat_sync.domain.content import MoodleContent, StringContent
 from idat_sync.domain.course import Course, CourseModule, CourseSection, ModuleContent
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
@@ -258,6 +258,7 @@ class TestMoodleAdapter(unittest.TestCase):
                 "cmid": 999,
                 "name": "Homework 1",
                 "intro": "<p>Read chapter 1</p>",
+                "timemodified": 1751550162,
                 "introattachments": [
                     {
                         "filename": "rubric.pdf",
@@ -276,6 +277,7 @@ class TestMoodleAdapter(unittest.TestCase):
         self.assertEqual(
             mod.inline_contents[0].path, Path("Homework 1-[501]-intro.html")
         )
+        self.assertEqual(mod.inline_contents[0].last_modified, 1751550162)
         self.assertEqual(
             mod.inline_contents[0].contents, ["<p>Read chapter 1</p>"]
         )
@@ -594,9 +596,9 @@ class TestMoodleTokenAdapter(unittest.TestCase):
                 with self.assertLogs(
                     "idat_sync.infrastructure.moodle_adapter", level="WARNING"
                 ) as cm:
-                    token = asyncio.run(adapter.fetch_token("jdoe", "bad"))
+                    with self.assertRaises(AuthenticationError):
+                        asyncio.run(adapter.fetch_token("jdoe", "bad"))
 
-                self.assertIsNone(token)
                 self.assertTrue(any("[!]" in msg for msg in cm.output))
 
     def test_fetch_token_propagates_client_http_error(self):

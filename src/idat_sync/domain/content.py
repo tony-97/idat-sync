@@ -44,6 +44,10 @@ class SharepointContent(Content):
 class StringContent(Content):
     contents: list[str]
 
+    def rendered_bytes(self) -> bytes | None:
+        text = "".join(self.contents).strip()
+        return text.encode("utf-8") if text else None
+
 
 @dataclass
 class RecordingContent(Content):

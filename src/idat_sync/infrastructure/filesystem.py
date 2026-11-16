@@ -16,5 +16,11 @@ class LocalFileSystemAdapter(FileSystemPort):
     def ensure_dir(self, path: Path | str) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
 
+    def read_bytes(self, path: Path | str) -> bytes | None:
+        try:
+            return Path(path).read_bytes()
+        except OSError:
+            return None
+
 
 __all__ = ["LocalFileSystemAdapter"]

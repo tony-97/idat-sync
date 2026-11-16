@@ -1,8 +1,10 @@
+import logging
 from pathlib import Path
 from typing import Sequence
 
 from idat_sync.application.ports import (
     CourseGateway,
+    CredentialsExpiredError,
     RecordingGateway,
     UrlContentStrategy,
 )
@@ -14,6 +16,8 @@ from idat_sync.domain.course import (
     ModuleContent,
 )
 from idat_sync.domain.path_utils import safe_path_segment, safe_suffixed_segment
+
+_logger = logging.getLogger(__name__)
 
 
 class CourseRepository:
@@ -57,14 +61,24 @@ class CourseRepository:
             if content.fileurl and content.filename:
                 if strategy := self._get_strategy(content.fileurl):
                     subfolder = self._safe_subfolder(content.filepath)
-                    items = (
-                        await strategy.list_url_content(
-                            content.fileurl,
-                            content.filename,
-                            content.timemodified,
+                    try:
+                        items = (
+                            await strategy.list_url_content(
+                                content.fileurl,
+                                content.filename,
+                                content.timemodified,
+                            )
+                            or []
                         )
-                        or []
-                    )
+                    except CredentialsExpiredError:
+                        raise
+                    except Exception as exc:
+                        _logger.warning(
+                            "Skipping unresolved URL '%s': %s",
+                            content.fileurl,
+                            exc,
+                        )
+                        continue
                     if subfolder is not None:
                         items = [item.in_folder(subfolder) for item in items]
                     resolved_contents.extend(items)

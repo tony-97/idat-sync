@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Sequence
 
 from idat_sync.application.ports import DownloadTask, Downloader, FileSystemPort
-from idat_sync.domain.content import Content
+from idat_sync.domain.content import Content, StringContent
 from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
 
 
@@ -25,7 +25,19 @@ class DownloadManager:
         self, root_dir: str | Path, remote_contents: Sequence[Content]
     ) -> SyncDiff:
         local_map = dict(self.file_system.scan_mtimes(Path(root_dir)))
-        return SyncDiff.from_trees(remote_contents, local_map)
+        changed_paths: set[Path] = set()
+        for content in remote_contents:
+            if (
+                isinstance(content, StringContent)
+                and content.last_modified == 0
+                and content.path in local_map
+                and (rendered := content.rendered_bytes()) is not None
+                and self.file_system.read_bytes(content.path) != rendered
+            ):
+                changed_paths.add(content.path)
+        return SyncDiff.from_trees(
+            remote_contents, local_map, outdated_paths=changed_paths
+        )
 
     def prepare_download_tasks(
         self,
