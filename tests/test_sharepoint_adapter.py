@@ -219,6 +219,32 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(recordings), 1)
         self.assertEqual(recordings[0].path.name, "mat1.mp4")
 
+    async def test_fetch_recordings_preserves_hash_and_question_mark_in_paths(self):
+        course_name = "Curso #1"
+        search_result = MagicMock()
+        row = MagicMock()
+        row.Cells = {
+            "Title": "Curso #1 - Grabaciones",
+            "ParentLink": "https://idat628.sharepoint.com/Grabaciones",
+            "SiteName": "https://idat628.sharepoint.com/sites/Curso1",
+        }
+        search_result.value.PrimaryQueryResult.RelevantResults.Table.Rows = [row]
+        self.mock_client.search_for_recordings.return_value = search_result
+
+        created_dt = datetime(2025, 9, 22, 10, 0)
+        item = self._create_mock_item(
+            name="Clase #2?.mp4",
+            relative_url="/personal/u/Documents/Curso #1/Grabaciones/Clase #2?.mp4",
+            time_created=created_dt,
+            time_last_modified=created_dt,
+        )
+        self.mock_client.fetch_document_library_items.return_value = [item]
+
+        recordings = await self.adapter.fetch_recordings(course_name)
+
+        self.assertEqual(len(recordings), 1)
+        self.assertEqual(recordings[0].path.name, "Clase #2.mp4")
+
     def test_adapter_does_not_accept_request_delay_or_import_time_or_client_context(self):
         with self.assertRaises(TypeError):
             SharepointApiAdapter(

@@ -264,6 +264,34 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
 
     @patch("idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
+    async def test_download_file_redacts_tokens_from_http_status_error(self, mock_client_cls, mock_sleep):
+        raw_url = "https://aulavirtual.idat.edu.pe/missing.pdf?forcedownload=1"
+        target_url = httpx.URL(raw_url).copy_merge_params(
+            {"wstoken": "secret-tok", "token": "secret-tok"}
+        )
+        real_request = httpx.Request("GET", target_url)
+        real_response = httpx.Response(404, request=real_request)
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=real_response)
+        stream_cm.__aexit__ = AsyncMock(return_value=None)
+        _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+        client = MoodleClient(
+            token="secret-tok",
+            base_url="https://aulavirtual.idat.edu.pe",
+            request_delay=0.0,
+        )
+
+        dest = io.BytesIO()
+        with self.assertRaises(httpx.HTTPStatusError) as ctx:
+            await client.download_file(raw_url, dest)
+
+        self.assertNotIn("secret-tok", str(ctx.exception))
+        self.assertNotIn("secret-tok", str(ctx.exception.request.url))
+        self.assertIn("forcedownload=1", str(ctx.exception.request.url))
+        mock_sleep.assert_not_awaited()
+
+    @patch("idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_call_ws_and_download_file_map_auth_failures_to_credentials_expired_error(
         self, mock_client_cls, mock_sleep
     ):

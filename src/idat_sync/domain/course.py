@@ -15,7 +15,6 @@ class ModuleContent:
     filename: str
     fileurl: str
     timemodified: int = 0
-    filesize: int = 0
     filepath: str = "/"
 
 

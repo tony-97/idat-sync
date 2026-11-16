@@ -154,7 +154,27 @@ class MoodleClient:
                 raise CredentialsExpiredError(
                     "403 Forbidden: your session cookie is missing/expired."
                 )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raw_url = (
+                    exc.request.url
+                    if isinstance(exc.request.url, httpx.URL)
+                    else target_url
+                )
+                safe_url = raw_url.copy_remove_param("wstoken").copy_remove_param(
+                    "token"
+                )
+                method = (
+                    exc.request.method
+                    if isinstance(exc.request.method, str)
+                    else "GET"
+                )
+                raise httpx.HTTPStatusError(
+                    f"HTTP {response.status_code} for url '{safe_url}'",
+                    request=httpx.Request(method, safe_url),
+                    response=exc.response,
+                ) from None
             async for part in response.aiter_bytes(chunk_size=1024 * 256):
                 if part:
                     dest.write(part)

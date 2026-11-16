@@ -155,10 +155,10 @@ class SharepointApiAdapter:
 
             def is_course_recording(item: ListItem):
                 decoded_path = urllib.parse.unquote(
-                    urlparse(item.file.server_relative_url or "").path
+                    item.file.server_relative_url or ""
                 )
                 return (
-                    Path(decoded_path).parent.name.lower()
+                    pathlib.PurePosixPath(decoded_path).parent.name.lower()
                     == self.recordings_folder_name.lower()
                     and self._matches_course_name(course_name, decoded_path)
                 )

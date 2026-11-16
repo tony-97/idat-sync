@@ -35,13 +35,21 @@ class JsonCredentialStore:
         return cast(Credentials, data)
 
     def save(self, credentials: Credentials) -> bool:
+        part_path = self.credentials_file.with_name(
+            f"{self.credentials_file.name}.part"
+        )
         try:
             self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.credentials_file, "w", encoding="utf-8") as f:
+            fd = os.open(
+                part_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(credentials, f)
-            os.chmod(self.credentials_file, 0o600)
+            os.chmod(part_path, 0o600)
+            os.replace(part_path, self.credentials_file)
             return True
         except OSError as e:
+            part_path.unlink(missing_ok=True)
             _logger.error("Could not create credentials file: %s", e)
             return False
 

@@ -69,10 +69,9 @@ class MoodleAdapter:
 
     def _to_module_content(self, raw_content: dict) -> ModuleContent:
         return ModuleContent(
-            filename=raw_content.get("filename", ""),
-            fileurl=raw_content.get("fileurl", ""),
+            filename=raw_content.get("filename") or "",
+            fileurl=raw_content.get("fileurl") or "",
             timemodified=int(raw_content.get("timemodified", 0) or 0),
-            filesize=int(raw_content.get("filesize", 0) or 0),
             filepath=raw_content.get("filepath") or "/",
         )
 
@@ -91,7 +90,7 @@ class MoodleAdapter:
             if assign:
                 assign_name = assign.get("name") or module_name
                 assign_id = int(assign.get("id", 0))
-                assign_intro = assign.get("intro", "")
+                assign_intro = assign.get("intro") or ""
                 inline_contents = [
                     StringContent(
                         Path(
@@ -105,13 +104,13 @@ class MoodleAdapter:
                 ]
                 contents = [
                     self._to_module_content(att)
-                    for att in assign.get("introattachments", [])
+                    for att in (assign.get("introattachments") or [])
                     if isinstance(att, dict)
                 ]
         else:
             contents = [
                 self._to_module_content(item)
-                for item in raw_module.get("contents", [])
+                for item in (raw_module.get("contents") or [])
                 if isinstance(item, dict)
             ]
 
@@ -136,7 +135,7 @@ class MoodleAdapter:
         name = (raw_module.get("name") or "").strip()
         urls = [
             item["fileurl"]
-            for item in raw_module.get("contents", [])
+            for item in raw_module.get("contents") or []
             if isinstance(item, dict) and item.get("fileurl")
         ]
         if urls:
@@ -164,14 +163,14 @@ class MoodleAdapter:
                         )
                     ),
                     0,
-                    [raw_section.get("summary", "")],
+                    [raw_section.get("summary") or ""],
                 )
             ]
 
         is_bib = self._is_bibliografia_section(sec_name)
         inline_parts: list[str] = []
         modules: list[CourseModule] = []
-        for module in raw_section.get("modules", []):
+        for module in raw_section.get("modules") or []:
             if not isinstance(module, dict):
                 continue
             modname = module.get("modname")
@@ -232,7 +231,7 @@ class MoodleAdapter:
             if not cid:
                 continue
             module_assignments: dict[int, dict] = {}
-            for raw_assign in raw_course.get("assignments", []):
+            for raw_assign in raw_course.get("assignments") or []:
                 if isinstance(raw_assign, dict):
                     cmid = int(raw_assign.get("cmid", 0))
                     module_assignments[cmid] = raw_assign

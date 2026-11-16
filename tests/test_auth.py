@@ -418,10 +418,40 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
+            part_path = credentials_path.with_name("session.json.part")
             with patch("idat_sync.infrastructure.credential_store.os.chmod") as mock_chmod:
                 self.assertTrue(store.save(creds))
 
-            mock_chmod.assert_called_once_with(credentials_path, 0o600)
+            mock_chmod.assert_called_once_with(part_path, 0o600)
+
+    def test_save_preserves_existing_credentials_and_cleans_part_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            credentials_path = Path(tmpdir) / "session.json"
+            part_path = credentials_path.with_name("session.json.part")
+            store = JsonCredentialStore(credentials_file=credentials_path)
+            original: Credentials = {
+                "token": "original-tok",
+                "sharepoint_storage_state": {"cookies": []},
+            }
+            updated: Credentials = {
+                "token": "updated-tok",
+                "sharepoint_storage_state": {"cookies": []},
+            }
+            self.assertTrue(store.save(original))
+
+            with (
+                patch(
+                    "idat_sync.infrastructure.credential_store.os.replace",
+                    side_effect=OSError("disk full"),
+                ),
+                self.assertLogs(
+                    "idat_sync.infrastructure.credential_store", level="ERROR"
+                ),
+            ):
+                self.assertFalse(store.save(updated))
+
+            self.assertEqual(store.load(), original)
+            self.assertFalse(part_path.exists())
 
 
 def _make_mock_playwright():

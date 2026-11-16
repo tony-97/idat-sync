@@ -552,6 +552,52 @@ class TestMoodleAdapter(unittest.TestCase):
         assign_contents = course.sections[0].modules[1].contents
         self.assertEqual(assign_contents[0].filepath, "/Rubrics/")
 
+    def test_null_json_fields_are_coerced_and_module_content_has_no_filesize(self):
+        self.assertFalse(hasattr(ModuleContent("a.pdf", "https://example.com/a.pdf"), "filesize"))
+
+        self.mock_client.fetch_assignments = AsyncMock(
+            return_value=[
+                {
+                    "id": 20,
+                    "assignments": [
+                        {
+                            "id": 900,
+                            "cmid": 60,
+                            "name": "Null Task",
+                            "intro": None,
+                            "introattachments": None,
+                        }
+                    ],
+                },
+                {"id": 21, "assignments": None},
+            ]
+        )
+        self.mock_client.fetch_course_contents = AsyncMock(
+            return_value=[
+                {
+                    "id": 1,
+                    "name": "Week 1",
+                    "summary": None,
+                    "modules": [
+                        {"id": 59, "modname": "resource", "name": "Res", "contents": None},
+                        {"id": 60, "modname": "assign", "name": "Null Task"},
+                    ],
+                },
+                {"id": 2, "name": "Week 2", "modules": None},
+            ]
+        )
+
+        course = asyncio.run(
+            self.adapter.populate_course_sections(Course(id=20, name="C20"))
+        )
+
+        self.assertIsNone(course.sections[0].inline_contents[0].rendered_bytes())
+        self.assertEqual(course.sections[0].modules[0].contents, [])
+        assign_mod = course.sections[0].modules[1]
+        self.assertIsNone(assign_mod.inline_contents[0].rendered_bytes())
+        self.assertEqual(assign_mod.contents, [])
+        self.assertEqual(course.sections[1].modules, [])
+
 
 class TestMoodleTokenAdapter(unittest.TestCase):
     def test_requires_client_without_base_url(self):
