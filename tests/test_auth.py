@@ -1275,6 +1275,230 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_login_frame_return_binding_switch_to_sync_mfa_cancel_and_on_close(self):
+        from idat_sync.config import SyncConfig
+        from idat_sync.ui.app import MainApp
+
+        async def exercise():
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                app = MainApp(config=cfg)
+                app.withdraw()
+                try:
+                    frame = app._MainApp__frame  # type: ignore[attr-defined]
+                    assert isinstance(frame, LoginFrame)
+
+                    # Trigger existing <Return> binding in pass_entry
+                    frame.user_var.set("jdoe")
+                    frame.pass_var.set("secret")
+                    login_started = asyncio.Event()
+                    mfa_ready = asyncio.Event()
+
+                    async def slow_login(username, password, get_mfa_code):
+                        login_started.set()
+                        mfa_task = asyncio.create_task(get_mfa_code())
+                        await asyncio.sleep(0)
+                        mfa_ready.set()
+                        try:
+                            await mfa_task
+                        except asyncio.CancelledError:
+                            raise
+                        return True
+
+                    with patch.object(app.auth, "login", side_effect=slow_login):
+                        bind_cmd = frame.pass_entry.bind("<Return>")
+                        self.assertTrue(bind_cmd)
+                        app.deiconify()
+                        app.update()
+                        frame.pass_entry.focus_force()
+                        frame.pass_entry.event_generate("<Return>")
+                        app.update()
+                        app.withdraw()
+                        await asyncio.wait_for(login_started.wait(), timeout=2.0)
+                        await asyncio.wait_for(mfa_ready.wait(), timeout=2.0)
+
+                        # MFA Toplevel should exist on app while waiting
+                        popups = [w for w in app.winfo_children() if isinstance(w, tk.Toplevel)]
+                        self.assertEqual(len(popups), 1)
+
+                        # 2. Cancelling get_mfa_code directly destroys popup while app is alive
+                        mfa_only_task = asyncio.create_task(frame.get_mfa_code())
+                        await asyncio.sleep(0)
+                        extra_popups = [
+                            w
+                            for w in app.winfo_children()
+                            if isinstance(w, tk.Toplevel) and w not in popups
+                        ]
+                        self.assertEqual(len(extra_popups), 1)
+                        mfa_only_task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await mfa_only_task
+                        self.assertFalse(extra_popups[0].winfo_exists())
+
+                        # 3. MainApp.on_close cancels active LoginFrame task and destroys MFA popup
+                        with patch.object(popups[0], "destroy", wraps=popups[0].destroy) as mock_popup_destroy:
+                            await app.on_close()
+                            mock_popup_destroy.assert_called()
+                finally:
+                    with contextlib.suppress(tk.TclError):
+                        app.destroy()
+                    app.loop.close()
+
+            # 3. Successful do_login with real MainApp.switch_to_sync() does not raise TclError
+            with tempfile.TemporaryDirectory() as tmpdir:
+                creds_path = Path(tmpdir) / "session.json"
+                cfg = SyncConfig(session_file=creds_path)
+                app = MainApp(config=cfg)
+                app.withdraw()
+                try:
+                    frame = app._MainApp__frame  # type: ignore[attr-defined]
+                    assert isinstance(frame, LoginFrame)
+                    frame.user_var.set("jdoe")
+                    frame.pass_var.set("secret")
+
+                    async def ok_login(username, password, get_mfa_code):
+                        app.auth.credential_store.save(
+                            {"token": "tok", "sharepoint_storage_state": {"cookies": []}}
+                        )
+                        return True
+
+                    with (
+                        patch.object(app.auth, "login", side_effect=ok_login),
+                        patch("idat_sync.ui.sync_frame.SyncFrame.load_idat_sync", new=AsyncMock()),
+                    ):
+                        await frame.do_login()
+
+                    self.assertFalse(frame.winfo_exists())
+                finally:
+                    with contextlib.suppress(tk.TclError):
+                        app.destroy()
+                    app.loop.close()
+
+        asyncio.run(exercise())
+
+    def test_sync_frame_on_close_cancels_active_tasks_and_reports_sync_errors(self):
+        from idat_sync.application.events import CourseSyncCompleted
+        from idat_sync.config import SyncConfig
+        from idat_sync.domain.course import Course
+        from idat_sync.ui.app import MainApp
+        from idat_sync.ui.sync_frame import SyncFrame
+
+        async def exercise():
+            creds: Credentials = {
+                "token": "tok",
+                "sharepoint_storage_state": {"cookies": []},
+            }
+            # 1. MainApp.on_close cancels active load_idat_sync without TclError
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                app = MainApp(config=cfg)
+                app.withdraw()
+                try:
+                    frame = SyncFrame(app, creds, cfg)
+                    app._MainApp__frame = frame  # type: ignore[attr-defined]
+                    load_started = asyncio.Event()
+                    load_cancelled = asyncio.Event()
+
+                    async def slow_create_sync_service(c, conf):
+                        load_started.set()
+                        try:
+                            await asyncio.Future()
+                        except asyncio.CancelledError:
+                            load_cancelled.set()
+                            raise
+
+                    with patch(
+                        "idat_sync.ui.sync_frame.create_sync_service",
+                        side_effect=slow_create_sync_service,
+                    ):
+                        load_task = asyncio.create_task(frame.load_idat_sync(creds))
+                        await asyncio.wait_for(load_started.wait(), timeout=2.0)
+                        await app.on_close()
+                        self.assertTrue(load_cancelled.is_set())
+                        with self.assertRaises(asyncio.CancelledError):
+                            await load_task
+                finally:
+                    with contextlib.suppress(tk.TclError):
+                        app.destroy()
+                    app.loop.close()
+
+            # 2. MainApp.on_close cancels active do_sync and closes idat_sync without TclError
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                app = MainApp(config=cfg)
+                app.withdraw()
+                try:
+                    frame = SyncFrame(app, creds, cfg)
+                    app._MainApp__frame = frame  # type: ignore[attr-defined]
+                    c1 = Course(id=1, name="Course 1")
+                    frame._populate_courses([c1])
+                    frame.selected_course_ids = {1}
+                    frame.folder_path.set(tmpdir)
+
+                    sync_started = asyncio.Event()
+                    sync_cancelled = asyncio.Event()
+
+                    async def slow_sync_courses(path, selected):
+                        sync_started.set()
+                        try:
+                            await asyncio.Future()
+                        except asyncio.CancelledError:
+                            sync_cancelled.set()
+                            raise
+                        yield  # pragma: no cover
+
+                    mock_service = MagicMock()
+                    mock_service.sync_courses = slow_sync_courses
+                    mock_service.aclose = AsyncMock()
+                    frame.idat_sync = mock_service
+
+                    sync_task = asyncio.create_task(frame.do_sync())
+                    await asyncio.wait_for(sync_started.wait(), timeout=2.0)
+                    await app.on_close()
+                    self.assertTrue(sync_cancelled.is_set())
+                    mock_service.aclose.assert_awaited_once_with()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await sync_task
+                finally:
+                    with contextlib.suppress(tk.TclError):
+                        app.destroy()
+                    app.loop.close()
+
+            # 3. do_sync sets "Sync completed with errors." vs "Sync done."
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                app = MainApp(config=cfg)
+                app.withdraw()
+                try:
+                    frame = SyncFrame(app, creds, cfg)
+                    c1 = Course(id=1, name="Course 1")
+                    frame._populate_courses([c1])
+                    frame.selected_course_ids = {1}
+                    frame.folder_path.set(tmpdir)
+
+                    async def err_sync_courses(path, selected):
+                        yield CourseSyncCompleted(c1, RuntimeError("boom"))
+
+                    mock_service = MagicMock()
+                    mock_service.sync_courses = err_sync_courses
+                    frame.idat_sync = mock_service
+
+                    await frame.do_sync()
+                    self.assertEqual(frame.status_var.get(), "Sync completed with errors.")
+
+                    async def ok_sync_courses(path, selected):
+                        yield CourseSyncCompleted(c1, None)
+
+                    mock_service.sync_courses = ok_sync_courses
+                    await frame.do_sync()
+                    self.assertEqual(frame.status_var.get(), "Sync done.")
+                finally:
+                    with contextlib.suppress(tk.TclError):
+                        app.destroy()
+                    app.loop.close()
+
+        asyncio.run(exercise())
+
 
 if __name__ == "__main__":
     unittest.main()

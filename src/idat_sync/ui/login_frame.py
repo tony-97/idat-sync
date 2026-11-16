@@ -13,7 +13,7 @@ _logger = logging.getLogger(__name__)
 
 class LoginFrame(AppFrame):
     def __init__(self, master: MainApp, auth: AuthService, **kwargs):
-        tk.Frame.__init__(self, master, **kwargs)
+        super().__init__(master, **kwargs)
         self.auth = auth
         self.auth.logout()
         window_width = 300
@@ -35,7 +35,7 @@ class LoginFrame(AppFrame):
             self, show="*", width=30, textvariable=self.pass_var
         )
         self.pass_entry.pack()
-        self.pass_entry.bind("<Return>", self.do_login)
+        self.pass_entry.bind("<Return>", async_handler(self.do_login))
 
         self.error_var = tk.StringVar(value="")
         tk.Label(
@@ -55,6 +55,8 @@ class LoginFrame(AppFrame):
         self.login_button.pack(pady=10)
 
     def validate_buttons(self, *args):
+        if not self.winfo_exists():
+            return
         has_login_inputs = bool(self.user_var.get().strip()) and bool(
             self.pass_var.get()
         )
@@ -95,7 +97,11 @@ class LoginFrame(AppFrame):
         tk.Button(popup, text="Submit", command=on_submit).pack(pady=10)
 
         # Pause the async execution here until the user clicks Submit
-        return await future
+        try:
+            return await future
+        finally:
+            if popup.winfo_exists():
+                popup.destroy()
 
     async def do_login(self, event=None):
         if (
@@ -109,6 +115,7 @@ class LoginFrame(AppFrame):
                 login_task = asyncio.create_task(
                     self.auth.login(user, password, self.get_mfa_code)
                 )
+                self._active_task = login_task
                 if await login_task:
                     cast(MainApp, self.master).switch_to_sync()
                 else:
@@ -123,4 +130,6 @@ class LoginFrame(AppFrame):
                     "; ".join(str(err) for err in errors) or "Login failed."
                 )
             finally:
-                self.is_login.set(False)
+                self._active_task = None
+                if self.winfo_exists():
+                    self.is_login.set(False)

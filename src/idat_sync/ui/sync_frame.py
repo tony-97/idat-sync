@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 import os
 from pathlib import Path
@@ -140,7 +141,7 @@ class SyncFrame(AppFrame):
         config: SyncConfig,
         **kwargs,
     ):
-        tk.Frame.__init__(self, master, **kwargs)
+        super().__init__(master, **kwargs)
         self.credentials = credentials
         self.config = config
         master.center_window(700, 500)
@@ -254,6 +255,8 @@ class SyncFrame(AppFrame):
         )
 
     def validate_buttons(self, *args):
+        if not self.winfo_exists():
+            return
         is_syncing = self.is_syncing.get()
         folder_is_selected = bool(self.folder_path.get().strip())
         has_selection = bool(self.selected_course_ids) or not self.courses_loaded
@@ -402,6 +405,7 @@ class SyncFrame(AppFrame):
             self.toggle_course_row(row_id)
 
     async def aclose(self) -> None:
+        await super().aclose()
         service, self.idat_sync = self.idat_sync, None
         if service is not None:
             await service.aclose()
@@ -440,6 +444,7 @@ class SyncFrame(AppFrame):
 
     async def load_idat_sync(self, credentials: Credentials):
         self.credentials = credentials
+        self._active_task = asyncio.current_task()
         self.is_syncing.set(True)
         try:
             await self._ensure_sync_service()
@@ -448,7 +453,9 @@ class SyncFrame(AppFrame):
             self.courses_loaded = False
             self._set_error_status(exc)
         finally:
-            self.is_syncing.set(False)
+            self._active_task = None
+            if self.winfo_exists():
+                self.is_syncing.set(False)
 
     def _handle_event(self, event: SyncEvent) -> None:
         match event:
@@ -533,6 +540,7 @@ class SyncFrame(AppFrame):
         path = self.folder_path.get().strip()
         if not path or self.is_syncing.get():
             return
+        self._active_task = asyncio.current_task()
         self.is_syncing.set(True)
         try:
             idat_sync = await self._ensure_sync_service()
@@ -549,13 +557,20 @@ class SyncFrame(AppFrame):
                     self.tree.item(iid, values=("Queued", "0%"))
                 self._course_progress.pop(course.id, None)
 
+            has_errors = False
             async for event in idat_sync.sync_courses(path, selected):
+                if isinstance(event, CourseSyncCompleted) and event.error is not None:
+                    has_errors = True
                 self._handle_event(event)
-            self.status_var.set("Sync done.")
+            self.status_var.set(
+                "Sync completed with errors." if has_errors else "Sync done."
+            )
         except Exception as exc:
             self._set_error_status(exc)
         finally:
-            self.is_syncing.set(False)
+            self._active_task = None
+            if self.winfo_exists():
+                self.is_syncing.set(False)
 
     def browse_folder(self):
         folder_selected = filedialog.askdirectory(

@@ -1,10 +1,16 @@
 import ast
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import io
 from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
+
+from office365.runtime.client_runtime_context import ClientRuntimeContext
+from office365.runtime.paths.resource_path import ResourcePath
+from office365.sharepoint.files.file import File
+from office365.sharepoint.folders.folder import Folder
 
 from idat_sync.domain.content import RecordingContent, SharepointContent
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
@@ -22,6 +28,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             sharepoint_personal_host="idat628-my.sharepoint.com",
             recordings_folder_name="Grabaciones",
             week_folder_prefix="Semana",
+            timezone="America/Lima",
         )
 
     def _create_mock_search_result(self, course_name: str, site_name: str):
@@ -131,6 +138,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             sharepoint_personal_host="contoso-my.sharepoint.com",
             recordings_folder_name="Videos",
             week_folder_prefix="Week",
+            timezone="America/Lima",
         )
         self.assertTrue(custom_adapter.can_handle("https://contoso.sharepoint.com/sites/Course"))
         self.assertFalse(custom_adapter.can_handle("https://idat628.sharepoint.com/sites/Course"))
@@ -220,6 +228,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
                 sharepoint_personal_host="idat628-my.sharepoint.com",
                 recordings_folder_name="Grabaciones",
                 week_folder_prefix="Semana",
+                timezone="America/Lima",
                 request_delay=1.25,  # type: ignore[call-arg]
             )
 
@@ -278,6 +287,74 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(contents), 2)
         self.assertTrue(all(isinstance(c, SharepointContent) for c in contents))
         self.assertEqual([c.path for c in contents], [Path("syllabus.pdf"), Path("Week 1") / "notes.docx"])
+
+    async def test_requires_timezone_and_converts_aware_timestamps_to_configured_timezone(self):
+        with self.assertRaises(TypeError):
+            SharepointApiAdapter(  # type: ignore[call-arg]
+                client=self.mock_client,
+                semester_start=self.semester_start,
+                sharepoint_host="idat628.sharepoint.com",
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                recordings_folder_name="Grabaciones",
+                week_folder_prefix="Semana",
+            )
+
+        self.assertEqual(self.adapter.timezone, ZoneInfo("America/Lima"))
+
+        course_name = "Algorithms"
+        self.mock_client.search_for_recordings.return_value = (
+            self._create_mock_search_result(course_name, "https://idat628.sharepoint.com/sites/Algorithms")
+        )
+        # 2025-09-29 03:00 UTC is 2025-09-28 22:00 in America/Lima (Sunday -> Semana 1)
+        aware_utc = datetime(2025, 9, 29, 3, 0, tzinfo=timezone.utc)
+        naive_local = datetime(2025, 9, 29, 14, 30)  # Monday -> Semana 2
+        item_aware = self._create_mock_item(
+            name="sunday_night.mp4",
+            relative_url="/personal/user/Documents/Algorithms/Grabaciones/sunday_night.mp4",
+            time_created=aware_utc,
+            time_last_modified=aware_utc,
+        )
+        item_naive = self._create_mock_item(
+            name="monday_afternoon.mp4",
+            relative_url="/personal/user/Documents/Algorithms/Grabaciones/monday_afternoon.mp4",
+            time_created=naive_local,
+            time_last_modified=naive_local,
+        )
+        self.mock_client.fetch_document_library_items.return_value = [item_aware, item_naive]
+
+        recordings = await self.adapter.fetch_recordings(course_name)
+
+        self.assertEqual(len(recordings), 2)
+        self.assertEqual(recordings[0].path, Path("Semana 1") / "sunday_night.mp4")
+        self.assertEqual(recordings[1].path, Path("Semana 2") / "monday_afternoon.mp4")
+
+    async def test_guards_datetime_min_on_real_office365_file_and_folder(self):
+        ctx = MagicMock(spec=ClientRuntimeContext)
+        real_folder = Folder(ctx, ResourcePath("folder"))
+        real_file = File(ctx, ResourcePath("file"))
+        real_file.set_property("Name", "recording.mp4", False)
+        real_file.set_property(
+            "ServerRelativeUrl",
+            "/personal/user/Documents/Algorithms/Grabaciones/recording.mp4",
+            False,
+        )
+
+        self.assertEqual(real_folder.time_last_modified, datetime.min)
+        self.assertEqual(real_file.time_last_modified, datetime.min)
+        self.assertEqual(real_file.time_created, datetime.min)
+        self.assertEqual(self.adapter.get_last_modified(real_folder, 42), 42)
+        self.assertEqual(self.adapter.get_last_modified(real_file, 42), 42)
+
+        course_name = "Algorithms"
+        self.mock_client.search_for_recordings.return_value = (
+            self._create_mock_search_result(course_name, "https://idat628.sharepoint.com/sites/Algorithms")
+        )
+        item = MagicMock()
+        item.file = real_file
+        self.mock_client.fetch_document_library_items.return_value = [item]
+
+        recordings = await self.adapter.fetch_recordings(course_name)
+        self.assertEqual(recordings, [])
 
     @patch("idat_sync.infrastructure.sharepoint_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -444,14 +521,20 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
 
         mock_sleep.reset_mock()
         mock_doc_lib_item = MagicMock()
-        (
-            mock_ctx.web.default_document_library.return_value.items
-            .select.return_value.expand.return_value.select.return_value
-            .get_all_async
-        ) = AsyncMock(return_value=[mock_doc_lib_item])
+        items_query = mock_ctx.web.default_document_library.return_value.items
+        items_query.select.return_value.expand.return_value.get_all_async = AsyncMock(
+            return_value=[mock_doc_lib_item]
+        )
         self.assertEqual(
             await client.fetch_document_library_items("https://contoso.sharepoint.com/sites/Course"),
             [mock_doc_lib_item],
+        )
+        items_query.select.assert_called_once_with(
+            ["File/Name", "File/ServerRelativeUrl", "File/TimeCreated", "File/TimeLastModified"]
+        )
+        items_query.select.return_value.expand.assert_called_once_with(["File"])
+        items_query.select.return_value.expand.return_value.get_all_async.assert_awaited_once_with(
+            page_size=50
         )
         mock_sleep.assert_awaited_once_with(1.75)
 
@@ -463,6 +546,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             sharepoint_personal_host="contoso-my.sharepoint.com",
             recordings_folder_name="Videos",
             week_folder_prefix="Week",
+            timezone="America/Lima",
         )
         mock_file = MagicMock()
         mock_file.name = "slides.pdf"
@@ -782,6 +866,32 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         mock_ctx_cls.return_value = mock_ctx
 
         with self.assertRaises(CredentialsExpiredError):
+            await SharepointClient.create(
+                cookies=[],
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+                request_delay=0.0,
+            )
+
+        mock_transport_cls.return_value.aclose.assert_awaited_once_with()
+
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    async def test_cancelled_create_closes_shared_transport(
+        self, mock_ctx_cls, mock_transport_cls
+    ):
+        import asyncio
+
+        mock_transport_cls.return_value.aclose = AsyncMock()
+        mock_ctx = MagicMock()
+        mock_ctx.with_cookies.return_value = mock_ctx
+        mock_ctx.with_auto_retry.return_value = mock_ctx
+        mock_ctx.web.current_user.get_personal_site.return_value.execute_query_async = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        mock_ctx_cls.return_value = mock_ctx
+
+        with self.assertRaises(asyncio.CancelledError):
             await SharepointClient.create(
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",

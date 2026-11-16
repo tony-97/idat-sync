@@ -37,36 +37,36 @@ async def main() -> int:
     if not token:
         return 1
 
-    client = MoodleClient(
+    async with MoodleClient(
         token,
         base_url=config.moodle_base_url,
         request_delay=config.request_delay,
-    )
-    print("Fetching enrolled courses...")
-    courses = await client.fetch_enrolled_courses()
-    print(f"Found {len(courses)} courses. Fetching assignments...")
-    assignments_by_course = {
-        int(item["id"]): item.get("assignments", [])
-        for item in await client.fetch_assignments()
-        if isinstance(item, dict) and item.get("id") is not None
-    }
-    payload = []
-    total = len(courses)
-    for idx, course in enumerate(courses, start=1):
-        cid = course.get("id")
-        name = course.get("fullname") or course.get("shortname") or "<unnamed>"
-        print(f"[{idx}/{total}] Fetching contents for: {name} (id={cid})...")
-        payload.append(
-            {
-                "course": course,
-                "contents": await client.fetch_course_contents(int(cid))
-                if cid is not None
-                else [],
-                "assignments": assignments_by_course.get(int(cid), [])
-                if cid is not None
-                else [],
-            }
-        )
+    ) as client:
+        print("Fetching enrolled courses...")
+        courses = await client.fetch_enrolled_courses()
+        print(f"Found {len(courses)} courses. Fetching assignments...")
+        assignments_by_course = {
+            int(item["id"]): item.get("assignments", [])
+            for item in await client.fetch_assignments()
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        payload = []
+        total = len(courses)
+        for idx, course in enumerate(courses, start=1):
+            cid = course.get("id")
+            name = course.get("fullname") or course.get("shortname") or "<unnamed>"
+            print(f"[{idx}/{total}] Fetching contents for: {name} (id={cid})...")
+            payload.append(
+                {
+                    "course": course,
+                    "contents": await client.fetch_course_contents(int(cid))
+                    if cid is not None
+                    else [],
+                    "assignments": assignments_by_course.get(int(cid), [])
+                    if cid is not None
+                    else [],
+                }
+            )
     output_path = Path("./all_courses_contents.json")
     output_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False),

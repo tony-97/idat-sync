@@ -11,6 +11,19 @@ WINDOWS_RESERVED = {
 }
 
 
+MAX_EXTENSION_LEN = 15
+
+
+def split_extension(name: str) -> tuple[str, str]:
+    """Split a real extension (1-15 non-whitespace chars) from ``name``, or return ``(name, '')``."""
+    if "." not in name:
+        return name, ""
+    stem, dot, ext = name.rpartition(".")
+    if stem and 1 <= len(ext) <= MAX_EXTENSION_LEN and not any(ch.isspace() for ch in ext):
+        return stem, f"{dot}{ext}"
+    return name, ""
+
+
 def _sanitize_segment(
     s: str,
     *,
@@ -29,10 +42,9 @@ def _sanitize_segment(
         s = re.sub(rf"{re.escape(replacement)}+", replacement, s)
     s = re.sub(r"[ .]+$", "", s)  # no trailing dot/space (Windows)
 
-    if preserve_extension and "." in s:
-        stem, dot, ext = s.rpartition(".")
-        suffix = f"{dot}{ext}"
-        if stem and len(suffix) < max_len:
+    if preserve_extension:
+        stem, suffix = split_extension(s)
+        if suffix and len(suffix) < max_len:
             stem = re.sub(r"[ .]+$", "", stem[: max_len - len(suffix)].strip())
             s = f"{stem}{suffix}" if stem else ""
         else:
@@ -72,4 +84,9 @@ def safe_suffixed_segment(
     """Sanitize ``prefix + suffix`` within ``max_len`` without truncating ``suffix``."""
     budget = max(1, max_len - len(suffix))
     bounded = safe_path_segment(prefix, max_len=budget) if prefix else ""
-    return safe_path_segment(f"{bounded}{suffix}", max_len=max_len)
+    return _sanitize_segment(
+        f"{bounded}{suffix}",
+        max_len=max_len,
+        ascii_only=False,
+        preserve_extension=False,
+    )

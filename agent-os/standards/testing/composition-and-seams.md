@@ -4,7 +4,7 @@ Wire the production object graph solely in `bootstrap.py` (`create_sync_service`
 
 ```python
 # Production wiring in bootstrap.py
-def create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync:
+async def create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync:
     moodle_client = MoodleClient(credentials.get("token"), base_url=config.moodle_base_url, request_delay=config.request_delay)
     moodle_adapter = MoodleAdapter(moodle_client, moodle_base_url=config.moodle_base_url)
     ...
@@ -21,7 +21,7 @@ repo = CourseRepository(course_gateway=mock_gw, recording_gateway=mock_rec, url_
   - `idat_sync.config` (`SyncConfig`, `load_config`): unit-tested directly against normalization, validation, and precedence rules.
   - `bootstrap.create_sync_service`: tested by calling the real factory with `SyncConfig` while patching only external HTTP/SDK transport (`ClientContext`).
   - `bootstrap.create_auth_service`: tested by calling the real factory with `SyncConfig` and verifying wired `MoodleTokenAdapter` (wrapping `MoodleTokenClient`), `SharepointBrowserAuth`, and `JsonCredentialStore` attributes.
-  - `*Client` tests (`MoodleClient`, `MoodleTokenClient`, `SharepointClient`): patch HTTP/SDK transport (`requests.post`, `ClientContext`, `time.sleep`).
+  - `*Client` tests (`MoodleClient`, `MoodleTokenClient`, `SharepointClient`): patch HTTP/SDK transport (`httpx.AsyncClient`, `ClientContext`, `HttpxTransport`, `asyncio.sleep`).
   - `SharepointBrowserAuth` tests: patch external Playwright entrypoint (`idat_sync.infrastructure.sharepoint_auth.async_playwright`, plus `asyncio.sleep`).
   - `JsonCredentialStore` tests: tested against real temporary files (`tempfile.TemporaryDirectory()` and unreadable-file `PermissionError`).
   - `*Adapter` tests (`MoodleAdapter`, `MoodleTokenAdapter`, `SharepointApiAdapter`): inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (`Course`, `CourseSection`, `CourseModule`, `RecordingContent`) or port return values, never raw dicts or SDK objects.

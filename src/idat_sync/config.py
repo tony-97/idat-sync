@@ -7,6 +7,7 @@ from pathlib import Path, PurePath
 import re
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _normalize_url(value: str, field_name: str) -> str:
@@ -57,6 +58,19 @@ def _normalize_path(value: str | Path, field_name: str) -> Path:
     raise ValueError(f"{field_name} must be a Path or non-empty string")
 
 
+def _normalize_timezone(value: str, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field_name} must not be empty")
+    try:
+        ZoneInfo(cleaned)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a valid IANA timezone: {value!r}") from exc
+    return cleaned
+
+
 @dataclass(frozen=True)
 class SyncConfig:
     """Validated runtime configuration for course synchronization."""
@@ -74,6 +88,7 @@ class SyncConfig:
     email_domain: str = "idat.pe"
     recordings_folder_name: str = "Grabaciones"
     week_folder_prefix: str = "Semana"
+    timezone: str = "America/Lima"
 
     def __post_init__(self) -> None:
         if not isinstance(self.semester_start, date) or isinstance(self.semester_start, datetime):
@@ -118,6 +133,7 @@ class SyncConfig:
             "week_folder_prefix",
             _normalize_folder_name(self.week_folder_prefix, "week_folder_prefix"),
         )
+        object.__setattr__(self, "timezone", _normalize_timezone(self.timezone, "timezone"))
 
 
 def _coerce_field(name: str, value: Any) -> Any:

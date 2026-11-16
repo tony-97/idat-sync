@@ -33,6 +33,7 @@ class TestSyncConfig(unittest.TestCase):
         self.assertEqual(cfg.email_domain, "idat.pe")
         self.assertEqual(cfg.recordings_folder_name, "Grabaciones")
         self.assertEqual(cfg.week_folder_prefix, "Semana")
+        self.assertEqual(cfg.timezone, "America/Lima")
 
         with self.assertRaises(FrozenInstanceError):
             cfg.request_delay = 10.0  # type: ignore[misc]
@@ -80,6 +81,12 @@ class TestSyncConfig(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     SyncConfig(request_delay=bad_delay)  # type: ignore[arg-type]
 
+    def test_rejects_invalid_timezone(self):
+        for bad_tz in ["", "   ", "Mars/Olympus", 123]:
+            with self.subTest(bad_tz=bad_tz):
+                with self.assertRaises(ValueError):
+                    SyncConfig(timezone=bad_tz)  # type: ignore[arg-type]
+
 
 class TestLoadConfig(unittest.TestCase):
     def test_falls_back_to_defaults_when_default_file_absent(self):
@@ -121,6 +128,7 @@ class TestLoadConfig(unittest.TestCase):
                 "IDAT_SYNC_CONFIG": str(cfg_path),
                 "IDAT_SYNC_REQUEST_DELAY": "1.5",
                 "IDAT_SYNC_RECORDINGS_FOLDER_NAME": "Videos",
+                "IDAT_SYNC_TIMEZONE": "UTC",
             }
             with patch.dict(os.environ, env, clear=True):
                 cfg = load_config()
@@ -130,6 +138,7 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(cfg.recordings_folder_name, "Videos")
         self.assertEqual(cfg.session_file, Path("./custom_session.json"))
         self.assertEqual(cfg.week_folder_prefix, "Semana")
+        self.assertEqual(cfg.timezone, "UTC")
 
     def test_rejects_unknown_keys_and_invalid_json_types(self):
         bad_payloads = [

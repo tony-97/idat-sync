@@ -89,6 +89,36 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(courses[0], dict)  # Raw vendor data type
 
     @patch("idat_sync.infrastructure.moodle_client.MoodleClient.call_ws", new_callable=AsyncMock)
+    async def test_fetch_enrolled_courses_paginates_across_advancing_nextoffset(
+        self, mock_call_ws
+    ):
+        c1 = {"id": 1, "fullname": "Course 1"}
+        c2 = {"id": 2, "fullname": "Course 2"}
+        c3 = {"id": 3, "fullname": "Course 3"}
+        mock_call_ws.side_effect = [
+            {"courses": [c1, c2], "nextoffset": 2},
+            {"courses": [c3], "nextoffset": 3},
+            {"courses": [], "nextoffset": 3},
+        ]
+
+        async with self._make_client() as client:
+            courses = await client.fetch_enrolled_courses(classification="all", limit=2, offset=0)
+
+        self.assertEqual(courses, [c1, c2, c3])
+        self.assertEqual(
+            [c.kwargs["offset"] for c in mock_call_ws.call_args_list],
+            [0, 2, 3],
+        )
+
+        # Stops if nextoffset is non-advancing or bool
+        mock_call_ws.reset_mock()
+        mock_call_ws.side_effect = [{"courses": [c1], "nextoffset": True}]
+        async with self._make_client() as client:
+            courses = await client.fetch_enrolled_courses(limit=1, offset=0)
+        self.assertEqual(courses, [c1])
+        mock_call_ws.assert_awaited_once()
+
+    @patch("idat_sync.infrastructure.moodle_client.MoodleClient.call_ws", new_callable=AsyncMock)
     async def test_fetch_assignments(self, mock_call_ws):
         raw_assignments = [{"id": 101, "assignments": [{"id": 5, "cmid": 12, "name": "Tarea"}]}]
         mock_call_ws.return_value = {"courses": raw_assignments}
@@ -165,6 +195,33 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_response.aiter_bytes.assert_called_once_with(chunk_size=1024 * 256)
         self.assertEqual(dest.getvalue(), b"chunk1-chunk2")
         mock_sleep.assert_awaited_once_with(30.0)
+
+    @patch("idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock)
+    @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
+    async def test_download_file_exits_stream_before_sleeping(self, mock_client_cls, mock_sleep):
+        events: list[str] = []
+
+        async def _aiter_bytes(chunk_size: int):
+            yield b"payload"
+
+        async def _on_aexit(*args):
+            events.append("exit_stream")
+
+        async def _on_sleep(delay):
+            events.append("sleep")
+
+        mock_sleep.side_effect = _on_sleep
+        mock_response = MagicMock(status_code=200)
+        mock_response.aiter_bytes = MagicMock(side_effect=_aiter_bytes)
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        stream_cm.__aexit__ = AsyncMock(side_effect=_on_aexit)
+        _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+
+        client = self._make_client(request_delay=1.5)
+        await client.download_file("https://aulavirtual.idat.edu.pe/file.pdf", io.BytesIO())
+
+        self.assertEqual(events, ["exit_stream", "sleep"])
 
     @patch("idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock)
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")

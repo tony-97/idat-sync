@@ -64,7 +64,7 @@ class SharepointClient:
                 raise CredentialsExpiredError("SharePoint login expired")
             client.search_client = client.get_client(personal_site.url)
             return client
-        except Exception:
+        except BaseException:
             await client.aclose()
             raise
 
@@ -164,9 +164,15 @@ class SharepointClient:
         client = self.get_client(site_url)
         doc_lib = client.web.default_document_library()
         items = await self._await_query(
-            doc_lib.items.select(["FileSystemObjectType"])
+            doc_lib.items.select(
+                [
+                    "File/Name",
+                    "File/ServerRelativeUrl",
+                    "File/TimeCreated",
+                    "File/TimeLastModified",
+                ]
+            )
             .expand(["File"])
-            .select(self.properties_to_retrieve)
             .get_all_async(page_size=50)
         )
         return list(items)

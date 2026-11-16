@@ -59,6 +59,8 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
         mock_token_adapter = MagicMock()
         mock_token_adapter.fetch_token = AsyncMock(return_value="tok-123")
         mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.fetch_enrolled_courses = AsyncMock(
             return_value=[{"id": 10, "fullname": "Algorithms"}]
         )
@@ -119,6 +121,8 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
             "sharepoint_storage_state": {"cookies": []},
         }
         mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.fetch_enrolled_courses = AsyncMock(return_value=[])
         mock_client.fetch_assignments = AsyncMock(return_value=[])
 
@@ -167,6 +171,56 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rc, 1)
         mock_client_cls.assert_not_called()
+
+    async def test_moodle_json_script_closes_client_on_completion_and_failure(self):
+        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
+        spec = importlib.util.spec_from_file_location("moodle_json_close", script_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        mock_store = MagicMock()
+        mock_store.load.return_value = {
+            "token": "saved-tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+
+        # Completion case
+        ok_client = MagicMock()
+        ok_client.__aenter__ = AsyncMock(return_value=ok_client)
+        ok_client.__aexit__ = AsyncMock(return_value=False)
+        ok_client.fetch_enrolled_courses = AsyncMock(return_value=[])
+        ok_client.fetch_assignments = AsyncMock(return_value=[])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with (
+                    patch.object(module, "JsonCredentialStore", return_value=mock_store),
+                    patch.object(module, "MoodleClient", return_value=ok_client),
+                ):
+                    rc = await module.main()
+            finally:
+                os.chdir(orig_cwd)
+        self.assertEqual(rc, 0)
+        ok_client.__aenter__.assert_awaited_once_with()
+        ok_client.__aexit__.assert_awaited_once()
+
+        # Failure case
+        fail_client = MagicMock()
+        fail_client.__aenter__ = AsyncMock(return_value=fail_client)
+        fail_client.__aexit__ = AsyncMock(return_value=False)
+        fail_client.fetch_enrolled_courses = AsyncMock(side_effect=RuntimeError("ws boom"))
+
+        with (
+            patch.object(module, "JsonCredentialStore", return_value=mock_store),
+            patch.object(module, "MoodleClient", return_value=fail_client),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ws boom"):
+                await module.main()
+        fail_client.__aenter__.assert_awaited_once_with()
+        fail_client.__aexit__.assert_awaited_once()
 
 
 @unittest.skipUnless(
@@ -226,6 +280,7 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
             sharepoint_personal_host=self.config.sharepoint_personal_host,
             recordings_folder_name=self.config.recordings_folder_name,
             week_folder_prefix=self.config.week_folder_prefix,
+            timezone=self.config.timezone,
         )
 
         repo = CourseRepository(
@@ -397,6 +452,7 @@ class TestLiveCredentialsIntegration(unittest.IsolatedAsyncioTestCase):
             sharepoint_personal_host=self.config.sharepoint_personal_host,
             recordings_folder_name=self.config.recordings_folder_name,
             week_folder_prefix=self.config.week_folder_prefix,
+            timezone=self.config.timezone,
         )
 
         for label, candidates in [

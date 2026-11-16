@@ -25,7 +25,11 @@ from idat_sync.application.ports import (
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
-from idat_sync.domain.path_utils import safe_filename, safe_suffixed_segment
+from idat_sync.domain.path_utils import (
+    safe_filename,
+    safe_suffixed_segment,
+    split_extension,
+)
 from idat_sync.domain.sync import SyncDiff
 
 
@@ -41,7 +45,7 @@ def _disambiguate_paths(items: Sequence[Content]) -> list[Content]:
         candidate = item.path
         key = candidate.as_posix().casefold()
         if key in seen_keys:
-            stem, ext = item.path.stem, item.path.suffix
+            stem, ext = split_extension(item.path.name)
             counter = 2
             while key in seen_keys:
                 new_name = safe_suffixed_segment(stem, f" ({counter}){ext}")

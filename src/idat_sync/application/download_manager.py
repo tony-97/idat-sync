@@ -3,7 +3,7 @@ from typing import Sequence
 
 from idat_sync.application.ports import DownloadTask, Downloader, FileSystemPort
 from idat_sync.domain.content import Content, StringContent
-from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
+from idat_sync.domain.sync import SyncDiff
 
 
 class DownloadManager:
@@ -50,4 +50,4 @@ class DownloadManager:
         return tasks
 
 
-__all__ = ["DownloadManager", "SyncDiff", "SyncEntry", "SyncStatus"]
+__all__ = ["DownloadManager"]

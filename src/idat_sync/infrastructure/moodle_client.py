@@ -92,15 +92,30 @@ class MoodleClient:
         self, classification: str = "all", limit: int = 100, offset: int = 0
     ) -> list[dict]:
         """Fetch raw enrolled courses via core_course_get_enrolled_courses_by_timeline_classification."""
-        result = await self.call_ws(
-            "core_course_get_enrolled_courses_by_timeline_classification",
-            classification=classification,
-            limit=limit,
-            offset=offset,
-        )
-        if isinstance(result, dict):
-            return result.get("courses", [])
-        return []
+        courses: list[dict] = []
+        current_offset = offset
+        while True:
+            result = await self.call_ws(
+                "core_course_get_enrolled_courses_by_timeline_classification",
+                classification=classification,
+                limit=limit,
+                offset=current_offset,
+            )
+            if not isinstance(result, dict):
+                break
+            page = result.get("courses", [])
+            if not page:
+                break
+            courses.extend(page)
+            next_offset = result.get("nextoffset")
+            if (
+                isinstance(next_offset, bool)
+                or not isinstance(next_offset, int)
+                or next_offset <= current_offset
+            ):
+                break
+            current_offset = next_offset
+        return courses
 
     async def fetch_assignments(self) -> list[dict]:
         """Fetch raw assignments for all enrolled courses via mod_assign_get_assignments."""
@@ -143,4 +158,4 @@ class MoodleClient:
             async for part in response.aiter_bytes(chunk_size=1024 * 256):
                 if part:
                     dest.write(part)
-            await asyncio.sleep(self.request_delay)
+        await asyncio.sleep(self.request_delay)

@@ -19,7 +19,6 @@ The human starts these steps: /grill-with-docs, /opsx:propose, /opsx:apply, /cod
 - Conventions: agent-os/standards/index.yml. Load only the standards that match the files you touch.
 - Build with the tdd skill. Test only at confirmed seams. Do not mock internal modules.
 - Commit before review. Review runs in a fresh session: /code-review BASE openspec/changes/NAME.
-- Bug fixes use diagnosing-bugs and tdd, with no OpenSpec change. Pure refactors set skip_specs: true.
 
 ## Skills
 

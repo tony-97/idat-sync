@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 import io
 import logging
 import os
@@ -11,25 +9,25 @@ from pathlib import Path
 import platform
 import re
 import sys
+import threading
 from typing import TYPE_CHECKING, BinaryIO
 import urllib.error
 
 import yt_dlp
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import DownloadCancelled, DownloadError
 
 from idat_sync.application.ports import (
     CookieData,
     CredentialsExpiredError,
-    DownloadTask,
     Downloader,
 )
 from idat_sync.domain.content import (
-    Content,
     MoodleContent,
     RecordingContent,
     SharepointContent,
     StringContent,
 )
+from idat_sync.infrastructure.filesystem import windows_long_path
 
 if TYPE_CHECKING:
     from idat_sync.infrastructure.moodle_client import MoodleClient
@@ -39,12 +37,13 @@ if TYPE_CHECKING:
 async def _atomic_download(
     target_path: Path, writer: Callable[[BinaryIO], Awaitable[None]]
 ) -> None:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    part_path = target_path.with_name(f"{target_path.name}.part")
+    os_target = windows_long_path(target_path)
+    os_target.parent.mkdir(parents=True, exist_ok=True)
+    part_path = os_target.with_name(f"{os_target.name}.part")
     try:
         with open(part_path, "wb") as f:
             await writer(f)
-        os.replace(part_path, target_path)
+        os.replace(part_path, os_target)
     except BaseException:
         part_path.unlink(missing_ok=True)
         raise
@@ -140,20 +139,31 @@ class RecordingDownloader(Downloader[RecordingContent]):
             lines.append(line)
         return "\n".join(lines)
 
-    def _download_sync(self, content: RecordingContent) -> None:
+    def _download_sync(
+        self, content: RecordingContent, cancel_event: threading.Event
+    ) -> None:
         logging.getLogger(__name__).info(
             "Downloading share url: %s", content.url
         )
-        prefix = "\\\\?\\" if platform.system() == "Windows" else ""
-        target_path = Path(content.path)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path_template = f"{prefix}{os.path.abspath(target_path)}"
+        os_target = windows_long_path(content.path)
+        os_target.parent.mkdir(parents=True, exist_ok=True)
+        output_path_template = (
+            str(os_target)
+            if platform.system() == "Windows"
+            else os.path.abspath(os_target)
+        )
+
+        def _progress_hook(_status: dict) -> None:
+            if cancel_event.is_set():
+                raise DownloadCancelled("Download cancelled")
+
         ydl_opts = {
             "cookiefile": io.StringIO(self.cookies),
             "format_sort": ["proto:dash"],
             "postprocessors": [{"key": "FFmpegMetadata"}],
             "format": "bestvideo+bestaudio/bestvideo",
             "outtmpl": output_path_template,
+            "progress_hooks": [_progress_hook],
         }
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
             ydl_opts["ffmpeg_location"] = sys._MEIPASS  # type: ignore
@@ -169,19 +179,17 @@ class RecordingDownloader(Downloader[RecordingContent]):
             raise
 
     async def download(self, content: RecordingContent) -> None:
-        await asyncio.to_thread(self._download_sync, content)
+        cancel_event = threading.Event()
+        try:
+            await asyncio.to_thread(self._download_sync, content, cancel_event)
+        except asyncio.CancelledError:
+            cancel_event.set()
+            raise
 
 
 __all__ = [
-    "Content",
-    "DownloadTask",
-    "Downloader",
-    "MoodleContent",
     "MoodleDownloader",
-    "RecordingContent",
     "RecordingDownloader",
-    "SharepointContent",
     "SharepointDownloader",
-    "StringContent",
     "StringDownloader",
 ]

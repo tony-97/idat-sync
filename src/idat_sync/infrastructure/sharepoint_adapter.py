@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import date, datetime
 import pathlib
 from pathlib import Path
 import re
 import urllib.parse
 from urllib.parse import quote, urlparse
+from zoneinfo import ZoneInfo
 
 from office365.runtime.client_result import ClientResult
 from office365.sharepoint.files.file import File
@@ -25,6 +26,7 @@ class SharepointApiAdapter:
         sharepoint_personal_host: str,
         recordings_folder_name: str,
         week_folder_prefix: str,
+        timezone: str,
     ) -> None:
         self.sp_client = client
         self.semester_start = semester_start
@@ -32,6 +34,7 @@ class SharepointApiAdapter:
         self.sharepoint_personal_host = sharepoint_personal_host.lower()
         self.recordings_folder_name = recordings_folder_name
         self.week_folder_prefix = week_folder_prefix
+        self.timezone = ZoneInfo(timezone)
 
     @staticmethod
     def _matches_course_name(course_name: str, text: str) -> bool:
@@ -67,9 +70,12 @@ class SharepointApiAdapter:
     def get_last_modified(
         self, f: Folder | File, fallback_last_modified: int = 0
     ):
-        if last_modified := f.time_last_modified:
+        last_modified = f.time_last_modified
+        if not last_modified or last_modified == datetime.min:
+            return fallback_last_modified
+        try:
             return int(last_modified.timestamp())
-        else:
+        except OSError:
             return fallback_last_modified
 
     def __file_to_content(
@@ -159,12 +165,19 @@ class SharepointApiAdapter:
 
             for item in filter(is_course_recording, items):
                 file = item.file
-                if not file.time_created or not file.server_relative_url:
+                created = file.time_created
+                if (
+                    not created
+                    or created == datetime.min
+                    or not file.server_relative_url
+                ):
                     continue
 
+                if created.tzinfo is not None:
+                    created = created.astimezone(self.timezone)
                 week = (
                     1
-                    + (file.time_created.date() - self.semester_start).days
+                    + (created.date() - self.semester_start).days
                     // 7
                 )
                 name = safe_path_segment(self.get_name(file))

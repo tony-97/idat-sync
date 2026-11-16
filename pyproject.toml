@@ -11,6 +11,7 @@ dependencies = [
     "playwright >= 1.55.0",
     "yt-dlp[default]",
     "httpx >= 0.27",
+    "tzdata; sys_platform == 'win32'",
 ]
 authors = [{ name = "Tony Acuña Flores", email = "toanacfl@gmail.com" }]
 description = "Sincroniza automáticamente el material y grabaciones de IDAT (Moodle, SharePoint, OneDrive) a una carpeta local, manteniendo la estructura original de los cursos."
@@ -24,8 +25,8 @@ license = "MIT"
 license-files = ["LICEN[CS]E*"]
 
 [project.urls]
-Homepage = "https://github.com/tony-97/idat-sync/idat-sync"
-Issues = "https://github.com/tony-97/idat-sync/idat-sync"
+Homepage = "https://github.com/tony-97/idat-sync"
+Issues = "https://github.com/tony-97/idat-sync/issues"
 
 [project.gui-scripts]
 idat_sync = "idat_sync.main:main"

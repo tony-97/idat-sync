@@ -79,6 +79,7 @@ async def create_sync_service(
         sharepoint_personal_host=config.sharepoint_personal_host,
         recordings_folder_name=config.recordings_folder_name,
         week_folder_prefix=config.week_folder_prefix,
+        timezone=config.timezone,
     )
 
     course_repository = CourseRepository(

@@ -1,8 +1,6 @@
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.downloaders import (
-    DownloadTask,
-    Downloader,
     MoodleDownloader,
     RecordingDownloader,
     SharepointDownloader,
@@ -14,8 +12,6 @@ from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 __all__ = [
-    "DownloadTask",
-    "Downloader",
     "JsonCredentialStore",
     "MoodleAdapter",
     "MoodleClient",

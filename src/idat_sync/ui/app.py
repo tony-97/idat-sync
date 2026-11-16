@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tkinter as tk
 
 from async_tkinter_loop import async_handler, async_mainloop
@@ -10,8 +11,17 @@ from idat_sync.config import SyncConfig, load_config
 
 
 class AppFrame(tk.Frame):
+    def __init__(self, master: tk.Misc, **kwargs):
+        super().__init__(master, **kwargs)
+        self._active_task: asyncio.Task[object] | None = None
+
     async def aclose(self) -> None:
-        pass
+        task, self._active_task = self._active_task, None
+        current = asyncio.current_task()
+        if task is not None and task is not current and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 class MainApp(tk.Tk):

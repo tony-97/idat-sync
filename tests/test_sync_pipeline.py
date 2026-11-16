@@ -15,10 +15,10 @@ from idat_sync.domain.content import (
     SharepointContent,
     StringContent,
 )
+from idat_sync.application.ports import Downloader
 from idat_sync.domain.sync import SyncDiff, SyncStatus
 from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
 from idat_sync.infrastructure.downloaders import (
-    Downloader,
     MoodleDownloader,
     RecordingDownloader,
     SharepointDownloader,
@@ -712,6 +712,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             sharepoint_academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
             recordings_folder_name="Videos",
             week_folder_prefix="Week",
+            timezone="America/Bogota",
         )
         credentials = {
             "token": "tok123",
@@ -753,6 +754,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sp_adapter.sharepoint_personal_host, "contoso-my.sharepoint.com")
         self.assertEqual(sp_adapter.recordings_folder_name, "Videos")
         self.assertEqual(sp_adapter.week_folder_prefix, "Week")
+        from zoneinfo import ZoneInfo
+
+        self.assertEqual(sp_adapter.timezone, ZoneInfo("America/Bogota"))
         self.assertFalse(hasattr(sp_adapter, "request_delay"))
         self.assertEqual(sp_adapter.sp_client.request_delay, 1.5)
 
@@ -1313,6 +1317,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
 
     async def test_string_downloader_writes_atomically_via_part_file_and_cleans_up_on_error(self):
         from idat_sync.infrastructure.downloaders import StringDownloader
+        from idat_sync.infrastructure.filesystem import windows_long_path
 
         dl = StringDownloader()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1322,7 +1327,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             with patch("idat_sync.infrastructure.downloaders.os.replace", wraps=os.replace) as mock_replace:
                 await dl.download(StringContent(target, 0, ["  <p>Hola</p>  "]))
 
-            mock_replace.assert_called_once_with(part_path, target)
+            mock_replace.assert_called_once_with(
+                windows_long_path(part_path), windows_long_path(target)
+            )
             self.assertEqual(target.read_text(encoding="utf-8"), "<p>Hola</p>")
             self.assertFalse(part_path.exists())
 
@@ -1443,6 +1450,14 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
                                 ModuleContent(long_name, "http://a/8", 80),
                             ],
                         ),
+                        CourseModule(
+                            id=4,
+                            name="Mod",
+                            contents=[
+                                ModuleContent("1." + "x" * 98, "http://a/9", 85),
+                                ModuleContent("1." + "x" * 98, "http://a/10", 86),
+                            ],
+                        ),
                     ],
                 )
             ],
@@ -1480,6 +1495,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
             Path("Course/Sec/Mod-[2]/file (3).pdf"),
             Path(f"Course/Sec/Mod-[3]/{long_name}"),
             Path(f"Course/Sec/Mod-[3]/{'L' * 92} (2).pdf"),
+            Path(f"Course/Sec/Mod-[4]/1.{'x' * 98}"),
+            Path(f"Course/Sec/Mod-[4]/1.{'x' * 94} (2)"),
             Path("Course/Grabaciones/Semana 1/video.mp4"),
             Path("Course/Grabaciones/Semana 1/video (2).mp4"),
         ]
@@ -1489,7 +1506,135 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             diff = await sync.check_course_sync(course, Path(tmpdir))
-        self.assertEqual(len(diff.missing_paths), 10)
+        self.assertEqual(len(diff.missing_paths), 12)
+
+    async def test_windows_long_paths_work_across_filesystem_and_downloaders(self):
+        import platform
+        import shutil
+        from idat_sync.infrastructure.filesystem import windows_long_path
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            tmp_path = Path(tmpdir)
+            deep_dir = tmp_path / ("a" * 90) / ("b" * 90) / ("c" * 90)
+            deep_string = deep_dir / "notes.txt"
+            deep_moodle = deep_dir / "slides.pdf"
+            deep_sp = deep_dir / "handout.docx"
+            deep_rec = deep_dir / "lecture.mp4"
+            self.assertGreater(len(os.path.abspath(deep_string)), 260)
+
+            fs = LocalFileSystemAdapter()
+            fs.ensure_dir(deep_dir)
+
+            await StringDownloader().download(
+                StringContent(deep_string, 0, ["hello long path"])
+            )
+
+            mock_moodle = MagicMock()
+
+            async def write_moodle(url: str, dest) -> None:
+                dest.write(b"moodle-bytes")
+
+            mock_moodle.download_file = AsyncMock(side_effect=write_moodle)
+            await MoodleDownloader(mock_moodle).download(
+                MoodleContent(deep_moodle, 10, "https://example.edu/slides.pdf")
+            )
+
+            mock_sp = MagicMock()
+
+            async def write_sp(file_obj, dest) -> None:
+                dest.write(b"sp-bytes")
+
+            mock_sp.download_file = AsyncMock(side_effect=write_sp)
+            await SharepointDownloader(mock_sp).download(
+                SharepointContent(deep_sp, 20, MagicMock())
+            )
+
+            mtimes = fs.scan_mtimes(tmp_path)
+            self.assertIn(deep_string, mtimes)
+            self.assertIn(deep_moodle, mtimes)
+            self.assertIn(deep_sp, mtimes)
+            for key in mtimes:
+                self.assertFalse(str(key).startswith("\\\\?\\"))
+            self.assertEqual(fs.read_bytes(deep_string), b"hello long path")
+
+            rec_dl = RecordingDownloader([], "idat628-my.sharepoint.com")
+            with patch("idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL") as mock_ydl:
+                await rec_dl.download(
+                    RecordingContent(
+                        deep_rec,
+                        30,
+                        "https://idat628-my.sharepoint.com/:v:/r/video.mp4",
+                    )
+                )
+            prefix = "\\\\?\\" if platform.system() == "Windows" else ""
+            self.assertEqual(
+                mock_ydl.call_args.args[0]["outtmpl"],
+                f"{prefix}{os.path.abspath(deep_rec)}",
+            )
+        finally:
+            shutil.rmtree(windows_long_path(tmpdir), ignore_errors=True)
+
+    async def test_recording_downloader_aborts_progress_hook_on_task_cancellation(self):
+        import threading
+        from yt_dlp.utils import DownloadCancelled
+
+        started = threading.Event()
+        release = threading.Event()
+        captured_hooks: list = []
+
+        def fake_download(urls):
+            started.set()
+            release.wait(timeout=2.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rec = RecordingContent(
+                Path(tmpdir) / "Semana 1" / "video.mp4",
+                1700000000,
+                "https://idat628-my.sharepoint.com/:v:/r/video.mp4",
+            )
+            dl = RecordingDownloader([], "idat628-my.sharepoint.com")
+
+            def fake_ydl_factory(opts):
+                captured_hooks.extend(opts.get("progress_hooks", []))
+                ctx = MagicMock()
+                ctx.__enter__.return_value.download.side_effect = fake_download
+                return ctx
+
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                side_effect=fake_ydl_factory,
+            ):
+                task = asyncio.create_task(dl.download(rec))
+                while not started.is_set():
+                    await asyncio.sleep(0.01)
+
+                self.assertEqual(len(captured_hooks), 1)
+                captured_hooks[0]({"status": "downloading"})  # Not cancelled yet
+
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+                with self.assertRaises(DownloadCancelled):
+                    captured_hooks[0]({"status": "downloading"})
+                release.set()
+
+    def test_safe_path_segment_and_suffixed_segment_ignore_fake_long_extensions(self):
+        from idat_sync.domain.path_utils import safe_path_segment, safe_suffixed_segment
+
+        title = "Publishing, M. (2007. " + "x" * 100
+        sanitized = safe_path_segment(title, max_len=100)
+        self.assertEqual(len(sanitized), 100)
+        self.assertTrue(sanitized.startswith("Publishing, M. (2007. "))
+
+        spaced = "Report. v1 final " + "x" * 100
+        self.assertEqual(len(safe_path_segment(spaced, max_len=100)), 100)
+        self.assertTrue(safe_path_segment(spaced, max_len=100).startswith("Report. v1 final "))
+
+        suffixed = safe_suffixed_segment("1", " (2)." + "x" * 98, max_len=100)
+        self.assertLessEqual(len(suffixed), 100)
+        self.assertIn(" (2)", suffixed)
 
 
 if __name__ == "__main__":
