@@ -23,5 +23,5 @@ The human starts these steps: /grill-with-docs, /opsx:propose, /opsx:apply, /cod
 ## Skills
 
 Before writing or changing any code, read and follow:
-- `.agents/skills/ponytail/SKILL.md`
+- `.agents/skills/ponytail/SKILL.md` (use the `ultra` level)
 - `.agents/skills/karpathy-guidelines/SKILL.md`
