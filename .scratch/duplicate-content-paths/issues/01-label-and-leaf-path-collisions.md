@@ -40,10 +40,18 @@ Example in `Course(id=26550)` / `CourseSection(id=451861, name='Evaluación Fina
 
 ```python
 # Module #1 (evaluación preliminar, desc len=442)
-{"id": 1229747, "modname": "label", "name": "Aquí encontrarás la rúbrica que se empleará para t..."}
+{
+    "id": 1229747,
+    "modname": "label",
+    "name": "Aquí encontrarás la rúbrica que se empleará para t...",
+}
 
 # Module #2 (evaluación definitiva, desc len=429)
-{"id": 1229750, "modname": "label", "name": "Aquí encontrarás la rúbrica que se empleará para t..."}
+{
+    "id": 1229750,
+    "modname": "label",
+    "name": "Aquí encontrarás la rúbrica que se empleará para t...",
+}
 ```
 
 Both produce the identical full leaf path under `course_dir`:

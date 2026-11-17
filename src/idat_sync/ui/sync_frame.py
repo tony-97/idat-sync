@@ -1,10 +1,12 @@
+"""Course selection and synchronization progress UI frame."""
+
+from __future__ import annotations
+
 import asyncio
-from collections.abc import Sequence
-import os
-from pathlib import Path
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, ttk
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 from async_tkinter_loop import async_handler
 
@@ -17,15 +19,17 @@ from idat_sync.application.events import (
     TaskDownloadFailed,
     TaskDownloadStarted,
 )
-from idat_sync.application.ports import (
-    Credentials,
-    CredentialsExpiredError,
-)
-from idat_sync.application.sync_service import IDATSync
+from idat_sync.application.ports import Credentials, CredentialsExpiredError
 from idat_sync.bootstrap import create_sync_service
-from idat_sync.config import SyncConfig
 from idat_sync.domain.course import Course, get_in_progress_course_ids
-from idat_sync.ui.app import AppFrame, MainApp
+from idat_sync.ui.base import AppFrame
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from idat_sync.application.sync_service import IDATSync
+    from idat_sync.config import SyncConfig
+    from idat_sync.ui.app import MainApp
 
 
 def _draw_icon(rows: list[str], palette: dict[str, str]) -> tk.PhotoImage:
@@ -38,7 +42,7 @@ def _draw_icon(rows: list[str], palette: dict[str, str]) -> tk.PhotoImage:
     return img
 
 
-def _make_checkbox_icon(checked: bool) -> tk.PhotoImage:
+def _make_checkbox_icon(*, checked: bool) -> tk.PhotoImage:
     if checked:
         rows = [
             "................",
@@ -133,14 +137,17 @@ def _make_file_icon() -> tk.PhotoImage:
     return _draw_icon(rows, palette)
 
 
-class SyncFrame(AppFrame):
+class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instance-attributes
+    """Tkinter frame for selecting courses and monitoring synchronization."""
+
     def __init__(
         self,
         master: MainApp,
         credentials: Credentials,
         config: SyncConfig,
-        **kwargs,
-    ):
+        **kwargs: Any,  # noqa: ANN401
+    ) -> None:
+        """Initialize the sync frame UI and schedule course loading."""
         super().__init__(master, **kwargs)
         self.credentials = credentials
         self.config = config
@@ -164,25 +171,32 @@ class SyncFrame(AppFrame):
         self._folder_icon = _make_folder_icon()
         self._file_icon = _make_file_icon()
 
+        self._build_widgets()
+
+        self.is_syncing = tk.BooleanVar(value=False)
+        self.is_syncing.trace_add("write", self.validate_buttons)
+        self.folder_path.trace_add("write", self.validate_buttons)
+
+        self.after_idle(
+            lambda: master.loop.create_task(self.load_idat_sync(credentials))
+        )
+
+    def _build_widgets(self) -> None:
         style = ttk.Style(self)
         style.configure("Sync.Treeview", rowheight=22)
 
-        # Folder selection bar
         folder_frame = tk.Frame(self, padx=10, pady=10)
         folder_frame.pack(fill=tk.X)
-        tk.Label(folder_frame, text="Sync Folder:").pack(
-            side=tk.LEFT, padx=(0, 5)
-        )
+        tk.Label(folder_frame, text="Sync Folder:").pack(side=tk.LEFT, padx=(0, 5))
         self.folder_path = tk.StringVar()
-        tk.Entry(
-            folder_frame, textvariable=self.folder_path, state="readonly"
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Entry(folder_frame, textvariable=self.folder_path, state="readonly").pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
         self.browse_button = tk.Button(
             folder_frame, text="Browse...", command=self.browse_folder
         )
         self.browse_button.pack(side=tk.LEFT, padx=(5, 0))
 
-        # Quick-select toolbar
         select_frame = tk.Frame(self, padx=10)
         select_frame.pack(fill=tk.X, pady=(0, 5))
         tk.Label(select_frame, text="Courses:").pack(side=tk.LEFT)
@@ -199,31 +213,8 @@ class SyncFrame(AppFrame):
         )
         self.clear_button.pack(side=tk.LEFT, padx=(5, 0))
 
-        # Course & file progress treeview
-        tree_frame = tk.Frame(self, padx=10)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        self.tree = ttk.Treeview(
-            tree_frame,
-            style="Sync.Treeview",
-            columns=("status", "progress"),
-            show="tree headings",
-            selectmode="browse",
-        )
-        self.tree.heading("#0", text="Name", anchor="w")
-        self.tree.heading("status", text="Status", anchor="w")
-        self.tree.heading("progress", text="Progress", anchor="e")
-        self.tree.column("#0", width=440, stretch=True)
-        self.tree.column("status", width=120, stretch=False, anchor="w")
-        self.tree.column("progress", width=80, stretch=False, anchor="e")
-        scrollbar = ttk.Scrollbar(
-            tree_frame, orient="vertical", command=self.tree.yview
-        )
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree = self._build_treeview()
 
-        # Action buttons
         button_frame = tk.Frame(self, padx=10)
         button_frame.pack(fill=tk.X, pady=(10, 5))
         self.logout_button = tk.Button(
@@ -240,21 +231,36 @@ class SyncFrame(AppFrame):
         )
         self.sync_button.pack(side=tk.RIGHT)
 
-        # Bottom status bar
         self.status_var = tk.StringVar(value="Loading courses...")
-        tk.Label(
-            self, textvariable=self.status_var, anchor="w", padx=10, pady=5
-        ).pack(fill=tk.X)
-
-        self.is_syncing = tk.BooleanVar(value=False)
-        self.is_syncing.trace_add("write", self.validate_buttons)
-        self.folder_path.trace_add("write", self.validate_buttons)
-
-        self.after_idle(
-            lambda: master.loop.create_task(self.load_idat_sync(credentials))
+        tk.Label(self, textvariable=self.status_var, anchor="w", padx=10, pady=5).pack(
+            fill=tk.X
         )
 
-    def validate_buttons(self, *args):
+    def _build_treeview(self) -> ttk.Treeview:
+        tree_frame = tk.Frame(self, padx=10)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(
+            tree_frame,
+            style="Sync.Treeview",
+            columns=("status", "progress"),
+            show="tree headings",
+            selectmode="browse",
+        )
+        tree.heading("#0", text="Name", anchor="w")
+        tree.heading("status", text="Status", anchor="w")
+        tree.heading("progress", text="Progress", anchor="e")
+        tree.column("#0", width=440, stretch=True)
+        tree.column("status", width=120, stretch=False, anchor="w")
+        tree.column("progress", width=80, stretch=False, anchor="e")
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree.bind("<Button-1>", self._on_tree_click)
+        return tree
+
+    def validate_buttons(self, *_args: object) -> None:
+        """Update toolbar and action button states from current sync/input state."""
         if not self.winfo_exists():
             return
         is_syncing = self.is_syncing.get()
@@ -321,26 +327,19 @@ class SyncFrame(AppFrame):
     def _insert_file_node(
         self,
         course_id: int,
-        course_iid: str,
         course_dir: Path,
         path: Path,
-        status: str,
-        progress: str,
+        state: tuple[str, str],
     ) -> str:
-        rel = (
-            path.relative_to(course_dir)
-            if path.is_relative_to(course_dir)
-            else path
-        )
-        parent_iid = self._ensure_folder_node(
-            course_id, course_iid, rel.parts[:-1]
-        )
+        course_iid = self._course_iids[course_id]
+        rel = path.relative_to(course_dir) if path.is_relative_to(course_dir) else path
+        parent_iid = self._ensure_folder_node(course_id, course_iid, rel.parts[:-1])
         return self.tree.insert(
             parent_iid,
             tk.END,
             text=rel.name,
             image=self._file_icon,
-            values=(status, progress),
+            values=state,
         )
 
     def _populate_courses(self, courses: Sequence[Course]) -> None:
@@ -352,9 +351,9 @@ class SyncFrame(AppFrame):
         self._course_progress.clear()
 
         self.in_progress_ids = get_in_progress_course_ids(courses)
-        self.courses = [
-            c for c in courses if c.id in self.in_progress_ids
-        ] + [c for c in courses if c.id not in self.in_progress_ids]
+        self.courses = [c for c in courses if c.id in self.in_progress_ids] + [
+            c for c in courses if c.id not in self.in_progress_ids
+        ]
         self.selected_course_ids = set(self.in_progress_ids)
         self.courses_loaded = True
 
@@ -374,18 +373,22 @@ class SyncFrame(AppFrame):
         self.validate_buttons()
 
     def select_in_progress(self) -> None:
+        """Select only courses belonging to the active academic term."""
         self.selected_course_ids = set(self.in_progress_ids)
         self._refresh_course_icons()
 
     def select_all(self) -> None:
+        """Select all loaded courses."""
         self.selected_course_ids = {c.id for c in self.courses}
         self._refresh_course_icons()
 
     def clear_selection(self) -> None:
+        """Clear all selected courses."""
         self.selected_course_ids.clear()
         self._refresh_course_icons()
 
     def toggle_course_row(self, iid: str) -> None:
+        """Toggle selection state for the course row identified by ``iid``."""
         course_id = self._iid_to_course_id.get(iid)
         if course_id is None:
             return
@@ -401,22 +404,24 @@ class SyncFrame(AppFrame):
         if self.tree.identify_element(event.x, event.y) == "Treeitem.indicator":
             return
         row_id = self.tree.identify_row(event.y)
-        if row_id and self.tree.parent(row_id) == "":
+        if row_id and not self.tree.parent(row_id):
             self.toggle_course_row(row_id)
 
     async def aclose(self) -> None:
+        """Cancel active tasks and close the underlying IDATSync service."""
         await super().aclose()
         service, self.idat_sync = self.idat_sync, None
         if service is not None:
             await service.aclose()
 
     async def do_logout(self) -> None:
+        """Close sync resources and return to LoginFrame."""
         if self.is_syncing.get():
             return
         try:
             await self.aclose()
         finally:
-            cast(MainApp, self.master).switch_to_login()
+            cast("MainApp", self.master).switch_to_login()
 
     async def _ensure_sync_service(self) -> IDATSync:
         created = self.idat_sync is None
@@ -425,6 +430,8 @@ class SyncFrame(AppFrame):
                 self.credentials,
                 self.config,
             )
+        if self.idat_sync is None:
+            raise RuntimeError("Sync service failed to initialize")
         try:
             if not self.courses_loaded:
                 courses = await self.idat_sync.list_courses()
@@ -442,7 +449,8 @@ class SyncFrame(AppFrame):
             msg = f"Sync error: {exc}"
         self.status_var.set(msg)
 
-    async def load_idat_sync(self, credentials: Credentials):
+    async def load_idat_sync(self, credentials: Credentials) -> None:
+        """Initialize the sync service and load the user's course list."""
         self.credentials = credentials
         self._active_task = asyncio.current_task()
         self.is_syncing.set(True)
@@ -457,86 +465,84 @@ class SyncFrame(AppFrame):
             if self.winfo_exists():
                 self.is_syncing.set(False)
 
+    def _on_files_discovered(self, event: CourseFilesDiscovered) -> None:
+        course = event.course
+        iid = self._course_iids.get(course.id)
+        if not iid:
+            return
+        self._clear_children(iid)
+        for key in [k for k in self._folder_iids if k[0] == course.id]:
+            del self._folder_iids[key]
+        for path in [p for p, (cid, _) in self._file_iids.items() if cid == course.id]:
+            del self._file_iids[path]
+        for path in event.synced_paths:
+            self._insert_file_node(
+                course.id, event.course_dir, path, ("Synced", "100%")
+            )
+        for path in event.pending_paths:
+            child_iid = self._insert_file_node(
+                course.id, event.course_dir, path, ("Pending", "0%")
+            )
+            self._file_iids[path] = (course.id, child_iid)
+        total = len(event.synced_paths) + len(event.pending_paths)
+        done = len(event.synced_paths)
+        self._course_progress[course.id] = [done, total]
+        self.tree.item(
+            iid,
+            values=("Syncing", self._format_progress(done, total)),
+            open=True,
+        )
+
+    def _on_task_completed(self, path: Path) -> None:
+        entry = self._file_iids.get(path)
+        if not entry:
+            return
+        course_id, child_iid = entry
+        self.tree.item(child_iid, values=("Completed", "100%"))
+        if counts := self._course_progress.get(course_id):
+            counts[0] += 1
+            if iid := self._course_iids.get(course_id):
+                self.tree.item(
+                    iid,
+                    values=(
+                        "Syncing",
+                        self._format_progress(counts[0], counts[1]),
+                    ),
+                )
+
+    def _on_course_completed(self, course: Course, error: Exception | None) -> None:
+        iid = self._course_iids.get(course.id)
+        if not iid:
+            return
+        counts = self._course_progress.get(course.id)
+        if error is None:
+            self.tree.item(iid, values=("Completed", "100%"))
+        else:
+            pct = self._format_progress(counts[0], counts[1]) if counts else "0%"
+            self.tree.item(iid, values=("Failed", pct))
+
     def _handle_event(self, event: SyncEvent) -> None:
         match event:
             case CourseSyncStarted(course=course):
                 if iid := self._course_iids.get(course.id):
                     self.tree.item(iid, values=("Fetching contents...", "0%"))
                 self.status_var.set(f"Fetching contents for {course.name}...")
-            case CourseFilesDiscovered(
-                course=course,
-                course_dir=course_dir,
-                synced_paths=synced_paths,
-                pending_paths=pending_paths,
-            ):
-                if iid := self._course_iids.get(course.id):
-                    self._clear_children(iid)
-                    for key in [
-                        k for k in self._folder_iids if k[0] == course.id
-                    ]:
-                        del self._folder_iids[key]
-                    for p in [
-                        p
-                        for p, (cid, _) in self._file_iids.items()
-                        if cid == course.id
-                    ]:
-                        del self._file_iids[p]
-                    for path in synced_paths:
-                        self._insert_file_node(
-                            course.id, iid, course_dir, path, "Synced", "100%"
-                        )
-                    for path in pending_paths:
-                        child_iid = self._insert_file_node(
-                            course.id, iid, course_dir, path, "Pending", "0%"
-                        )
-                        self._file_iids[path] = (course.id, child_iid)
-                    total = len(synced_paths) + len(pending_paths)
-                    done = len(synced_paths)
-                    self._course_progress[course.id] = [done, total]
-                    self.tree.item(
-                        iid,
-                        values=("Syncing", self._format_progress(done, total)),
-                        open=True,
-                    )
+            case CourseFilesDiscovered():
+                self._on_files_discovered(event)
             case TaskDownloadStarted(path=path):
                 if entry := self._file_iids.get(path):
-                    _, child_iid = entry
-                    self.tree.item(child_iid, values=("Downloading", "0%"))
+                    self.tree.item(entry[1], values=("Downloading", "0%"))
                 self.status_var.set(f"Downloading {path.name}...")
             case TaskDownloadCompleted(path=path):
-                if entry := self._file_iids.get(path):
-                    course_id, child_iid = entry
-                    self.tree.item(child_iid, values=("Completed", "100%"))
-                    if counts := self._course_progress.get(course_id):
-                        counts[0] += 1
-                        if iid := self._course_iids.get(course_id):
-                            self.tree.item(
-                                iid,
-                                values=(
-                                    "Syncing",
-                                    self._format_progress(
-                                        counts[0], counts[1]
-                                    ),
-                                ),
-                            )
+                self._on_task_completed(path)
             case TaskDownloadFailed(path=path):
                 if entry := self._file_iids.get(path):
-                    _, child_iid = entry
-                    self.tree.item(child_iid, values=("Failed", "0%"))
+                    self.tree.item(entry[1], values=("Failed", "0%"))
             case CourseSyncCompleted(course=course, error=error):
-                if iid := self._course_iids.get(course.id):
-                    counts = self._course_progress.get(course.id)
-                    if error is None:
-                        self.tree.item(iid, values=("Completed", "100%"))
-                    else:
-                        pct = (
-                            self._format_progress(counts[0], counts[1])
-                            if counts
-                            else "0%"
-                        )
-                        self.tree.item(iid, values=("Failed", pct))
+                self._on_course_completed(course, error)
 
-    async def do_sync(self):
+    async def do_sync(self) -> None:
+        """Run synchronization for all selected courses."""
         path = self.folder_path.get().strip()
         if not path or self.is_syncing.get():
             return
@@ -544,9 +550,7 @@ class SyncFrame(AppFrame):
         self.is_syncing.set(True)
         try:
             idat_sync = await self._ensure_sync_service()
-            selected = [
-                c for c in self.courses if c.id in self.selected_course_ids
-            ]
+            selected = [c for c in self.courses if c.id in self.selected_course_ids]
             if not selected:
                 return
 
@@ -572,9 +576,10 @@ class SyncFrame(AppFrame):
             if self.winfo_exists():
                 self.is_syncing.set(False)
 
-    def browse_folder(self):
+    def browse_folder(self) -> None:
+        """Open a folder picker dialog and store the chosen sync directory."""
         folder_selected = filedialog.askdirectory(
-            initialdir=os.path.expanduser("~"),
+            initialdir=str(Path.home()),
             parent=self.master,
             title="Select Sync Folder",
         )

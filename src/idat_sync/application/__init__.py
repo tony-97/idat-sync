@@ -1,3 +1,5 @@
+"""Application services and orchestration layer for idat_sync."""
+
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager

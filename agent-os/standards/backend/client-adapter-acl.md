@@ -8,11 +8,13 @@ class MoodleClient:
     async def fetch_enrolled_courses(self) -> list[dict]: ...
     async def download_file(self, url: str, dest: BinaryIO) -> None: ...
 
+
 # 2. *Adapter / *Downloader: Anti-Corruption Layer & port implementations
 class MoodleAdapter(CourseGateway, UrlContentStrategy):
     def __init__(self, client: MoodleClient, moodle_base_url: str) -> None:
         self.client = client
         ...
+
 
 class MoodleDownloader(Downloader[MoodleContent]):
     def __init__(self, client: MoodleClient) -> None:

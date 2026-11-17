@@ -1,17 +1,19 @@
-from datetime import date
+"""Integration and developer-script tests using real fixture data."""
+
 import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-
 from urllib.parse import urlparse
 
+import pytest
+
 from idat_sync.application.course_repository import CourseRepository
-from idat_sync.application.ports import RecordingGateway
+from idat_sync.application.ports import AuthenticationError, RecordingGateway
 from idat_sync.config import load_config
 from idat_sync.domain.content import (
     Content,
@@ -34,28 +36,37 @@ COURSES_JSON_PATH = Path("./all_courses_contents.json")
 CREDENTIALS_JSON_PATH = Path("./session.json")
 
 
+def _load_moodle_json_module(name: str) -> object:
+    script_path = REPO_ROOT / "scripts" / "moodle_json.py"
+    spec = importlib.util.spec_from_file_location(name, script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
+    """Tests for developer CLI scripts and .gitignore rules."""
+
     def test_scripts_location_gitignore_and_credentials_vocabulary(self):
-        self.assertFalse((REPO_ROOT / "login_cli.py").exists())
-        self.assertFalse((REPO_ROOT / "moodle_json.py").exists())
+        """Verify scripts live under scripts/ and sensitive artifacts are ignored."""
+        assert not (REPO_ROOT / "login_cli.py").exists()
+        assert not (REPO_ROOT / "moodle_json.py").exists()
 
         login_cli = REPO_ROOT / "scripts" / "login_cli.py"
         moodle_json = REPO_ROOT / "scripts" / "moodle_json.py"
-        self.assertTrue(login_cli.is_file())
-        self.assertTrue(moodle_json.is_file())
-        self.assertIn("Credentials", login_cli.read_text(encoding="utf-8"))
+        assert login_cli.is_file()
+        assert moodle_json.is_file()
+        assert "Credentials" in login_cli.read_text(encoding="utf-8")
 
         gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
-        self.assertIn("all_courses_contents.json", gitignore)
-        self.assertIn("session*.json", gitignore)
+        assert "all_courses_contents.json" in gitignore
+        assert "session*.json" in gitignore
 
     async def test_moodle_json_script_writes_courses_contents_and_assignments(self):
-        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
-        spec = importlib.util.spec_from_file_location("moodle_json", script_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
+        """Run moodle_json.main() and verify JSON output without stdout leaks."""
+        module = _load_moodle_json_module("moodle_json")
         mock_token_adapter = MagicMock()
         mock_token_adapter.fetch_token = AsyncMock(return_value="tok-123")
         mock_client = MagicMock()
@@ -74,7 +85,7 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_cwd = os.getcwd()
+            orig_cwd = Path.cwd()
             os.chdir(tmpdir)
             try:
                 stdout = io.StringIO()
@@ -83,8 +94,12 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch("builtins.input", return_value="jdoe@idat.pe"),
                     patch.object(module.getpass, "getpass", return_value="secret"),
-                    patch.object(module, "JsonCredentialStore", return_value=mock_store),
-                    patch.object(module, "MoodleTokenAdapter", return_value=mock_token_adapter),
+                    patch.object(
+                        module, "JsonCredentialStore", return_value=mock_store
+                    ),
+                    patch.object(
+                        module, "MoodleTokenAdapter", return_value=mock_token_adapter
+                    ),
                     patch.object(module, "MoodleClient", return_value=mock_client),
                     patch("sys.stdout", stdout),
                 ):
@@ -92,29 +107,22 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
             finally:
                 os.chdir(orig_cwd)
 
-            self.assertEqual(rc, 0)
+            assert not rc
             out_file = Path(tmpdir) / "all_courses_contents.json"
-            self.assertTrue(out_file.is_file())
+            assert out_file.is_file()
             payload = json.loads(out_file.read_text(encoding="utf-8"))
-            self.assertEqual(
-                payload,
-                [
-                    {
-                        "course": {"id": 10, "fullname": "Algorithms"},
-                        "contents": [{"id": 1, "name": "Week 1", "modules": []}],
-                        "assignments": [{"id": 501, "cmid": 201, "name": "Lab 1"}],
-                    }
-                ],
-            )
-            self.assertNotIn('"Algorithms"', stdout.getvalue())
+            assert payload == [
+                {
+                    "course": {"id": 10, "fullname": "Algorithms"},
+                    "contents": [{"id": 1, "name": "Week 1", "modules": []}],
+                    "assignments": [{"id": 501, "cmid": 201, "name": "Lab 1"}],
+                }
+            ]
+            assert '"Algorithms"' not in stdout.getvalue()
 
-    async def test_moodle_json_script_reuses_existing_credentials_without_prompting(self):
-        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
-        spec = importlib.util.spec_from_file_location("moodle_json_reuse", script_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
+    async def test_moodle_json_script_reuses_existing_credentials(self):
+        """Reuse saved Credentials without prompting for username or password."""
+        module = _load_moodle_json_module("moodle_json_reuse")
         mock_store = MagicMock()
         mock_store.load.return_value = {
             "token": "saved-tok",
@@ -127,32 +135,37 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
         mock_client.fetch_assignments = AsyncMock(return_value=[])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_cwd = os.getcwd()
+            orig_cwd = Path.cwd()
             os.chdir(tmpdir)
             try:
                 with (
-                    patch("builtins.input", side_effect=AssertionError("should not prompt")),
-                    patch.object(module.getpass, "getpass", side_effect=AssertionError("should not prompt")),
-                    patch.object(module, "JsonCredentialStore", return_value=mock_store),
-                    patch.object(module, "MoodleClient", return_value=mock_client) as mock_client_cls,
+                    patch(
+                        "builtins.input",
+                        side_effect=AssertionError("should not prompt"),
+                    ),
+                    patch.object(
+                        module.getpass,
+                        "getpass",
+                        side_effect=AssertionError("should not prompt"),
+                    ),
+                    patch.object(
+                        module, "JsonCredentialStore", return_value=mock_store
+                    ),
+                    patch.object(
+                        module, "MoodleClient", return_value=mock_client
+                    ) as mock_client_cls,
                 ):
                     rc = await module.main()
             finally:
                 os.chdir(orig_cwd)
 
-            self.assertEqual(rc, 0)
-            self.assertEqual(mock_client_cls.call_args.args[0], "saved-tok")
-            self.assertTrue((Path(tmpdir) / "all_courses_contents.json").is_file())
+            assert not rc
+            assert mock_client_cls.call_args.args[0] == "saved-tok"
+            assert (Path(tmpdir) / "all_courses_contents.json").is_file()
 
     async def test_moodle_json_script_returns_one_on_authentication_error(self):
-        from idat_sync.application.ports import AuthenticationError
-
-        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
-        spec = importlib.util.spec_from_file_location("moodle_json_auth_err", script_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
+        """Return exit code 1 when MoodleTokenAdapter raises AuthenticationError."""
+        module = _load_moodle_json_module("moodle_json_auth_err")
         mock_store = MagicMock()
         mock_store.load.return_value = None
         mock_token_adapter = MagicMock()
@@ -169,23 +182,18 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
         ):
             rc = await module.main()
 
-        self.assertEqual(rc, 1)
+        assert rc == 1
         mock_client_cls.assert_not_called()
 
     async def test_moodle_json_script_closes_client_on_completion_and_failure(self):
-        script_path = REPO_ROOT / "scripts" / "moodle_json.py"
-        spec = importlib.util.spec_from_file_location("moodle_json_close", script_path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
+        """Ensure MoodleClient async context manager closes on success and error."""
+        module = _load_moodle_json_module("moodle_json_close")
         mock_store = MagicMock()
         mock_store.load.return_value = {
             "token": "saved-tok",
             "sharepoint_storage_state": {"cookies": []},
         }
 
-        # Completion case
         ok_client = MagicMock()
         ok_client.__aenter__ = AsyncMock(return_value=ok_client)
         ok_client.__aexit__ = AsyncMock(return_value=False)
@@ -193,32 +201,35 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
         ok_client.fetch_assignments = AsyncMock(return_value=[])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            orig_cwd = os.getcwd()
+            orig_cwd = Path.cwd()
             os.chdir(tmpdir)
             try:
                 with (
-                    patch.object(module, "JsonCredentialStore", return_value=mock_store),
+                    patch.object(
+                        module, "JsonCredentialStore", return_value=mock_store
+                    ),
                     patch.object(module, "MoodleClient", return_value=ok_client),
                 ):
                     rc = await module.main()
             finally:
                 os.chdir(orig_cwd)
-        self.assertEqual(rc, 0)
+        assert not rc
         ok_client.__aenter__.assert_awaited_once_with()
         ok_client.__aexit__.assert_awaited_once()
 
-        # Failure case
         fail_client = MagicMock()
         fail_client.__aenter__ = AsyncMock(return_value=fail_client)
         fail_client.__aexit__ = AsyncMock(return_value=False)
-        fail_client.fetch_enrolled_courses = AsyncMock(side_effect=RuntimeError("ws boom"))
+        fail_client.fetch_enrolled_courses = AsyncMock(
+            side_effect=RuntimeError("ws boom")
+        )
 
         with (
             patch.object(module, "JsonCredentialStore", return_value=mock_store),
             patch.object(module, "MoodleClient", return_value=fail_client),
+            pytest.raises(RuntimeError, match="ws boom"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "ws boom"):
-                await module.main()
+            await module.main()
         fail_client.__aenter__.assert_awaited_once_with()
         fail_client.__aexit__.assert_awaited_once()
 
@@ -227,12 +238,15 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
     COURSES_JSON_PATH.is_file(), "Requires ./all_courses_contents.json"
 )
 class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
+    """Tests exercising adapters and repository against real course JSON fixture."""
+
     @classmethod
     def setUpClass(cls):
+        """Load the real courses JSON fixture and config once per class."""
         cls.raw_data = json.loads(COURSES_JSON_PATH.read_text(encoding="utf-8"))
         cls.config = load_config()
 
-    async def test_moodle_adapter_and_repository_map_real_courses_and_assignments(self):
+    def _build_moodle_adapter(self) -> MoodleAdapter:
         mock_moodle_client = MagicMock(spec=MoodleClient)
         mock_moodle_client.fetch_enrolled_courses.return_value = [
             entry["course"] for entry in self.raw_data
@@ -242,8 +256,8 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
             for entry in self.raw_data
             if entry.get("course", {}).get("id") is not None
         }
-        mock_moodle_client.fetch_course_contents.side_effect = (
-            lambda cid: contents_by_id.get(cid, [])
+        mock_moodle_client.fetch_course_contents.side_effect = lambda cid: (
+            contents_by_id.get(cid, [])
         )
         mock_moodle_client.fetch_assignments.return_value = [
             {
@@ -253,12 +267,12 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
             for entry in self.raw_data
             if entry.get("course", {}).get("id") is not None
         ]
-
-        moodle_adapter = MoodleAdapter(
+        return MoodleAdapter(
             client=mock_moodle_client,
             moodle_base_url=self.config.moodle_base_url,
         )
 
+    def _build_sharepoint_adapter(self) -> SharepointApiAdapter:
         mock_sp_client = MagicMock(spec=SharepointClient)
         mock_sp_file = MagicMock()
         mock_sp_file.name = "sp_item.pdf"
@@ -272,8 +286,7 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
         mock_sp_client.fetch_file_by_id.return_value = mock_sp_file
         mock_sp_client.fetch_folder_files.return_value = [mock_sp_file]
         mock_sp_client.fetch_subfolders.return_value = []
-
-        sp_adapter = SharepointApiAdapter(
+        return SharepointApiAdapter(
             client=mock_sp_client,
             semester_start=self.config.semester_start,
             sharepoint_host=self.config.sharepoint_host,
@@ -283,32 +296,7 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
             timezone=self.config.timezone,
         )
 
-        repo = CourseRepository(
-            course_gateway=moodle_adapter,
-            recording_gateway=MagicMock(spec=RecordingGateway),
-            url_strategies=[moodle_adapter, sp_adapter],
-        )
-
-        courses = await repo.list_courses()
-        self.assertEqual(len(courses), len(self.raw_data))
-        self.assertTrue(get_in_progress_course_ids(courses))
-
-        all_remote_contents: list[Content] = []
-        for course in courses:
-            await repo.populate_course_sections(course)
-            course_dir = Path(safe_filename(course.name))
-            items = await repo.get_course_content(course, course_dir)
-            for item in items:
-                self.assertIsInstance(
-                    item, (StringContent, MoodleContent, SharepointContent)
-                )
-                self.assertFalse(item.path.is_absolute())
-                self.assertTrue(item.path.is_relative_to(course_dir))
-            all_remote_contents.extend(items)
-
-        self.assertGreater(len(all_remote_contents), 0)
-
-        # Verify both SharePoint hosts are routed to SharepointApiAdapter
+    def _assert_sharepoint_routing(self, sp_adapter: SharepointApiAdapter) -> None:
         all_urls = [
             c.get("fileurl", "")
             for entry in self.raw_data
@@ -316,59 +304,77 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
             for mod in sec.get("modules", [])
             for c in mod.get("contents", [])
         ]
-        if any(self.config.sharepoint_host in u for u in all_urls):
-            self.assertTrue(
-                any(
-                    sp_adapter.can_handle(u)
-                    for u in all_urls
-                    if self.config.sharepoint_host in u
-                )
-            )
-        if any(self.config.sharepoint_personal_host in u for u in all_urls):
-            self.assertTrue(
-                any(
-                    sp_adapter.can_handle(u)
-                    for u in all_urls
-                    if self.config.sharepoint_personal_host in u
-                )
-            )
+        for host in (self.config.sharepoint_host, self.config.sharepoint_personal_host):
+            matching = [u for u in all_urls if host in u]
+            if matching:
+                assert any(sp_adapter.can_handle(u) for u in matching)
 
-        # Verify assignment intro HTML and introattachments mapping when assignments are present
+    def _assert_assignments_mapped(self, all_remote_contents: list[Content]) -> None:
         expected_assign_ids = {
             int(a["id"])
             for entry in self.raw_data
             for a in entry.get("assignments", [])
             if isinstance(a, dict) and a.get("id") is not None
         }
-        if expected_assign_ids:
-            intro_names = [
-                item.path.name
-                for item in all_remote_contents
-                if isinstance(item, StringContent) and item.path.name.endswith("-intro.html")
-            ]
-            self.assertGreater(len(intro_names), 0)
+        if not expected_assign_ids:
+            return
+        intro_names = [
+            item.path.name
+            for item in all_remote_contents
+            if isinstance(item, StringContent)
+            and item.path.name.endswith("-intro.html")
+        ]
+        assert len(intro_names) > 0
 
-            expected_att_names = {
-                safe_path_segment(att["filename"])
-                for entry in self.raw_data
-                for a in entry.get("assignments", [])
-                if isinstance(a, dict)
-                for att in a.get("introattachments", [])
-                if isinstance(att, dict) and att.get("filename")
-            }
-            if expected_att_names:
-                emitted_names = {item.path.name for item in all_remote_contents}
-                self.assertTrue(
-                    expected_att_names.issubset(emitted_names),
-                    f"Missing introattachments: {expected_att_names - emitted_names}",
+        expected_att_names = {
+            safe_path_segment(att["filename"])
+            for entry in self.raw_data
+            for a in entry.get("assignments", [])
+            if isinstance(a, dict)
+            for att in a.get("introattachments", [])
+            if isinstance(att, dict) and att.get("filename")
+        }
+        if expected_att_names:
+            emitted_names = {item.path.name for item in all_remote_contents}
+            assert expected_att_names.issubset(emitted_names), (
+                f"Missing introattachments: {expected_att_names - emitted_names}"
+            )
+
+    async def test_moodle_adapter_and_repository_map_real_courses(self):
+        """Map real course JSON fixture through adapters, repository, and SyncDiff."""
+        moodle_adapter = self._build_moodle_adapter()
+        sp_adapter = self._build_sharepoint_adapter()
+        repo = CourseRepository(
+            course_gateway=moodle_adapter,
+            recording_gateway=MagicMock(spec=RecordingGateway),
+            url_strategies=[moodle_adapter, sp_adapter],
+        )
+
+        courses = await repo.list_courses()
+        assert len(courses) == len(self.raw_data)
+        assert get_in_progress_course_ids(courses)
+
+        all_remote_contents: list[Content] = []
+        for course in courses:
+            await repo.populate_course_sections(course)
+            course_dir = Path(safe_filename(course.name))
+            items = await repo.get_course_content(course, course_dir)
+            for item in items:
+                assert isinstance(
+                    item, (StringContent, MoodleContent, SharepointContent)
                 )
+                assert not item.path.is_absolute()
+                assert item.path.is_relative_to(course_dir)
+            all_remote_contents.extend(items)
+
+        assert len(all_remote_contents) > 0
+        self._assert_sharepoint_routing(sp_adapter)
+        self._assert_assignments_mapped(all_remote_contents)
 
         diff = SyncDiff.from_trees(all_remote_contents, {})
-        self.assertEqual(
-            diff.missing_paths, {item.path for item in all_remote_contents}
-        )
-        self.assertEqual(diff.synced_paths, set())
-        self.assertEqual(diff.outdated_paths, set())
+        assert diff.missing_paths == {item.path for item in all_remote_contents}
+        assert diff.synced_paths == set()
+        assert diff.outdated_paths == set()
 
 
 @unittest.skipUnless(
@@ -376,8 +382,11 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
     "Requires ./all_courses_contents.json and ./session.json",
 )
 class TestLiveCredentialsIntegration(unittest.IsolatedAsyncioTestCase):
+    """Live integration tests using local session.json and course fixture."""
+
     @classmethod
     def setUpClass(cls):
+        """Load live credentials and real course fixture."""
         cls.config = load_config()
         cls.credentials = JsonCredentialStore(CREDENTIALS_JSON_PATH).load()
         if cls.credentials is None:
@@ -394,53 +403,63 @@ class TestLiveCredentialsIntegration(unittest.IsolatedAsyncioTestCase):
                         if url and filename:
                             yield filename, url, int(item.get("timemodified") or 0)
 
-    async def test_live_moodle_download_and_sharepoint_url_resolution(self):
+    def _collect_candidates(self) -> dict[str, list[tuple[str, str, int]]]:
         moodle_host = (urlparse(self.config.moodle_base_url).hostname or "").lower()
         sp_host = self.config.sharepoint_host.lower()
         sp_personal_host = self.config.sharepoint_personal_host.lower()
-
-        moodle_candidates = []
-        sp_b_candidates = []
-        sp_f_candidates = []
-        sp_direct_candidates = []
-        sp_personal_b_candidates = []
-
+        buckets: dict[str, list[tuple[str, str, int]]] = {
+            "moodle": [],
+            "sp_b": [],
+            "sp_f": [],
+            "sp_direct": [],
+            "personal_b": [],
+        }
         for filename, url, timemodified in self._iter_module_contents():
             parsed = urlparse(url)
             host = (parsed.hostname or "").lower()
-            path_lower = parsed.path.lower()
-            query_lower = parsed.query.lower()
+            item = (filename, url, timemodified)
+            if host == moodle_host and "/pluginfile.php/" in parsed.path.lower():
+                buckets["moodle"].append(item)
+            elif host == sp_host and parsed.path.lower().startswith("/:b:/"):
+                buckets["sp_b"].append(item)
+            elif host == sp_host and parsed.path.lower().startswith("/:f:/"):
+                buckets["sp_f"].append(item)
+            elif host == sp_host and (
+                "uniqueid=" in parsed.query.lower()
+                or "sourcedoc=" in parsed.query.lower()
+            ):
+                buckets["sp_direct"].append(item)
+            elif host == sp_personal_host and parsed.path.lower().startswith("/:b:/"):
+                buckets["personal_b"].append(item)
+        return buckets
 
-            if host == moodle_host and "/pluginfile.php/" in path_lower:
-                moodle_candidates.append((filename, url, timemodified))
-            elif host == sp_host and path_lower.startswith("/:b:/"):
-                sp_b_candidates.append((filename, url, timemodified))
-            elif host == sp_host and path_lower.startswith("/:f:/"):
-                sp_f_candidates.append((filename, url, timemodified))
-            elif host == sp_host and ("uniqueid=" in query_lower or "sourcedoc=" in query_lower):
-                sp_direct_candidates.append((filename, url, timemodified))
-            elif host == sp_personal_host and path_lower.startswith("/:b:/"):
-                sp_personal_b_candidates.append((filename, url, timemodified))
-
-        # 1. Live Moodle file download
-        self.assertGreater(len(moodle_candidates), 0, "Expected at least one Moodle file URL")
+    async def _verify_live_moodle_download(
+        self, candidates: list[tuple[str, str, int]]
+    ) -> None:
+        assert candidates, "Expected at least one Moodle file URL"
+        assert self.credentials is not None
         moodle_client = MoodleClient(
             self.credentials["token"],
             base_url=self.config.moodle_base_url,
             request_delay=0.0,
         )
-        downloader = MoodleDownloader(moodle_client)
-        fn, url, ts = moodle_candidates[0]
+        fn, url, ts = candidates[0]
         with tempfile.TemporaryDirectory() as tmpdir:
             target = Path(tmpdir) / Path(fn).name
-            await downloader.download(MoodleContent(target, ts, url))
-            self.assertTrue(target.is_file())
-            self.assertGreater(target.stat().st_size, 0)
+            await MoodleDownloader(moodle_client).download(
+                MoodleContent(target, ts, url)
+            )
+            assert target.is_file()
+            assert target.stat().st_size > 0
 
-        # 2. Live SharePoint URL resolution across host & personal_host
-        cookies = self.credentials.get("sharepoint_storage_state", {}).get("cookies", [])
+    async def test_live_moodle_download_and_sharepoint_url_resolution(self):
+        """Verify live Moodle download and SharePoint URL resolution."""
+        buckets = self._collect_candidates()
+        await self._verify_live_moodle_download(buckets["moodle"])
+        assert self.credentials is not None
+
         sp_client = await SharepointClient.create(
-            cookies,
+            self.credentials.get("sharepoint_storage_state", {}).get("cookies", []),
             sharepoint_personal_host=self.config.sharepoint_personal_host,
             academic_site_url=self.config.sharepoint_academic_site_url,
             request_delay=0.0,
@@ -454,26 +473,23 @@ class TestLiveCredentialsIntegration(unittest.IsolatedAsyncioTestCase):
             week_folder_prefix=self.config.week_folder_prefix,
             timezone=self.config.timezone,
         )
-
-        for label, candidates in [
-            ("sharepoint :b:", sp_b_candidates),
-            ("sharepoint :f:", sp_f_candidates),
-            ("sharepoint direct", sp_direct_candidates),
-            ("personal :b:", sp_personal_b_candidates),
+        for label, key in [
+            ("sharepoint :b:", "sp_b"),
+            ("sharepoint :f:", "sp_f"),
+            ("sharepoint direct", "sp_direct"),
+            ("personal :b:", "personal_b"),
         ]:
             with self.subTest(category=label):
-                self.assertGreater(len(candidates), 0, f"Expected at least one {label} URL")
+                candidates = buckets[key]
+                assert candidates, f"Expected at least one {label} URL"
                 resolved_any = False
-                for fn, url, ts in candidates[:5]:
-                    self.assertTrue(sp_adapter.can_handle(url))
-                    items = await sp_adapter.list_url_content(url, fn, ts)
+                for c_fn, c_url, c_ts in candidates[:5]:
+                    assert sp_adapter.can_handle(c_url)
+                    items = await sp_adapter.list_url_content(c_url, c_fn, c_ts)
                     if items:
-                        self.assertTrue(
-                            all(isinstance(i, SharepointContent) for i in items)
-                        )
+                        assert all(isinstance(i, SharepointContent) for i in items)
                         resolved_any = True
                         break
-                self.assertTrue(
-                    resolved_any,
-                    f"No live {label} candidate resolved to non-empty SharepointContent",
+                assert resolved_any, (
+                    f"No live {label} candidate resolved to non-empty SharepointContent"
                 )

@@ -1,3 +1,5 @@
+"""JSON file persistence for user Credentials."""
+
 import json
 import logging
 import os
@@ -13,11 +15,13 @@ class JsonCredentialStore:
     """JSON file store for persisted user Credentials."""
 
     def __init__(self, credentials_file: str | Path) -> None:
+        """Initialize the store targeting ``credentials_file``."""
         self.credentials_file = Path(credentials_file)
 
     def load(self) -> Credentials | None:
+        """Load and validate Credentials from disk, or return None."""
         try:
-            with open(self.credentials_file, "r", encoding="utf-8") as f:
+            with self.credentials_file.open(encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             return None
@@ -32,33 +36,33 @@ class JsonCredentialStore:
             or not isinstance(storage_state, dict)
         ):
             return None
-        return cast(Credentials, data)
+        return cast("Credentials", data)
 
     def save(self, credentials: Credentials) -> bool:
+        """Atomically persist ``credentials`` with 0o600 permissions."""
         part_path = self.credentials_file.with_name(
             f"{self.credentials_file.name}.part"
         )
         try:
             self.credentials_file.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(
-                part_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-            )
+            fd = os.open(part_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(credentials, f)
-            os.chmod(part_path, 0o600)
-            os.replace(part_path, self.credentials_file)
-            return True
-        except OSError as e:
+            part_path.chmod(0o600)
+            part_path.replace(self.credentials_file)
+        except OSError:
             part_path.unlink(missing_ok=True)
-            _logger.error("Could not create credentials file: %s", e)
+            _logger.exception("Could not create credentials file")
             return False
+        return True
 
     def clear(self) -> None:
+        """Delete the credentials file if it exists."""
         try:
             if self.credentials_file.exists():
                 self.credentials_file.unlink()
                 _logger.info("User has been logged out.")
             else:
                 _logger.info("Already logged out (no credentials file found).")
-        except OSError as e:
-            _logger.error("Could not remove credentials file: %s", e)
+        except OSError:
+            _logger.exception("Could not remove credentials file")

@@ -1,68 +1,106 @@
+"""Unit and UI integration tests for authentication, credential storage, and frames."""
+# pylint: disable=too-many-lines
+
+import ast
 import asyncio
 import contextlib
 import inspect
-import io
-from pathlib import Path
+import sys
 import tempfile
 import threading
 import tkinter as tk
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+import idat_sync.ui as ui_pkg
+import idat_sync.ui.app as app_module
+import idat_sync.ui.sync_frame as sync_frame_mod
+from idat_sync.application import ports
 from idat_sync.application.auth_service import AuthService
+from idat_sync.application.events import (
+    CourseFilesDiscovered,
+    CourseSyncCompleted,
+    CourseSyncStarted,
+    TaskDownloadCompleted,
+    TaskDownloadFailed,
+    TaskDownloadStarted,
+)
 from idat_sync.application.ports import (
     AuthenticationError,
     Credentials,
+    CredentialsExpiredError,
     SharepointAuthPort,
     StorageStateData,
 )
+from idat_sync.config import SyncConfig
+from idat_sync.domain.course import Course, CourseSection
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
+from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.login_frame import LoginFrame
+from idat_sync.ui.sync_frame import SyncFrame
 
 
-class FakeMoodleTokenPort:
-    def __init__(self, token: str | None = "moodle-tok") -> None:
+class FakeMoodleTokenPort:  # pylint: disable=too-few-public-methods
+    """In-memory fake MoodleTokenPort for AuthService tests."""
+
+    def __init__(self, token: str | None = "moodle-tok") -> None:  # noqa: S107
+        """Initialize the fake with a fixed token response."""
         self.token = token
         self.calls: list[tuple[str, str]] = []
 
     async def fetch_token(self, username: str, password: str) -> str | None:
+        """Record credentials and return the configured token."""
         self.calls.append((username, password))
         return self.token
 
 
-class FakeSharepointAuthPort:
+class FakeSharepointAuthPort:  # pylint: disable=too-few-public-methods
+    """In-memory fake SharepointAuthPort for AuthService tests."""
+
     def __init__(self, storage_state: StorageStateData | None = None) -> None:
+        """Initialize the fake with a fixed storage state response."""
         self.storage_state = storage_state
         self.calls: list[tuple[str, str, str]] = []
 
     async def fetch_storage_state(
         self, username: str, password: str, get_mfa_code
     ) -> StorageStateData | None:
+        """Await MFA callback, record inputs, and return storage state."""
         code = await get_mfa_code()
         self.calls.append((username, password, code))
         return self.storage_state
 
 
 class InMemoryCredentialStore:
+    """In-memory CredentialStorePort implementation for tests."""
+
     def __init__(
         self,
         initial: Credentials | None = None,
+        *,
         save_result: bool = True,
     ) -> None:
+        """Initialize store with optional initial Credentials and save result."""
         self.stored = initial
         self.save_result = save_result
         self.cleared = False
 
     def load(self) -> Credentials | None:
+        """Return stored Credentials."""
         return self.stored
 
     def save(self, credentials: Credentials) -> bool:
+        """Store Credentials if ``save_result`` is True."""
         if self.save_result:
             self.stored = credentials
         return self.save_result
 
     def clear(self) -> None:
+        """Clear stored Credentials."""
         self.stored = None
         self.cleared = True
 
@@ -72,11 +110,16 @@ async def _mfa_code() -> str:
 
 
 class TestAuthService(unittest.TestCase):
-    def test_login_strips_domain_for_moodle_passes_full_username_to_sharepoint_and_saves(self):
+    """Tests for AuthService login orchestration, cancellation, and storage."""
+
+    def test_login_strips_domain_for_moodle_and_saves_credentials(self):
+        """Strip email domain for Moodle while passing full username to SharePoint."""
         expected_state: StorageStateData = {
-            "cookies": [{"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}]
+            "cookies": [
+                {"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}
+            ]
         }
-        moodle = FakeMoodleTokenPort(token="tok-abc")
+        moodle = FakeMoodleTokenPort(token="tok-abc")  # noqa: S106
         sharepoint = FakeSharepointAuthPort(storage_state=expected_state)
         store = InMemoryCredentialStore()
         service = AuthService(
@@ -87,55 +130,67 @@ class TestAuthService(unittest.TestCase):
 
         ok = asyncio.run(service.login("jdoe@custom.edu", "secret", _mfa_code))
 
-        self.assertTrue(ok)
-        self.assertEqual(moodle.calls, [("jdoe", "secret")])
-        self.assertEqual(sharepoint.calls, [("jdoe@custom.edu", "secret", "123456")])
-        self.assertEqual(
-            store.stored,
-            {"token": "tok-abc", "sharepoint_storage_state": expected_state},
-        )
+        assert ok
+        assert moodle.calls == [("jdoe", "secret")]
+        assert sharepoint.calls == [("jdoe@custom.edu", "secret", "123456")]
+        assert store.stored == {
+            "token": "tok-abc",
+            "sharepoint_storage_state": expected_state,
+        }
 
-    def test_login_runs_providers_concurrently_and_offloads_blocking_calls_to_threads(self):
+    def test_login_runs_providers_concurrently_and_offloads_save_to_thread(self):
+        """Run Moodle and SharePoint concurrently and save Credentials off-thread."""
         main_thread_id = threading.get_ident()
         save_threads: list[int] = []
 
         async def exercise() -> bool:
             sp_started = asyncio.Event()
 
-            class ConcurrentMoodlePort:
-                async def fetch_token(self, username: str, password: str) -> str | None:
+            class ConcurrentMoodlePort:  # pylint: disable=too-few-public-methods
+                """Stub Moodle port waiting on SharePoint start."""
+
+                async def fetch_token(
+                    self, _username: str, _password: str
+                ) -> str | None:
+                    """Wait for SharePoint start and return token."""
                     await asyncio.wait_for(sp_started.wait(), timeout=2.0)
                     return "tok-concurrent"
 
-            class ConcurrentSharepointPort:
+            class ConcurrentSharepointPort:  # pylint: disable=too-few-public-methods
+                """Stub SharePoint port signalling concurrent execution."""
+
                 async def fetch_storage_state(
-                    self, username: str, password: str, get_mfa_code
+                    self, _username: str, _password: str, get_mfa_code
                 ) -> StorageStateData | None:
+                    """Signal start, await MFA, and return empty cookies."""
                     await asyncio.sleep(0)
                     sp_started.set()
                     await get_mfa_code()
                     return {"cookies": []}
 
             class ThreadCheckingStore(InMemoryCredentialStore):
+                """Store recording which thread executes save()."""
+
                 def save(self, credentials: Credentials) -> bool:
                     save_threads.append(threading.get_ident())
                     return super().save(credentials)
 
             store = ThreadCheckingStore()
             service = AuthService(
-                moodle_auth=ConcurrentMoodlePort(),
-                sharepoint_auth=ConcurrentSharepointPort(),
+                moodle_auth=ConcurrentMoodlePort(),  # type: ignore[arg-type]
+                sharepoint_auth=ConcurrentSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
             return await service.login("jdoe@idat.pe", "secret", _mfa_code)
 
         ok = asyncio.run(exercise())
 
-        self.assertTrue(ok)
-        self.assertEqual(len(save_threads), 1)
-        self.assertNotEqual(save_threads[0], main_thread_id)
+        assert ok
+        assert len(save_threads) == 1
+        assert save_threads[0] != main_thread_id
 
     def test_login_returns_false_without_saving_when_either_provider_fails(self):
+        """Return False without saving when either provider or store fails."""
         state: StorageStateData = {"cookies": []}
 
         for token, sp_state in [(None, state), ("", state), ("tok", None), ("tok", {})]:
@@ -147,18 +202,19 @@ class TestAuthService(unittest.TestCase):
                     credential_store=store,
                 )
                 ok = asyncio.run(service.login("jdoe", "secret", _mfa_code))
-                self.assertFalse(ok)
-                self.assertIsNone(store.stored)
+                assert not ok
+                assert store.stored is None
 
         failing_store = InMemoryCredentialStore(save_result=False)
         service = AuthService(
-            moodle_auth=FakeMoodleTokenPort(token="tok"),
+            moodle_auth=FakeMoodleTokenPort(token="tok"),  # noqa: S106
             sharepoint_auth=FakeSharepointAuthPort(storage_state=state),
             credential_store=failing_store,
         )
-        self.assertFalse(asyncio.run(service.login("jdoe", "secret", _mfa_code)))
+        assert not asyncio.run(service.login("jdoe", "secret", _mfa_code))
 
     def test_logout_is_authenticated_and_get_credentials_delegate_to_store(self):
+        """Delegate is_authenticated, get_credentials, and logout to store."""
         creds: Credentials = {
             "token": "tok-1",
             "sharepoint_storage_state": {"cookies": []},
@@ -170,35 +226,41 @@ class TestAuthService(unittest.TestCase):
             credential_store=store,
         )
 
-        self.assertTrue(service.is_authenticated())
-        self.assertEqual(service.get_credentials(), creds)
+        assert service.is_authenticated()
+        assert service.get_credentials() == creds
 
         service.logout()
 
-        self.assertTrue(store.cleared)
-        self.assertFalse(service.is_authenticated())
-        self.assertIsNone(service.get_credentials())
+        assert store.cleared
+        assert not service.is_authenticated()
+        assert service.get_credentials() is None
 
     def test_login_omits_login_flow_ended_parameter(self):
+        """Ensure AuthService.login and SharepointAuthPort omit login_flow_ended."""
         for fn in (AuthService.login, SharepointAuthPort.fetch_storage_state):
             sig = inspect.signature(fn)
-            self.assertNotIn("login_flow_ended", sig.parameters)
-            self.assertEqual(
-                list(sig.parameters), ["self", "username", "password", "get_mfa_code"]
-            )
+            assert "login_flow_ended" not in sig.parameters
+            assert list(sig.parameters) == [
+                "self",
+                "username",
+                "password",
+                "get_mfa_code",
+            ]
 
     def test_authenticate_strips_domain_and_awaits_moodle_port(self):
-        moodle = FakeMoodleTokenPort(token="tok-auth")
+        """Strip email domain before delegating authenticate() to MoodleTokenPort."""
+        moodle = FakeMoodleTokenPort(token="tok-auth")  # noqa: S106
         service = AuthService(
             moodle_auth=moodle,
             sharepoint_auth=FakeSharepointAuthPort(),
             credential_store=InMemoryCredentialStore(),
         )
         token = asyncio.run(service.authenticate("jdoe@custom.edu", "secret"))
-        self.assertEqual(token, "tok-auth")
-        self.assertEqual(moodle.calls, [("jdoe", "secret")])
+        assert token == "tok-auth"  # noqa: S105
+        assert moodle.calls == [("jdoe", "secret")]
 
-    def test_login_cancels_sharepoint_task_and_raises_exception_group_on_moodle_error(self):
+    def test_login_cancels_sharepoint_task_on_moodle_error(self):
+        """Cancel sibling SharePoint task and raise ExceptionGroup on error."""
         sp_cancelled: list[bool] = []
         sp_cleaned_up: list[bool] = []
         store = InMemoryCredentialStore()
@@ -206,15 +268,23 @@ class TestAuthService(unittest.TestCase):
         async def exercise() -> None:
             sp_started = asyncio.Event()
 
-            class FailingMoodlePort:
-                async def fetch_token(self, username: str, password: str) -> str | None:
+            class FailingMoodlePort:  # pylint: disable=too-few-public-methods
+                """Stub Moodle port raising RuntimeError after SharePoint starts."""
+
+                async def fetch_token(
+                    self, _username: str, _password: str
+                ) -> str | None:
+                    """Raise RuntimeError once SharePoint starts."""
                     await asyncio.wait_for(sp_started.wait(), timeout=2.0)
                     raise RuntimeError("moodle HTTP 500")
 
-            class HangingSharepointPort:
+            class HangingSharepointPort:  # pylint: disable=too-few-public-methods
+                """Stub SharePoint port recording cancellation."""
+
                 async def fetch_storage_state(
-                    self, username: str, password: str, get_mfa_code
+                    self, _username: str, _password: str, _get_mfa_code
                 ) -> StorageStateData | None:
+                    """Wait indefinitely until cancelled."""
                     sp_started.set()
                     try:
                         await asyncio.get_running_loop().create_future()
@@ -226,41 +296,43 @@ class TestAuthService(unittest.TestCase):
                     return None
 
             service = AuthService(
-                moodle_auth=FailingMoodlePort(),
-                sharepoint_auth=HangingSharepointPort(),
+                moodle_auth=FailingMoodlePort(),  # type: ignore[arg-type]
+                sharepoint_auth=HangingSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
 
-            with self.assertRaises(ExceptionGroup) as ctx:
+            with pytest.raises(ExceptionGroup) as ctx:
                 await service.login("jdoe", "secret", _mfa_code)
-            self.assertEqual(sp_cancelled, [True])
-            self.assertEqual(sp_cleaned_up, [True])
-            self.assertEqual(
-                [str(exc) for exc in ctx.exception.exceptions],
-                ["moodle HTTP 500"],
-            )
+            assert sp_cancelled == [True]
+            assert sp_cleaned_up == [True]
+            assert [str(exc) for exc in ctx.value.exceptions] == ["moodle HTTP 500"]
 
         asyncio.run(exercise())
-        self.assertIsNone(store.stored)
+        assert store.stored is None
 
-    def test_login_cancels_sibling_and_returns_false_on_authentication_error(self):
-        from idat_sync.application.ports import AuthenticationError
+    def test_login_cancels_sibling_on_moodle_authentication_error(self):
+        """Cancel SharePoint and return False when Moodle raises AuthenticationError."""
+        assert issubclass(AuthenticationError, RuntimeError)
 
-        self.assertTrue(issubclass(AuthenticationError, RuntimeError))
-
-        async def exercise_moodle_rejected() -> bool:
+        async def exercise() -> bool:
             sp_started = asyncio.Event()
             sp_cancelled: list[bool] = []
 
-            class RejectedMoodlePort:
-                async def fetch_token(self, username: str, password: str) -> str:
+            class RejectedMoodlePort:  # pylint: disable=too-few-public-methods
+                """Stub Moodle port rejecting credentials."""
+
+                async def fetch_token(self, _username: str, _password: str) -> str:
+                    """Raise AuthenticationError."""
                     await asyncio.wait_for(sp_started.wait(), timeout=2.0)
                     raise AuthenticationError("invalid moodle creds")
 
-            class SlowSharepointPort:
+            class SlowSharepointPort:  # pylint: disable=too-few-public-methods
+                """Stub SharePoint port waiting for cancellation."""
+
                 async def fetch_storage_state(
-                    self, username: str, password: str, get_mfa_code
+                    self, _username: str, _password: str, _get_mfa_code
                 ) -> StorageStateData:
+                    """Wait indefinitely until cancelled."""
                     sp_started.set()
                     try:
                         await asyncio.get_running_loop().create_future()
@@ -276,16 +348,24 @@ class TestAuthService(unittest.TestCase):
                 credential_store=store,
             )
             ok = await service.login("jdoe", "bad", _mfa_code)
-            self.assertEqual(sp_cancelled, [True])
-            self.assertIsNone(store.stored)
+            assert sp_cancelled == [True]
+            assert store.stored is None
             return ok
+
+        assert not asyncio.run(exercise())
+
+    def test_login_cancels_sibling_on_sharepoint_auth_and_mixed_errors(self):
+        """Cancel Moodle on SharePoint AuthenticationError and surface crashes."""
 
         async def exercise_sharepoint_rejected() -> bool:
             moodle_started = asyncio.Event()
             moodle_cancelled: list[bool] = []
 
-            class SlowMoodlePort:
-                async def fetch_token(self, username: str, password: str) -> str:
+            class SlowMoodlePort:  # pylint: disable=too-few-public-methods
+                """Stub Moodle port waiting for cancellation."""
+
+                async def fetch_token(self, _username: str, _password: str) -> str:
+                    """Wait indefinitely until cancelled."""
                     moodle_started.set()
                     try:
                         await asyncio.get_running_loop().create_future()
@@ -294,10 +374,13 @@ class TestAuthService(unittest.TestCase):
                         raise
                     raise AssertionError("unreachable")
 
-            class RejectedSharepointPort:
+            class RejectedSharepointPort:  # pylint: disable=too-few-public-methods
+                """Stub SharePoint port rejecting MFA."""
+
                 async def fetch_storage_state(
-                    self, username: str, password: str, get_mfa_code
+                    self, _username: str, _password: str, _get_mfa_code
                 ) -> StorageStateData:
+                    """Raise AuthenticationError."""
                     await asyncio.wait_for(moodle_started.wait(), timeout=2.0)
                     raise AuthenticationError("blank MFA")
 
@@ -308,19 +391,25 @@ class TestAuthService(unittest.TestCase):
                 credential_store=store,
             )
             ok = await service.login("jdoe", "bad", _mfa_code)
-            self.assertEqual(moodle_cancelled, [True])
-            self.assertIsNone(store.stored)
+            assert moodle_cancelled == [True]
+            assert store.stored is None
             return ok
 
         async def exercise_mixed_error() -> None:
-            class RejectedMoodlePort:
-                async def fetch_token(self, username: str, password: str) -> str:
+            class RejectedMoodlePort:  # pylint: disable=too-few-public-methods
+                """Stub Moodle port raising AuthenticationError."""
+
+                async def fetch_token(self, _username: str, _password: str) -> str:
+                    """Raise AuthenticationError."""
                     raise AuthenticationError("rejected")
 
-            class CrashingSharepointPort:
+            class CrashingSharepointPort:  # pylint: disable=too-few-public-methods
+                """Stub SharePoint port raising RuntimeError."""
+
                 async def fetch_storage_state(
-                    self, username: str, password: str, get_mfa_code
+                    self, _username: str, _password: str, _get_mfa_code
                 ) -> StorageStateData:
+                    """Raise RuntimeError."""
                     raise RuntimeError("sp crash")
 
             service = AuthService(
@@ -328,28 +417,30 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=CrashingSharepointPort(),  # type: ignore[arg-type]
                 credential_store=InMemoryCredentialStore(),
             )
-            with self.assertRaises(ExceptionGroup) as ctx:
+            with pytest.raises(ExceptionGroup) as ctx:
                 await service.login("jdoe", "bad", _mfa_code)
-            self.assertEqual([str(e) for e in ctx.exception.exceptions], ["sp crash"])
+            assert [str(e) for e in ctx.value.exceptions] == ["sp crash"]
 
-        self.assertFalse(asyncio.run(exercise_moodle_rejected()))
-        self.assertFalse(asyncio.run(exercise_sharepoint_rejected()))
+        assert not asyncio.run(exercise_sharepoint_rejected())
         asyncio.run(exercise_mixed_error())
 
 
 class TestJsonCredentialStore(unittest.TestCase):
+    """Tests for JsonCredentialStore persistence, atomic writes, and permissions."""
+
     def test_save_creates_parent_dir_load_roundtrips_and_clear_deletes(self):
+        """Create parent directories, round-trip Credentials, and clear file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             credentials_path = Path(tmpdir) / "nested" / "credentials.json"
             store = JsonCredentialStore(credentials_file=credentials_path)
-            self.assertEqual(store.credentials_file, credentials_path)
+            assert store.credentials_file == credentials_path
 
-            self.assertIsNone(store.load())
+            assert store.load() is None
             with self.assertLogs(
                 "idat_sync.infrastructure.credential_store", level="INFO"
             ) as cm:
                 store.clear()  # No-op when absent
-            self.assertIn("credentials file", " ".join(cm.output))
+            assert "credentials file" in " ".join(cm.output)
 
             creds: Credentials = {
                 "token": "tok123",
@@ -359,15 +450,16 @@ class TestJsonCredentialStore(unittest.TestCase):
                     ]
                 },
             }
-            self.assertTrue(store.save(creds))
-            self.assertTrue(credentials_path.exists())
-            self.assertEqual(store.load(), creds)
+            assert store.save(creds)
+            assert credentials_path.exists()
+            assert store.load() == creds
 
             store.clear()
-            self.assertFalse(credentials_path.exists())
-            self.assertIsNone(store.load())
+            assert not credentials_path.exists()
+            assert store.load() is None
 
     def test_load_returns_none_for_corrupt_unreadable_or_incomplete_files(self):
+        """Return None on malformed JSON, incomplete dicts, or PermissionError."""
         bad_payloads = [
             "{not valid json",
             "[]",
@@ -382,24 +474,26 @@ class TestJsonCredentialStore(unittest.TestCase):
                 credentials_path = Path(tmpdir) / f"bad_{idx}.json"
                 credentials_path.write_text(payload, encoding="utf-8")
                 with self.subTest(payload=payload):
-                    self.assertIsNone(JsonCredentialStore(credentials_path).load())
+                    assert JsonCredentialStore(credentials_path).load() is None
 
-            # Unreadable directory/file and PermissionError (including Python 3.10-3.11 stat/exists)
-            self.assertIsNone(JsonCredentialStore(Path(tmpdir)).load())
+            assert JsonCredentialStore(Path(tmpdir)).load() is None
             valid_path = Path(tmpdir) / "valid.json"
             valid_path.write_text(
                 '{"token": "tok", "sharepoint_storage_state": {"cookies": []}}',
                 encoding="utf-8",
             )
-            with patch("builtins.open", side_effect=PermissionError("unreadable")):
-                self.assertIsNone(JsonCredentialStore(valid_path).load())
+            with patch.object(Path, "open", side_effect=PermissionError("unreadable")):
+                assert JsonCredentialStore(valid_path).load() is None
             missing_path = Path(tmpdir) / "missing.json"
-            with patch.object(Path, "exists", side_effect=PermissionError("unreadable parent")):
-                self.assertIsNone(JsonCredentialStore(missing_path).load())
+            with patch.object(
+                Path, "exists", side_effect=PermissionError("unreadable parent")
+            ):
+                assert JsonCredentialStore(missing_path).load() is None
 
     def test_save_returns_false_on_os_error(self):
+        """Return False and log error when saving to a directory fails."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            store = JsonCredentialStore(Path(tmpdir))  # directory, cannot open for write
+            store = JsonCredentialStore(Path(tmpdir))
             creds: Credentials = {
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": []},
@@ -407,10 +501,11 @@ class TestJsonCredentialStore(unittest.TestCase):
             with self.assertLogs(
                 "idat_sync.infrastructure.credential_store", level="ERROR"
             ) as cm:
-                self.assertFalse(store.save(creds))
-            self.assertIn("credentials file", " ".join(cm.output))
+                assert not store.save(creds)
+            assert "credentials file" in " ".join(cm.output)
 
     def test_save_restricts_credentials_file_permissions_to_owner(self):
+        """Apply 0o600 permissions to the temporary credentials file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             credentials_path = Path(tmpdir) / "session.json"
             store = JsonCredentialStore(credentials_file=credentials_path)
@@ -418,13 +513,13 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
-            part_path = credentials_path.with_name("session.json.part")
-            with patch("idat_sync.infrastructure.credential_store.os.chmod") as mock_chmod:
-                self.assertTrue(store.save(creds))
+            with patch.object(Path, "chmod") as mock_chmod:
+                assert store.save(creds)
 
-            mock_chmod.assert_called_once_with(part_path, 0o600)
+            mock_chmod.assert_called_once_with(0o600)
 
     def test_save_preserves_existing_credentials_and_cleans_part_on_failure(self):
+        """Keep existing Credentials intact and unlink .part file on replace error."""
         with tempfile.TemporaryDirectory() as tmpdir:
             credentials_path = Path(tmpdir) / "session.json"
             part_path = credentials_path.with_name("session.json.part")
@@ -437,21 +532,18 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "token": "updated-tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
-            self.assertTrue(store.save(original))
+            assert store.save(original)
 
             with (
-                patch(
-                    "idat_sync.infrastructure.credential_store.os.replace",
-                    side_effect=OSError("disk full"),
-                ),
+                patch.object(Path, "replace", side_effect=OSError("disk full")),
                 self.assertLogs(
                     "idat_sync.infrastructure.credential_store", level="ERROR"
                 ),
             ):
-                self.assertFalse(store.save(updated))
+                assert not store.save(updated)
 
-            self.assertEqual(store.load(), original)
-            self.assertFalse(part_path.exists())
+            assert store.load() == original
+            assert not part_path.exists()
 
 
 def _make_mock_playwright():
@@ -467,7 +559,9 @@ def _make_mock_playwright():
     mock_context = MagicMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_context.storage_state = AsyncMock(
-        return_value={"cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]}
+        return_value={
+            "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
+        }
     )
     mock_context.close = AsyncMock()
 
@@ -486,96 +580,121 @@ def _make_mock_playwright():
 
 
 class TestSharepointBrowserAuth(unittest.TestCase):
+    """Tests for SharepointBrowserAuth Playwright SSO and MFA flow."""
+
     def test_requires_tenant_hosts_and_omits_login_flow_ended(self):
-        with self.assertRaises(TypeError):
-            SharepointBrowserAuth()  # type: ignore[call-arg]
+        """Require tenant host args and omit login_flow_ended parameter."""
+        with pytest.raises(TypeError, match="sharepoint_host"):
+            SharepointBrowserAuth()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
 
         sig = inspect.signature(SharepointBrowserAuth.fetch_storage_state)
-        self.assertNotIn("login_flow_ended", sig.parameters)
-        self.assertEqual(
-            list(sig.parameters), ["self", "username", "password", "get_mfa_code"]
+        assert "login_flow_ended" not in sig.parameters
+        assert list(sig.parameters) == ["self", "username", "password", "get_mfa_code"]
+
+    def _run_sso_case(  # pylint: disable=too-many-locals
+        self,
+        auth: SharepointBrowserAuth,
+        input_user: str,
+        expected_email: str,
+        *,
+        skip_visible: bool,
+    ) -> None:
+        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+        events: list[tuple[str, object]] = []
+        mock_page.wait_for_url = AsyncMock(
+            side_effect=lambda url, **kw: events.append(
+                ("wait_for_url", (url, kw.get("timeout")))
+            )
+        )
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=lambda sel, **kw: events.append(
+                ("wait_for_selector", (sel, kw.get("timeout")))
+            )
         )
 
+        async def _is_visible(sel: str) -> bool:
+            events.append(("is_visible", sel))
+            return skip_visible
+
+        mock_page.is_visible = AsyncMock(side_effect=_is_visible)
+        mock_page.click = AsyncMock(
+            side_effect=lambda sel, **_kw: events.append(("click", sel))
+        )
+        with (
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
+                return_value=mock_pw_cm,
+            ),
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            state = asyncio.run(auth.fetch_storage_state(input_user, "pw", _mfa_code))
+
+        assert state == {
+            "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
+        }
+        mock_launch = mock_pw_cm.__aenter__.return_value.chromium.launch
+        mock_launch.assert_awaited_once()
+        assert mock_launch.call_args.kwargs.get("headless") is False
+        assert [call.args[0] for call in mock_page.goto.call_args_list] == [
+            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+            "https://contoso-my.sharepoint.com/shared",
+        ]
+        mock_page.fill.assert_any_call("#i0116", expected_email, force=True)
+        mock_page.fill.assert_any_call("#i0118", "pw")
+        mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
+        expected_post_mfa = [
+            ("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"),
+            ("click", "#idChkBx_SAOTCC_TD"),
+            ("click", "#idSubmit_SAOTCC_Continue"),
+            (
+                "wait_for_url",
+                (
+                    "https://login.microsoftonline.com/common/SAS/ProcessAuth",
+                    60000 * 3,
+                ),
+            ),
+            (
+                "wait_for_selector",
+                ("#skipMfaRegistrationLink, #KmsiCheckboxField", 60000 * 3),
+            ),
+            ("is_visible", "#skipMfaRegistrationLink"),
+            *([("click", "#skipMfaRegistrationLink")] if skip_visible else []),
+            ("click", "#KmsiCheckboxField"),
+            ("click", "#idSIButton9"),
+            (
+                "wait_for_url",
+                (
+                    "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+                    60000 * 3,
+                ),
+            ),
+        ]
+        mfa_start = events.index(("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"))
+        assert events[mfa_start:] == expected_post_mfa
+        mock_context.close.assert_awaited_once()
+        mock_browser.close.assert_awaited_once()
+
     def test_fetch_storage_state_runs_playwright_sso_and_mfa_flow(self):
+        """Drive Playwright SSO/MFA steps and close context and browser."""
         auth = SharepointBrowserAuth(
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
         )
-
         for input_user, expected_email, skip_visible in [
             ("jdoe", "jdoe@example.edu", True),
             ("jdoe@other.edu", "jdoe@other.edu", False),
         ]:
             with self.subTest(input_user=input_user, skip_visible=skip_visible):
-                mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-                events: list[tuple[str, object]] = []
-                mock_page.wait_for_url = AsyncMock(
-                    side_effect=lambda url, **kw: events.append(("wait_for_url", (url, kw.get("timeout"))))
-                )
-                mock_page.wait_for_selector = AsyncMock(
-                    side_effect=lambda sel, **kw: events.append(("wait_for_selector", (sel, kw.get("timeout"))))
+                self._run_sso_case(
+                    auth, input_user, expected_email, skip_visible=skip_visible
                 )
 
-                async def _is_visible(sel: str) -> bool:
-                    events.append(("is_visible", sel))
-                    return skip_visible
-
-                mock_page.is_visible = AsyncMock(side_effect=_is_visible)
-                mock_page.click = AsyncMock(
-                    side_effect=lambda sel, **kw: events.append(("click", sel))
-                )
-                with patch(
-                    "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                    return_value=mock_pw_cm,
-                ), patch(
-                    "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                    new=AsyncMock(),
-                ):
-                    state = asyncio.run(
-                        auth.fetch_storage_state(input_user, "pw", _mfa_code)
-                    )
-
-                self.assertEqual(
-                    state,
-                    {"cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]},
-                )
-                mock_launch = mock_pw_cm.__aenter__.return_value.chromium.launch
-                mock_launch.assert_awaited_once()
-                self.assertIs(mock_launch.call_args.kwargs.get("headless"), False)
-                goto_urls = [call.args[0] for call in mock_page.goto.call_args_list]
-                self.assertEqual(
-                    goto_urls,
-                    [
-                        "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-                        "https://contoso-my.sharepoint.com/shared",
-                    ],
-                )
-                mock_page.fill.assert_any_call("#i0116", expected_email, force=True)
-                mock_page.fill.assert_any_call("#i0118", "pw")
-                mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
-                expected_post_mfa = [
-                    ("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"),
-                    ("click", "#idChkBx_SAOTCC_TD"),
-                    ("click", "#idSubmit_SAOTCC_Continue"),
-                    ("wait_for_url", ("https://login.microsoftonline.com/common/SAS/ProcessAuth", 60000 * 3)),
-                    ("wait_for_selector", ("#skipMfaRegistrationLink, #KmsiCheckboxField", 60000 * 3)),
-                    ("is_visible", "#skipMfaRegistrationLink"),
-                    *(
-                        [("click", "#skipMfaRegistrationLink")]
-                        if skip_visible
-                        else []
-                    ),
-                    ("click", "#KmsiCheckboxField"),
-                    ("click", "#idSIButton9"),
-                    ("wait_for_url", ("https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx", 60000 * 3)),
-                ]
-                mfa_start = events.index(("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"))
-                self.assertEqual(events[mfa_start:], expected_post_mfa)
-                mock_context.close.assert_awaited_once()
-                mock_browser.close.assert_awaited_once()
-
-    def test_fetch_storage_state_returns_none_on_exception_and_propagates_cancelled(self):
+    def test_fetch_storage_state_errors_and_cancellation(self):
+        """Wrap Playwright errors in AuthenticationError and propagate cancellation."""
         auth = SharepointBrowserAuth(
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
@@ -591,23 +710,28 @@ class TestSharepointBrowserAuth(unittest.TestCase):
         ) -> None:
             mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
             configure_mocks(mock_pw_cm, mock_browser, mock_context, mock_page)
-            with patch(
-                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                return_value=mock_pw_cm,
-            ), patch(
-                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                new=AsyncMock(),
+            with (
+                patch(
+                    "idat_sync.infrastructure.sharepoint_auth.async_playwright",
+                    return_value=mock_pw_cm,
+                ),
+                patch(
+                    "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                    new=AsyncMock(),
+                ),
             ):
                 if expected_exception is not None:
-                    with self.assertRaises(expected_exception):
+                    with pytest.raises(expected_exception):
                         asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
                 else:
-                    with self.assertLogs(
-                        "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
-                    ) as log_cm:
-                        with self.assertRaises(AuthenticationError):
-                            asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                    self.assertTrue(any(r.exc_info is not None for r in log_cm.records))
+                    with (
+                        self.assertLogs(
+                            "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
+                        ) as log_cm,
+                        pytest.raises(AuthenticationError),
+                    ):
+                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+                    assert any(r.exc_info is not None for r in log_cm.records)
             if expect_context_close:
                 mock_context.close.assert_awaited_once()
             else:
@@ -681,7 +805,10 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             expect_browser_close=True,
         )
 
-    def test_fetch_storage_state_launches_webkit_on_darwin_and_aborts_on_blank_mfa(self):
+    def test_fetch_storage_state_launches_webkit_on_darwin_and_aborts_on_blank_mfa(
+        self,
+    ):
+        """Launch WebKit on macOS, Edge on Windows, and abort on blank MFA code."""
         auth = SharepointBrowserAuth(
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
@@ -694,55 +821,90 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             ("Linux", "chromium", {"headless": False, "channel": "chromium"}),
         ]:
             with self.subTest(os_name=os_name):
-                mock_pw_cm, mock_browser, mock_context, _ = _make_mock_playwright()
+                mock_pw_cm, mock_browser, _, _ = _make_mock_playwright()
                 mock_pw = mock_pw_cm.__aenter__.return_value
                 mock_pw.webkit = MagicMock()
                 mock_pw.webkit.launch = AsyncMock(return_value=mock_browser)
                 with (
-                    patch("idat_sync.infrastructure.sharepoint_auth.platform.system", return_value=os_name),
-                    patch("idat_sync.infrastructure.sharepoint_auth.async_playwright", return_value=mock_pw_cm),
-                    patch("idat_sync.infrastructure.sharepoint_auth.asyncio.sleep", new=AsyncMock()),
+                    patch(
+                        "idat_sync.infrastructure.sharepoint_auth.platform.system",
+                        return_value=os_name,
+                    ),
+                    patch(
+                        "idat_sync.infrastructure.sharepoint_auth.async_playwright",
+                        return_value=mock_pw_cm,
+                    ),
+                    patch(
+                        "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                        new=AsyncMock(),
+                    ),
                 ):
-                    state = asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+                    state = asyncio.run(
+                        auth.fetch_storage_state("jdoe", "pw", _mfa_code)
+                    )
 
-                self.assertIsNotNone(state)
-                getattr(mock_pw, expected_engine).launch.assert_awaited_once_with(**expected_kwargs)
+                assert state is not None
+                getattr(mock_pw, expected_engine).launch.assert_awaited_once_with(
+                    **expected_kwargs
+                )
                 other_engine = "chromium" if expected_engine == "webkit" else "webkit"
                 getattr(mock_pw, other_engine).launch.assert_not_awaited()
 
-        # Blank/whitespace MFA code aborts before filling OTP and closes context & browser
+    def test_fetch_storage_state_aborts_on_blank_mfa(self):
+        """Abort before OTP entry and close browser on blank MFA code."""
+        auth = SharepointBrowserAuth(
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            email_domain="example.edu",
+        )
         mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
+
         async def _blank_mfa() -> str:
             return "   "
 
         with (
-            patch("idat_sync.infrastructure.sharepoint_auth.platform.system", return_value="Linux"),
-            patch("idat_sync.infrastructure.sharepoint_auth.async_playwright", return_value=mock_pw_cm),
-            patch("idat_sync.infrastructure.sharepoint_auth.asyncio.sleep", new=AsyncMock()),
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.platform.system",
+                return_value="Linux",
+            ),
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
+                return_value=mock_pw_cm,
+            ),
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+            pytest.raises(AuthenticationError),
         ):
-            with self.assertRaises(AuthenticationError):
-                asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
+            asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
 
-        self.assertNotIn(
-            "#idTxtBx_SAOTCC_OTC",
-            [call.args[0] for call in mock_page.fill.call_args_list],
-        )
+        assert "#idTxtBx_SAOTCC_OTC" not in [
+            call.args[0] for call in mock_page.fill.call_args_list
+        ]
         mock_context.close.assert_awaited_once()
         mock_browser.close.assert_awaited_once()
 
 
 class TestLoginFrame(unittest.TestCase):
+    """Tests for LoginFrame validation, MFA popup, and login submission."""
+
     def _create_master(self):
         class StubMaster(tk.Tk):
+            """Minimal Tk root stub for LoginFrame tests."""
+
             def __init__(self) -> None:
                 super().__init__()
                 self.withdraw()
                 self.switched_to_sync = 0
+                self.centered_size: tuple[int, int] | None = None
 
             def center_window(self, window_width: int, window_height: int) -> None:
+                """Record requested window dimensions."""
                 self.centered_size = (window_width, window_height)
 
             def switch_to_sync(self) -> None:
+                """Count transitions to SyncFrame."""
                 self.switched_to_sync += 1
 
         master = StubMaster()
@@ -756,12 +918,17 @@ class TestLoginFrame(unittest.TestCase):
         entry.delete(0, tk.END)
         entry.insert(0, value)
 
-    def test_login_button_disables_while_blank_or_logging_in_and_guards_submit(self):
+    def test_login_button_disables_while_blank_or_logging_in_and_guards_submit(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
+        """Disable login button when inputs blank or in-flight and guard submit."""
         expected_state: StorageStateData = {
-            "cookies": [{"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}]
+            "cookies": [
+                {"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}
+            ]
         }
 
-        class ControllableSharepointAuth:
+        class ControllableSharepointAuth:  # pylint: disable=too-few-public-methods
+            """Controllable SharePoint auth fake for concurrency tests."""
+
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
                 self.error: Exception | None = None
@@ -769,8 +936,9 @@ class TestLoginFrame(unittest.TestCase):
                 self.release: asyncio.Event | None = None
 
             async def fetch_storage_state(
-                self, username: str, password: str, get_mfa_code
+                self, username: str, password: str, _get_mfa_code
             ) -> StorageStateData | None:
+                """Simulate async SharePoint login with controllable gate."""
                 self.calls.append((username, password))
                 if self.started is not None:
                     self.started.set()
@@ -780,109 +948,99 @@ class TestLoginFrame(unittest.TestCase):
                     raise self.error
                 return expected_state
 
-        moodle = FakeMoodleTokenPort(token="tok-ui")
+        moodle = FakeMoodleTokenPort(token="tok-ui")  # noqa: S106
         sharepoint = ControllableSharepointAuth()
         store = InMemoryCredentialStore()
         auth = AuthService(
-            moodle_auth=moodle,
-            sharepoint_auth=sharepoint,
+            moodle_auth=moodle,  # type: ignore[arg-type]
+            sharepoint_auth=sharepoint,  # type: ignore[arg-type]
             credential_store=store,
         )
         master = self._create_master()
         frame = LoginFrame(master, auth)  # type: ignore[arg-type]
         login_button = self._login_button(frame)
 
-        self.assertEqual(str(login_button["state"]), "disabled")
-
+        assert str(login_button["state"]) == "disabled"
         self._set_entry(frame.user_entry, "   ")
         self._set_entry(frame.pass_entry, " secret ")
-        self.assertEqual(str(login_button["state"]), "disabled")
-
+        assert str(login_button["state"]) == "disabled"
         self._set_entry(frame.user_entry, " jdoe@custom.edu ")
         self._set_entry(frame.pass_entry, "")
-        self.assertEqual(str(login_button["state"]), "disabled")
-
+        assert str(login_button["state"]) == "disabled"
         self._set_entry(frame.pass_entry, " secret ")
-        self.assertEqual(str(login_button["state"]), "normal")
-
-        self._set_entry(frame.user_entry, "   ")
-        self.assertEqual(str(login_button["state"]), "disabled")
-
-        self._set_entry(frame.user_entry, " jdoe@custom.edu ")
-        self.assertEqual(str(login_button["state"]), "normal")
+        assert str(login_button["state"]) == "normal"
 
         async def exercise_do_login() -> None:
-            # Failed concurrent submission: disables during flight, blocks duplicate Return, resets in finally
             sharepoint.started = asyncio.Event()
             sharepoint.release = asyncio.Event()
             sharepoint.error = RuntimeError("sso boom")
 
-            stderr_buf = io.StringIO()
-            with contextlib.redirect_stderr(stderr_buf):
+            with self.assertLogs("idat_sync.ui.login_frame", level="ERROR") as log_cm:
                 task = asyncio.create_task(frame.do_login())
                 await sharepoint.started.wait()
-                self.assertEqual(str(login_button["state"]), "disabled")
+                assert str(login_button["state"]) == "disabled"
 
-                # Duplicate submit while login is active must be ignored
                 await frame.do_login()
-                self.assertEqual(len(sharepoint.calls), 1)
+                assert len(sharepoint.calls) == 1
 
                 sharepoint.release.set()
                 await task
 
-            self.assertIn("sso boom", stderr_buf.getvalue())
-            self.assertIn("sso boom", frame.error_var.get())
-            self.assertEqual(str(login_button["state"]), "normal")
-            self.assertEqual(master.switched_to_sync, 0)
+            assert any("sso boom" in msg for msg in log_cm.output)
+            assert "sso boom" in frame.error_var.get()
+            assert str(login_button["state"]) == "normal"
+            assert not master.switched_to_sync
 
-            # Returning False displays an actionable failure message; starting a valid login clears it
             moodle.token = None
             await frame.do_login()
-            self.assertTrue(bool(frame.error_var.get()))
-            self.assertEqual(master.switched_to_sync, 0)
+            assert bool(frame.error_var.get())
+            assert not master.switched_to_sync
 
-            # Successful submission strips username, preserves password, clears error_var, switches to sync
-            moodle.token = "tok123"
+            moodle.token = "tok123"  # noqa: S105
             sharepoint.started = None
             sharepoint.release = None
             sharepoint.error = None
             await frame.do_login()
 
-            self.assertEqual(frame.error_var.get(), "")
-            self.assertEqual(moodle.calls, [("jdoe", " secret "), ("jdoe", " secret "), ("jdoe", " secret ")])
-            self.assertEqual(
-                sharepoint.calls,
-                [("jdoe@custom.edu", " secret "), ("jdoe@custom.edu", " secret "), ("jdoe@custom.edu", " secret ")],
-            )
-            self.assertEqual(master.switched_to_sync, 1)
-            self.assertEqual(str(login_button["state"]), "normal")
+            assert not frame.error_var.get()
+            assert moodle.calls == [
+                ("jdoe", " secret "),
+                ("jdoe", " secret "),
+                ("jdoe", " secret "),
+            ]
+            assert sharepoint.calls == [
+                ("jdoe@custom.edu", " secret "),
+                ("jdoe@custom.edu", " secret "),
+                ("jdoe@custom.edu", " secret "),
+            ]
+            assert master.switched_to_sync == 1
+            assert str(login_button["state"]) == "normal"
 
-            # Blank username submit is ignored and keeps button disabled
             self._set_entry(frame.user_entry, "   ")
-            self.assertEqual(str(login_button["state"]), "disabled")
+            assert str(login_button["state"]) == "disabled"
             await frame.do_login()
-            self.assertEqual(len(moodle.calls), 3)
-            self.assertEqual(str(login_button["state"]), "disabled")
+            assert len(moodle.calls) == 3
+            assert str(login_button["state"]) == "disabled"
 
         error_labels = [
-            w for w in frame.winfo_children()
-            if isinstance(w, tk.Label) and str(w.cget("textvariable")) == str(frame.error_var)
+            w
+            for w in frame.winfo_children()
+            if isinstance(w, tk.Label)
+            and str(w.cget("textvariable")) == str(frame.error_var)
         ]
-        self.assertEqual(len(error_labels), 1)
-        self.assertEqual(str(error_labels[0].cget("fg")), "red")
+        assert len(error_labels) == 1
+        assert str(error_labels[0].cget("fg")) == "red"
 
         asyncio.run(exercise_do_login())
 
     def test_credentials_expired_error_exported_without_vendor_imports(self):
-        import ast
-        from idat_sync.application import ports
-
-        err_cls = getattr(ports, "CredentialsExpiredError")
-        self.assertTrue(issubclass(err_cls, RuntimeError))
-        self.assertIn("CredentialsExpiredError", ports.__all__)
-        auth_err_cls = getattr(ports, "AuthenticationError")
-        self.assertTrue(issubclass(auth_err_cls, RuntimeError))
-        self.assertIn("AuthenticationError", ports.__all__)
+        """Export auth errors from application.ports with zero vendor imports."""
+        err_cls = ports.CredentialsExpiredError
+        assert issubclass(err_cls, RuntimeError)
+        assert "CredentialsExpiredError" in ports.__all__
+        auth_err_cls = ports.AuthenticationError
+        assert issubclass(auth_err_cls, RuntimeError)
+        assert "AuthenticationError" in ports.__all__
 
         tree = ast.parse(Path(ports.__file__).read_text(encoding="utf-8"))
         imported = {
@@ -895,77 +1053,88 @@ class TestLoginFrame(unittest.TestCase):
             if isinstance(node, ast.Import)
             for alias in node.names
         }
-        self.assertEqual(
-            imported & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"},
-            set(),
+        assert (
+            imported
+            & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"}
+            == set()
         )
 
-    def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):
-        import idat_sync.ui as ui_pkg
-        from idat_sync.ui.app import AppFrame
-
-        self.assertFalse(hasattr(LoginFrame, "get_mfa_code_ui"))
-        self.assertFalse(hasattr(AppFrame, "exit"))
-        self.assertNotIn("LoadingDialog", ui_pkg.__all__)
-        self.assertFalse(hasattr(ui_pkg, "LoadingDialog"))
-        self.assertFalse((Path(ui_pkg.__file__).resolve().parent / "dialogs.py").exists())
+    def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):  # pylint: disable=too-many-statements
+        """Verify MFA popup Return/close handling and dead UI symbol removal."""
+        assert not hasattr(LoginFrame, "get_mfa_code_ui")
+        assert not hasattr(AppFrame, "exit")
+        assert "LoadingDialog" not in ui_pkg.__all__
+        assert not hasattr(ui_pkg, "LoadingDialog")
+        assert not (Path(ui_pkg.__file__).resolve().parent / "dialogs.py").exists()
 
         master = self._create_master()
         auth = AuthService(
-            moodle_auth=FakeMoodleTokenPort(),
-            sharepoint_auth=FakeSharepointAuthPort(),
+            moodle_auth=FakeMoodleTokenPort(),  # type: ignore[arg-type]
+            sharepoint_auth=FakeSharepointAuthPort(),  # type: ignore[arg-type]
             credential_store=InMemoryCredentialStore(),
         )
         frame = LoginFrame(master, auth)  # type: ignore[arg-type]
 
         async def exercise_mfa() -> None:
-            # 1. Submitting via <Return> on MFA entry
             task = asyncio.create_task(frame.get_mfa_code())
             await asyncio.sleep(0)
-            popup = next(w for w in master.winfo_children() if isinstance(w, tk.Toplevel))
+            popup = next(
+                w for w in master.winfo_children() if isinstance(w, tk.Toplevel)
+            )
             entry = next(w for w in popup.winfo_children() if isinstance(w, tk.Entry))
             entry.insert(0, "654321")
             popup.update()
             entry.focus_force()
             entry.event_generate("<Return>")
             master.update()
-            self.assertEqual(await task, "654321")
-            self.assertFalse(popup.winfo_exists())
+            assert await task == "654321"
+            assert not popup.winfo_exists()
 
-            # 2. Dismissing via WM_DELETE_WINDOW resolves to "" without hanging
             task2 = asyncio.create_task(frame.get_mfa_code())
             await asyncio.sleep(0)
-            popup2 = next(w for w in master.winfo_children() if isinstance(w, tk.Toplevel))
+            popup2 = next(
+                w for w in master.winfo_children() if isinstance(w, tk.Toplevel)
+            )
             close_cmd = popup2.protocol("WM_DELETE_WINDOW")
-            self.assertTrue(close_cmd)
+            assert close_cmd
             popup2.tk.call(close_cmd)
             master.update()
-            self.assertEqual(await task2, "")
-            self.assertFalse(popup2.winfo_exists())
+            assert not await task2
+            assert not popup2.winfo_exists()
 
         asyncio.run(exercise_mfa())
-
-        # MainApp.__change destroys old frame instead of leaking via pack_forget
-        from idat_sync.config import SyncConfig
-        from idat_sync.ui.app import MainApp
 
         app = MainApp(SyncConfig())
         self.addCleanup(app.destroy)
         app.withdraw()
         first_frame = app.winfo_children()[0]
         app.switch_to_login()
-        self.assertFalse(first_frame.winfo_exists())
+        assert not first_frame.winfo_exists()
+
+
+class _SyncStubMaster(tk.Tk):
+    """Minimal Tk root stub for SyncFrame tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.withdraw()
+        self.loop = asyncio.get_running_loop()
+        self.switched_to_login = 0
+
+    def center_window(self, _w: int, _h: int) -> None:
+        """No-op window centering for headless tests."""
+
+    def switch_to_login(self) -> None:
+        """Count transitions to LoginFrame."""
+        self.switched_to_login += 1
 
 
 class TestSyncFrame(unittest.TestCase):
-    def test_sync_frame_treeview_selection_progress_and_error_recovery(self):
-        from idat_sync.application.ports import CredentialsExpiredError
-        from idat_sync.config import SyncConfig
-        from idat_sync.domain.course import Course
-        import idat_sync.ui.app as app_module
-        from idat_sync.ui.sync_frame import SyncFrame
+    """Tests for SyncFrame treeview, selection, sync progress, and cancellation."""
 
-        self.assertFalse(hasattr(app_module, "ProgressInterceptor"))
+    def test_sync_frame_treeview_selection_progress_and_error_recovery(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
+        """Verify SyncFrame course ordering, tree progress, selection, and logout."""
+        assert not hasattr(app_module, "ProgressInterceptor")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             creds_file = Path(tmpdir) / "session.json"
@@ -983,37 +1152,14 @@ class TestSyncFrame(unittest.TestCase):
                 id=2, name="IV.01.2026-III CURRENT", category="IV.01.2026-III"
             )
 
-            async def exercise():
-                class StubMaster(tk.Tk):
-                    def __init__(self) -> None:
-                        super().__init__()
-                        self.withdraw()
-                        self.loop = asyncio.get_running_loop()
-                        self.switched_to_login = 0
-
-                    def center_window(self, w: int, h: int) -> None:
-                        pass
-
-                    def switch_to_login(self) -> None:
-                        self.switched_to_login += 1
-
-                master = StubMaster()
+            async def exercise() -> None:  # noqa: PLR0915  # pylint: disable=too-many-statements,too-many-locals
+                master = _SyncStubMaster()
                 try:
-                    from idat_sync.application.events import (
-                        CourseFilesDiscovered,
-                        CourseSyncCompleted,
-                        CourseSyncStarted,
-                        TaskDownloadCompleted,
-                        TaskDownloadFailed,
-                        TaskDownloadStarted,
-                    )
-                    import idat_sync.ui.sync_frame as sync_frame_mod
-
-                    self.assertFalse(hasattr(sync_frame_mod, "_TreeProgressListener"))
+                    assert not hasattr(sync_frame_mod, "_TreeProgressListener")
                     frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
-                    self.assertFalse(hasattr(frame, "output_text"))
-                    self.assertFalse(hasattr(frame, "progress_queue"))
-                    self.assertFalse(hasattr(frame, "update_progress"))
+                    assert not hasattr(frame, "output_text")
+                    assert not hasattr(frame, "progress_queue")
+                    assert not hasattr(frame, "update_progress")
                     mock_sync = MagicMock()
                     mock_sync.aclose = AsyncMock()
                     mock_sync.list_courses = AsyncMock(
@@ -1021,7 +1167,7 @@ class TestSyncFrame(unittest.TestCase):
                     )
                     attempts = 0
 
-                    async def fake_create_sync_service(credentials, cfg):
+                    async def fake_create_sync_service(_credentials, _cfg):
                         nonlocal attempts
                         attempts += 1
                         if attempts == 1:
@@ -1029,8 +1175,8 @@ class TestSyncFrame(unittest.TestCase):
                         return mock_sync
 
                     async def fake_sync_courses(root_folder, courses):
-                        self.assertEqual(root_folder, tmpdir)
-                        self.assertEqual(courses, [current_course])
+                        assert root_folder == tmpdir
+                        assert courses == [current_course]
                         c_dir = Path(tmpdir) / current_course.name
                         synced_p = c_dir / "S1" / "already.pdf"
                         ok_p = c_dir / "S1" / "new.pdf"
@@ -1056,58 +1202,46 @@ class TestSyncFrame(unittest.TestCase):
                         "idat_sync.ui.sync_frame.create_sync_service",
                         side_effect=fake_create_sync_service,
                     ) as mock_factory:
-                        # 1. Startup failure recovers controls and preserves credentials
                         await frame.load_idat_sync(creds)
-                        self.assertIsNone(frame.idat_sync)
-                        self.assertFalse(frame.is_syncing.get())
-                        self.assertEqual(str(frame.browse_button["state"]), "normal")
-                        self.assertEqual(str(frame.logout_button["state"]), "normal")
-                        self.assertEqual(master.switched_to_login, 0)
-                        self.assertTrue(creds_file.exists())
-                        self.assertIn("network offline", frame.status_var.get())
+                        assert frame.idat_sync is None
+                        assert not frame.is_syncing.get()
+                        assert str(frame.browse_button["state"]) == "normal"
+                        assert str(frame.logout_button["state"]) == "normal"
+                        assert not master.switched_to_login
+                        assert creds_file.exists()
+                        assert "network offline" in frame.status_var.get()
 
-                        # 2. Selecting folder and calling do_sync retries create_sync_service
                         frame.folder_path.set(tmpdir)
-                        self.assertEqual(str(frame.sync_button["state"]), "normal")
+                        assert str(frame.sync_button["state"]) == "normal"
                         await frame.do_sync()
-                        self.assertEqual(mock_factory.call_count, 2)
-                        self.assertFalse(frame.is_syncing.get())
+                        assert mock_factory.call_count == 2
+                        assert not frame.is_syncing.get()
 
-                        # Verify ordering: in-progress first (checked icon), past second (unchecked icon)
                         top_items = frame.tree.get_children("")
-                        self.assertEqual(len(top_items), 2)
-                        self.assertEqual(
-                            frame.tree.item(top_items[0], "text"),
-                            current_course.name,
+                        assert len(top_items) == 2
+                        assert (
+                            frame.tree.item(top_items[0], "text") == current_course.name
                         )
-                        self.assertEqual(
-                            frame.tree.item(top_items[0], "image"),
-                            (str(frame._checked_icon),),
+                        assert frame.tree.item(top_items[0], "image") == (
+                            str(frame._checked_icon),  # noqa: SLF001  # pylint: disable=protected-access
                         )
-                        self.assertEqual(
-                            frame.tree.item(top_items[1], "text"),
-                            past_course.name,
-                        )
-                        self.assertEqual(
-                            frame.tree.item(top_items[1], "image"),
-                            (str(frame._unchecked_icon),),
+                        assert frame.tree.item(top_items[1], "text") == past_course.name
+                        assert frame.tree.item(top_items[1], "image") == (
+                            str(frame._unchecked_icon),  # noqa: SLF001  # pylint: disable=protected-access
                         )
 
-                        # Verify parent & nested folder/file progress rows with icons
-                        self.assertEqual(
-                            frame.tree.item(top_items[0], "values"),
-                            ("Failed", "66%"),
+                        assert frame.tree.item(top_items[0], "values") == (
+                            "Failed",
+                            "66%",
                         )
                         folder_items = frame.tree.get_children(top_items[0])
-                        self.assertEqual(len(folder_items), 1)
-                        self.assertEqual(
-                            frame.tree.item(folder_items[0], "text"), "S1"
-                        )
-                        self.assertEqual(
-                            frame.tree.item(folder_items[0], "image"),
-                            (str(frame._folder_icon),),
+                        assert len(folder_items) == 1
+                        assert frame.tree.item(folder_items[0], "text") == "S1"
+                        assert frame.tree.item(folder_items[0], "image") == (
+                            str(frame._folder_icon),  # noqa: SLF001  # pylint: disable=protected-access
                         )
                         file_items = frame.tree.get_children(folder_items[0])
+                        file_icon = (str(frame._file_icon),)  # noqa: SLF001  # pylint: disable=protected-access
                         child_rows = {
                             frame.tree.item(cid, "text"): (
                                 frame.tree.item(cid, "values"),
@@ -1115,120 +1249,88 @@ class TestSyncFrame(unittest.TestCase):
                             )
                             for cid in file_items
                         }
-                        self.assertEqual(
-                            child_rows,
-                            {
-                                "already.pdf": (
-                                    ("Synced", "100%"),
-                                    (str(frame._file_icon),),
-                                ),
-                                "new.pdf": (
-                                    ("Completed", "100%"),
-                                    (str(frame._file_icon),),
-                                ),
-                                "broken.pdf": (
-                                    ("Failed", "0%"),
-                                    (str(frame._file_icon),),
-                                ),
-                            },
-                        )
+                        assert child_rows == {
+                            "already.pdf": (("Synced", "100%"), file_icon),
+                            "new.pdf": (("Completed", "100%"), file_icon),
+                            "broken.pdf": (("Failed", "0%"), file_icon),
+                        }
 
-                        # 3. Quick-select buttons & row-click toggling
                         frame.clear_selection()
-                        self.assertEqual(str(frame.sync_button["state"]), "disabled")
+                        assert str(frame.sync_button["state"]) == "disabled"
                         frame.select_all()
-                        self.assertEqual(str(frame.sync_button["state"]), "normal")
-                        self.assertTrue(
-                            all(
-                                frame.tree.item(iid, "image")
-                                == (str(frame._checked_icon),)
-                                for iid in frame.tree.get_children("")
-                            )
+                        assert str(frame.sync_button["state"]) == "normal"
+                        assert all(
+                            frame.tree.item(iid, "image") == (str(frame._checked_icon),)  # noqa: SLF001  # pylint: disable=protected-access
+                            for iid in frame.tree.get_children("")
                         )
                         frame.select_in_progress()
-                        self.assertEqual(
-                            frame.tree.item(top_items[0], "image"),
-                            (str(frame._checked_icon),),
+                        assert frame.tree.item(top_items[0], "image") == (
+                            str(frame._checked_icon),  # noqa: SLF001  # pylint: disable=protected-access
                         )
-                        self.assertEqual(
-                            frame.tree.item(top_items[1], "image"),
-                            (str(frame._unchecked_icon),),
+                        assert frame.tree.item(top_items[1], "image") == (
+                            str(frame._unchecked_icon),  # noqa: SLF001  # pylint: disable=protected-access
                         )
                         frame.toggle_course_row(top_items[0])
-                        self.assertEqual(str(frame.sync_button["state"]), "disabled")
+                        assert str(frame.sync_button["state"]) == "disabled"
                         frame.toggle_course_row(top_items[0])
-                        self.assertEqual(str(frame.sync_button["state"]), "normal")
+                        assert str(frame.sync_button["state"]) == "normal"
 
-                        # 4. CredentialsExpiredError during sync prompts Logout without wiping file
                         async def fail_sync_courses(_root_folder, _courses):
                             raise CredentialsExpiredError("401 expired")
                             yield  # pragma: no cover
 
                         mock_sync.sync_courses.side_effect = fail_sync_courses
                         await frame.do_sync()
-                        self.assertFalse(frame.is_syncing.get())
-                        self.assertEqual(master.switched_to_login, 0)
-                        self.assertTrue(creds_file.exists())
-                        self.assertIn("Logout", frame.status_var.get())
-
-                        # 5. Repeat do_sync clears only checked Course.sections without recreating IDATSync
-                        from idat_sync.domain.course import CourseSection
+                        assert not frame.is_syncing.get()
+                        assert not master.switched_to_login
+                        assert creds_file.exists()
+                        assert "Logout" in frame.status_var.get()
 
                         current_course.sections = [CourseSection(id=1, name="Cached")]
                         past_course.sections = [CourseSection(id=2, name="Kept")]
                         mock_sync.sync_courses.side_effect = fake_sync_courses
                         await frame.do_sync()
-                        self.assertEqual(current_course.sections, [])
-                        self.assertEqual(len(past_course.sections), 1)
-                        self.assertEqual(mock_factory.call_count, 2)
+                        assert not current_course.sections
+                        assert len(past_course.sections) == 1
+                        assert mock_factory.call_count == 2
 
-                        # 6. Logout ignores while syncing, otherwise closes IDATSync and switches to login
                         frame.is_syncing.set(True)
                         await frame.do_logout()
                         mock_sync.aclose.assert_not_awaited()
-                        self.assertEqual(master.switched_to_login, 0)
+                        assert not master.switched_to_login
 
                         frame.is_syncing.set(False)
                         await frame.do_logout()
                         mock_sync.aclose.assert_awaited_once_with()
-                        self.assertIsNone(frame.idat_sync)
-                        self.assertEqual(master.switched_to_login, 1)
+                        assert frame.idat_sync is None
+                        assert master.switched_to_login == 1
                 finally:
                     master.destroy()
 
             asyncio.run(exercise())
 
-    def test_sync_frame_closes_partial_service_on_list_courses_failure_and_logout_switches_even_if_aclose_raises(self):
-        from idat_sync.application.ports import Credentials
-        from idat_sync.config import SyncConfig
-        from idat_sync.ui.sync_frame import SyncFrame
-
+    def test_sync_frame_closes_partial_service_and_logout_switches_on_aclose_error(
+        self,
+    ):
+        """Close partial service on list_courses failure and still switch on logout."""
         with tempfile.TemporaryDirectory() as tmpdir:
             creds_file = Path(tmpdir) / "session.json"
             creds_file.write_text('{"token":"t"}', encoding="utf-8")
-            creds: Credentials = {"token": "t", "sharepoint_storage_state": {"cookies": []}}
+            creds: Credentials = {
+                "token": "t",
+                "sharepoint_storage_state": {"cookies": []},
+            }
             config = SyncConfig(session_file=creds_file, request_delay=0.0)
 
-            async def exercise():
-                class StubMaster(tk.Tk):
-                    def __init__(self) -> None:
-                        super().__init__()
-                        self.withdraw()
-                        self.loop = asyncio.get_running_loop()
-                        self.switched_to_login = 0
-
-                    def center_window(self, w: int, h: int) -> None:
-                        pass
-
-                    def switch_to_login(self) -> None:
-                        self.switched_to_login += 1
-
-                master = StubMaster()
+            async def exercise() -> None:
+                master = _SyncStubMaster()
                 try:
                     frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
                     partial_sync = MagicMock()
                     partial_sync.aclose = AsyncMock()
-                    partial_sync.list_courses = AsyncMock(side_effect=RuntimeError("list failed"))
+                    partial_sync.list_courses = AsyncMock(
+                        side_effect=RuntimeError("list failed")
+                    )
 
                     with patch(
                         "idat_sync.ui.sync_frame.create_sync_service",
@@ -1237,69 +1339,74 @@ class TestSyncFrame(unittest.TestCase):
                         await frame.load_idat_sync(creds)
 
                     partial_sync.aclose.assert_awaited_once_with()
-                    self.assertIsNone(frame.idat_sync)
-                    self.assertIn("list failed", frame.status_var.get())
+                    assert frame.idat_sync is None
+                    assert "list failed" in frame.status_var.get()
 
                     failing_sync = MagicMock()
-                    failing_sync.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
+                    failing_sync.aclose = AsyncMock(
+                        side_effect=RuntimeError("close boom")
+                    )
                     frame.idat_sync = failing_sync
-                    with self.assertRaisesRegex(RuntimeError, "close boom"):
+                    with pytest.raises(RuntimeError, match="close boom"):
                         await frame.do_logout()
-                    self.assertIsNone(frame.idat_sync)
-                    self.assertEqual(master.switched_to_login, 1)
+                    assert frame.idat_sync is None
+                    assert master.switched_to_login == 1
                 finally:
                     master.destroy()
 
             asyncio.run(exercise())
 
     def test_ui_app_main_configures_logging_without_stdio_hijack(self):
-        import sys
-        from idat_sync.config import SyncConfig
-        import idat_sync.ui.app as app_mod
-
+        """Verify ui.app.main configures logging without replacing stdio."""
         orig_stdout = sys.stdout
         orig_stderr = sys.stderr
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_root = Path(tmpdir) / "app_data"
             cfg = SyncConfig(log_file=Path(tmpdir) / "app.log")
-            with patch(
-                "idat_sync.ui.app.user_data_path", return_value=fake_root
-            ) as mock_user_data_path, patch(
-                "idat_sync.ui.app.load_config", return_value=cfg
-            ) as mock_load_cfg, patch(
-                "idat_sync.ui.app.configure_logging"
-            ) as mock_cfg_log, patch("idat_sync.ui.app.MainApp") as mock_app:
-                app_mod.main()
+            with (
+                patch(
+                    "idat_sync.ui.app.user_data_path", return_value=fake_root
+                ) as mock_user_data_path,
+                patch(
+                    "idat_sync.ui.app.load_config", return_value=cfg
+                ) as mock_load_cfg,
+                patch("idat_sync.ui.app.configure_logging") as mock_cfg_log,
+                patch("idat_sync.ui.app.MainApp") as mock_app,
+            ):
+                app_module.main()
 
             mock_user_data_path.assert_called_once_with("idat-sync", appauthor=False)
             mock_load_cfg.assert_called_once_with(fake_root)
             mock_cfg_log.assert_called_once_with(cfg.log_file)
             mock_app.assert_called_once_with(config=cfg)
             mock_app.return_value.run.assert_called_once_with()
-            self.assertIs(sys.stdout, orig_stdout)
-            self.assertIs(sys.stderr, orig_stderr)
+            assert sys.stdout is orig_stdout
+            assert sys.stderr is orig_stderr
 
     def test_app_frame_aclose_and_main_app_on_close_closes_frame_before_destroy(self):
-        from idat_sync.config import SyncConfig
-        from idat_sync.ui.app import AppFrame, MainApp
+        """Close active AppFrame before destroying MainApp."""
 
-        async def exercise():
+        async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "missing_session.json")
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
-                    self.assertTrue(bool(app.protocol("WM_DELETE_WINDOW")))
+                    assert bool(app.protocol("WM_DELETE_WINDOW"))
                     base_frame = AppFrame(app)
                     await base_frame.aclose()
                     base_frame.destroy()
 
                     active_frame = MagicMock()
-                    active_frame.aclose = AsyncMock(side_effect=RuntimeError("close error"))
-                    app._MainApp__frame = active_frame  # type: ignore[attr-defined]
+                    active_frame.aclose = AsyncMock(
+                        side_effect=RuntimeError("close error")
+                    )
+                    app._MainApp__frame = active_frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
-                    with patch.object(app, "destroy", wraps=app.destroy) as mock_destroy:
-                        with self.assertRaisesRegex(RuntimeError, "close error"):
+                    with patch.object(
+                        app, "destroy", wraps=app.destroy
+                    ) as mock_destroy:
+                        with pytest.raises(RuntimeError, match="close error"):
                             await app.on_close()
                         await app.on_close()
 
@@ -1312,39 +1419,33 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_login_frame_return_binding_switch_to_sync_mfa_cancel_and_on_close(self):
-        from idat_sync.config import SyncConfig
-        from idat_sync.ui.app import MainApp
+    def test_login_frame_return_binding_mfa_cancel_and_on_close(self):  # pylint: disable=too-many-statements
+        """Verify <Return> submit, MFA cancellation, and on_close cleanup."""
 
-        async def exercise():
+        async def exercise() -> None:  # pylint: disable=too-many-statements
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
-                    frame = app._MainApp__frame  # type: ignore[attr-defined]
+                    frame = app._MainApp__frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     assert isinstance(frame, LoginFrame)
 
-                    # Trigger existing <Return> binding in pass_entry
                     frame.user_var.set("jdoe")
                     frame.pass_var.set("secret")
                     login_started = asyncio.Event()
                     mfa_ready = asyncio.Event()
 
-                    async def slow_login(username, password, get_mfa_code):
+                    async def slow_login(_username, _password, get_mfa_code):
                         login_started.set()
                         mfa_task = asyncio.create_task(get_mfa_code())
                         await asyncio.sleep(0)
                         mfa_ready.set()
-                        try:
-                            await mfa_task
-                        except asyncio.CancelledError:
-                            raise
+                        await mfa_task
                         return True
 
                     with patch.object(app.auth, "login", side_effect=slow_login):
-                        bind_cmd = frame.pass_entry.bind("<Return>")
-                        self.assertTrue(bind_cmd)
+                        assert frame.pass_entry.bind("<Return>")
                         app.deiconify()
                         app.update()
                         frame.pass_entry.focus_force()
@@ -1354,11 +1455,13 @@ class TestSyncFrame(unittest.TestCase):
                         await asyncio.wait_for(login_started.wait(), timeout=2.0)
                         await asyncio.wait_for(mfa_ready.wait(), timeout=2.0)
 
-                        # MFA Toplevel should exist on app while waiting
-                        popups = [w for w in app.winfo_children() if isinstance(w, tk.Toplevel)]
-                        self.assertEqual(len(popups), 1)
+                        popups = [
+                            w
+                            for w in app.winfo_children()
+                            if isinstance(w, tk.Toplevel)
+                        ]
+                        assert len(popups) == 1
 
-                        # 2. Cancelling get_mfa_code directly destroys popup while app is alive
                         mfa_only_task = asyncio.create_task(frame.get_mfa_code())
                         await asyncio.sleep(0)
                         extra_popups = [
@@ -1366,14 +1469,15 @@ class TestSyncFrame(unittest.TestCase):
                             for w in app.winfo_children()
                             if isinstance(w, tk.Toplevel) and w not in popups
                         ]
-                        self.assertEqual(len(extra_popups), 1)
+                        assert len(extra_popups) == 1
                         mfa_only_task.cancel()
-                        with self.assertRaises(asyncio.CancelledError):
+                        with pytest.raises(asyncio.CancelledError):
                             await mfa_only_task
-                        self.assertFalse(extra_popups[0].winfo_exists())
+                        assert not extra_popups[0].winfo_exists()
 
-                        # 3. MainApp.on_close cancels active LoginFrame task and destroys MFA popup
-                        with patch.object(popups[0], "destroy", wraps=popups[0].destroy) as mock_popup_destroy:
+                        with patch.object(
+                            popups[0], "destroy", wraps=popups[0].destroy
+                        ) as mock_popup_destroy:
                             await app.on_close()
                             mock_popup_destroy.assert_called()
                 finally:
@@ -1381,31 +1485,42 @@ class TestSyncFrame(unittest.TestCase):
                         app.destroy()
                     app.loop.close()
 
-            # 3. Successful do_login with real MainApp.switch_to_sync() does not raise TclError
+        asyncio.run(exercise())
+
+    def test_login_frame_switch_to_sync_succeeds(self):
+        """Verify successful do_login transitions cleanly to SyncFrame."""
+
+        async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 creds_path = Path(tmpdir) / "session.json"
                 cfg = SyncConfig(session_file=creds_path)
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
-                    frame = app._MainApp__frame  # type: ignore[attr-defined]
+                    frame = app._MainApp__frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     assert isinstance(frame, LoginFrame)
                     frame.user_var.set("jdoe")
                     frame.pass_var.set("secret")
 
-                    async def ok_login(username, password, get_mfa_code):
+                    async def ok_login(_username, _password, _get_mfa_code):
                         app.auth.credential_store.save(
-                            {"token": "tok", "sharepoint_storage_state": {"cookies": []}}
+                            {
+                                "token": "tok",
+                                "sharepoint_storage_state": {"cookies": []},
+                            }
                         )
                         return True
 
                     with (
                         patch.object(app.auth, "login", side_effect=ok_login),
-                        patch("idat_sync.ui.sync_frame.SyncFrame.load_idat_sync", new=AsyncMock()),
+                        patch(
+                            "idat_sync.ui.sync_frame.SyncFrame.load_idat_sync",
+                            new=AsyncMock(),
+                        ),
                     ):
                         await frame.do_login()
 
-                    self.assertFalse(frame.winfo_exists())
+                    assert not frame.winfo_exists()
                 finally:
                     with contextlib.suppress(tk.TclError):
                         app.destroy()
@@ -1413,30 +1528,25 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_sync_frame_on_close_cancels_active_tasks_and_reports_sync_errors(self):
-        from idat_sync.application.events import CourseSyncCompleted
-        from idat_sync.config import SyncConfig
-        from idat_sync.domain.course import Course
-        from idat_sync.ui.app import MainApp
-        from idat_sync.ui.sync_frame import SyncFrame
+    def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
+        """Cancel active load_idat_sync and do_sync tasks on MainApp.on_close."""
+        creds: Credentials = {
+            "token": "tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
 
-        async def exercise():
-            creds: Credentials = {
-                "token": "tok",
-                "sharepoint_storage_state": {"cookies": []},
-            }
-            # 1. MainApp.on_close cancels active load_idat_sync without TclError
+        async def exercise_load_cancel() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
                     frame = SyncFrame(app, creds, cfg)
-                    app._MainApp__frame = frame  # type: ignore[attr-defined]
+                    app._MainApp__frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     load_started = asyncio.Event()
                     load_cancelled = asyncio.Event()
 
-                    async def slow_create_sync_service(c, conf):
+                    async def slow_create_sync_service(_c, _conf):
                         load_started.set()
                         try:
                             await asyncio.Future()
@@ -1451,31 +1561,31 @@ class TestSyncFrame(unittest.TestCase):
                         load_task = asyncio.create_task(frame.load_idat_sync(creds))
                         await asyncio.wait_for(load_started.wait(), timeout=2.0)
                         await app.on_close()
-                        self.assertTrue(load_cancelled.is_set())
-                        with self.assertRaises(asyncio.CancelledError):
+                        assert load_cancelled.is_set()
+                        with pytest.raises(asyncio.CancelledError):
                             await load_task
                 finally:
                     with contextlib.suppress(tk.TclError):
                         app.destroy()
                     app.loop.close()
 
-            # 2. MainApp.on_close cancels active do_sync and closes idat_sync without TclError
+        async def exercise_sync_cancel() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
                     frame = SyncFrame(app, creds, cfg)
-                    app._MainApp__frame = frame  # type: ignore[attr-defined]
+                    app._MainApp__frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     c1 = Course(id=1, name="Course 1")
-                    frame._populate_courses([c1])
+                    frame._populate_courses([c1])  # noqa: SLF001  # pylint: disable=protected-access
                     frame.selected_course_ids = {1}
                     frame.folder_path.set(tmpdir)
 
                     sync_started = asyncio.Event()
                     sync_cancelled = asyncio.Event()
 
-                    async def slow_sync_courses(path, selected):
+                    async def slow_sync_courses(_path, _selected):
                         sync_started.set()
                         try:
                             await asyncio.Future()
@@ -1492,16 +1602,26 @@ class TestSyncFrame(unittest.TestCase):
                     sync_task = asyncio.create_task(frame.do_sync())
                     await asyncio.wait_for(sync_started.wait(), timeout=2.0)
                     await app.on_close()
-                    self.assertTrue(sync_cancelled.is_set())
+                    assert sync_cancelled.is_set()
                     mock_service.aclose.assert_awaited_once_with()
-                    with self.assertRaises(asyncio.CancelledError):
+                    with pytest.raises(asyncio.CancelledError):
                         await sync_task
                 finally:
                     with contextlib.suppress(tk.TclError):
                         app.destroy()
                     app.loop.close()
 
-            # 3. do_sync sets "Sync completed with errors." vs "Sync done."
+        asyncio.run(exercise_load_cancel())
+        asyncio.run(exercise_sync_cancel())
+
+    def test_sync_frame_reports_sync_completion_status(self):
+        """Set status_var to 'Sync completed with errors.' or 'Sync done.'."""
+        creds: Credentials = {
+            "token": "tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+
+        async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
                 app = MainApp(config=cfg)
@@ -1509,11 +1629,11 @@ class TestSyncFrame(unittest.TestCase):
                 try:
                     frame = SyncFrame(app, creds, cfg)
                     c1 = Course(id=1, name="Course 1")
-                    frame._populate_courses([c1])
+                    frame._populate_courses([c1])  # noqa: SLF001  # pylint: disable=protected-access
                     frame.selected_course_ids = {1}
                     frame.folder_path.set(tmpdir)
 
-                    async def err_sync_courses(path, selected):
+                    async def err_sync_courses(_path, _selected):
                         yield CourseSyncCompleted(c1, RuntimeError("boom"))
 
                     mock_service = MagicMock()
@@ -1521,14 +1641,14 @@ class TestSyncFrame(unittest.TestCase):
                     frame.idat_sync = mock_service
 
                     await frame.do_sync()
-                    self.assertEqual(frame.status_var.get(), "Sync completed with errors.")
+                    assert frame.status_var.get() == "Sync completed with errors."
 
-                    async def ok_sync_courses(path, selected):
+                    async def ok_sync_courses(_path, _selected):
                         yield CourseSyncCompleted(c1, None)
 
                     mock_service.sync_courses = ok_sync_courses
                     await frame.do_sync()
-                    self.assertEqual(frame.status_var.get(), "Sync done.")
+                    assert frame.status_var.get() == "Sync done."
                 finally:
                     with contextlib.suppress(tk.TclError):
                         app.destroy()

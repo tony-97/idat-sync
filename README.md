@@ -8,7 +8,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/tony-97/idat-sync?label=Release&logo=github)](https://github.com/tony-97/idat-sync/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/tony-97/idat-sync/total?label=Downloads&logo=github)](https://github.com/tony-97/idat-sync/releases)
 [![License: MIT](https://img.shields.io/github/license/tony-97/idat-sync?label=License)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
 idat-sync automatiza la descarga y organización del material de tus cursos (Moodle, SharePoint/OneDrive) y las grabaciones de clase. Está pensado para evitar la tarea tediosa de abrir muchos enlaces, crear carpetas manualmente y perder tiempo buscando archivos dispersos.
 
@@ -46,7 +46,7 @@ Al ser una aplicación sin firmar, macOS bloqueará su ejecución por defecto. S
 
 1. **Requisitos**
 
-   > - Python 3.10+
+   > - Python 3.12+
    > - [ffmpeg](https://www.ffmpeg.org/)
 
 2. **Instalar el paquete:**

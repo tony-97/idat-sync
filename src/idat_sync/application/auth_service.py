@@ -1,16 +1,21 @@
+"""Authentication service coordinating Moodle and SharePoint login."""
+
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 import logging
+from typing import TYPE_CHECKING
 
 from idat_sync.application.ports import (
     AuthenticationError,
-    CredentialStorePort,
     Credentials,
+    CredentialStorePort,
     MoodleTokenPort,
     SharepointAuthPort,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
 
@@ -24,11 +29,13 @@ class AuthService:
         sharepoint_auth: SharepointAuthPort,
         credential_store: CredentialStorePort,
     ) -> None:
+        """Initialize the authentication service with its required ports."""
         self.moodle_auth = moodle_auth
         self.sharepoint_auth = sharepoint_auth
         self.credential_store = credential_store
 
     async def authenticate(self, username: str, password: str) -> str:
+        """Authenticate against Moodle and return a web service token."""
         moodle_username = username.split("@", 1)[0]
         return await self.moodle_auth.fetch_token(moodle_username, password)
 
@@ -38,6 +45,7 @@ class AuthService:
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> bool:
+        """Log in to Moodle and SharePoint concurrently and persist Credentials."""
         rejected = False
         try:
             async with asyncio.TaskGroup() as tg:
@@ -70,12 +78,15 @@ class AuthService:
         return saved
 
     def logout(self) -> None:
+        """Clear persisted Credentials."""
         self.credential_store.clear()
 
     def is_authenticated(self) -> bool:
+        """Return whether stored Credentials currently exist."""
         return self.get_credentials() is not None
 
     def get_credentials(self) -> Credentials | None:
+        """Load persisted Credentials, or return None."""
         return self.credential_store.load()
 
 

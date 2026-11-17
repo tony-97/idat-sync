@@ -1,39 +1,45 @@
-from dataclasses import dataclass, fields
-from datetime import date, datetime
+"""Validated runtime configuration loading and normalization."""
+
 import json
 import math
 import os
-from pathlib import Path, PurePath
 import re
-from typing import Any
+from dataclasses import dataclass, fields
+from datetime import date, datetime
+from pathlib import Path, PurePath
 from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _normalize_url(value: str, field_name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a string")
+        raise ValueError(f"{field_name} must be a string")  # noqa: TRY004
     parts = urlsplit(value.strip())
     if parts.scheme not in {"http", "https"} or not parts.hostname:
         raise ValueError(f"{field_name} must be a valid http/https URL: {value!r}")
-    return urlunsplit(parts._replace(path=parts.path.rstrip("/"), query="", fragment=""))
+    return urlunsplit(
+        parts._replace(path=parts.path.rstrip("/"), query="", fragment="")
+    )
 
 
 def _normalize_host(value: str, field_name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a string")
+        raise ValueError(f"{field_name} must be a string")  # noqa: TRY004
     raw = value.strip()
     if not raw or "@" in raw:
         raise ValueError(f"{field_name} must be a bare hostname: {value!r}")
     parts = urlsplit(f"//{raw}")
     if parts.hostname != raw.lower() or parts.port is not None or parts.path:
-        raise ValueError(f"{field_name} must be a bare hostname without scheme, port, or path: {value!r}")
+        raise ValueError(
+            f"{field_name} must be a bare hostname without scheme, port, or path: "
+            f"{value!r}"
+        )
     return parts.hostname
 
 
 def _normalize_folder_name(value: str, field_name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a string")
+        raise ValueError(f"{field_name} must be a string")  # noqa: TRY004
     cleaned = value.strip()
     if (
         not cleaned
@@ -42,7 +48,9 @@ def _normalize_folder_name(value: str, field_name: str) -> str:
         or "\\" in cleaned
         or PurePath(cleaned).name != cleaned
     ):
-        raise ValueError(f"{field_name} must be a single-segment folder name: {value!r}")
+        raise ValueError(
+            f"{field_name} must be a single-segment folder name: {value!r}"
+        )
     return cleaned
 
 
@@ -60,19 +68,21 @@ def _normalize_path(value: str | Path, field_name: str) -> Path:
 
 def _normalize_timezone(value: str, field_name: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a string")
+        raise ValueError(f"{field_name} must be a string")  # noqa: TRY004
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"{field_name} must not be empty")
     try:
         ZoneInfo(cleaned)
     except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise ValueError(f"{field_name} must be a valid IANA timezone: {value!r}") from exc
+        raise ValueError(
+            f"{field_name} must be a valid IANA timezone: {value!r}"
+        ) from exc
     return cleaned
 
 
 @dataclass(frozen=True)
-class SyncConfig:
+class SyncConfig:  # pylint: disable=too-many-instance-attributes
     """Validated runtime configuration for course synchronization."""
 
     semester_start: date = date(2025, 9, 22)
@@ -91,8 +101,13 @@ class SyncConfig:
     timezone: str = "America/Lima"
 
     def __post_init__(self) -> None:
-        if not isinstance(self.semester_start, date) or isinstance(self.semester_start, datetime):
-            raise ValueError(f"semester_start must be a date: {self.semester_start!r}")
+        """Validate and normalize all configuration fields."""
+        if not isinstance(self.semester_start, date) or isinstance(
+            self.semester_start, datetime
+        ):
+            raise ValueError(  # noqa: TRY004
+                f"semester_start must be a date: {self.semester_start!r}"
+            )
 
         if (
             isinstance(self.request_delay, bool)
@@ -101,75 +116,106 @@ class SyncConfig:
             or math.isinf(self.request_delay)
             or self.request_delay < 0
         ):
-            raise ValueError(f"request_delay must be a finite non-negative number: {self.request_delay!r}")
+            raise ValueError(
+                f"request_delay must be a finite non-negative number: "
+                f"{self.request_delay!r}"
+            )
         object.__setattr__(self, "request_delay", float(self.request_delay))
 
-        object.__setattr__(self, "session_file", _normalize_path(self.session_file, "session_file"))
+        object.__setattr__(
+            self, "session_file", _normalize_path(self.session_file, "session_file")
+        )
         object.__setattr__(self, "log_file", _normalize_path(self.log_file, "log_file"))
         object.__setattr__(
-            self, "moodle_base_url", _normalize_url(self.moodle_base_url, "moodle_base_url")
+            self,
+            "moodle_base_url",
+            _normalize_url(self.moodle_base_url, "moodle_base_url"),
         )
         object.__setattr__(
             self,
             "sharepoint_academic_site_url",
-            _normalize_url(self.sharepoint_academic_site_url, "sharepoint_academic_site_url"),
+            _normalize_url(
+                self.sharepoint_academic_site_url, "sharepoint_academic_site_url"
+            ),
         )
         object.__setattr__(
-            self, "sharepoint_host", _normalize_host(self.sharepoint_host, "sharepoint_host")
+            self,
+            "sharepoint_host",
+            _normalize_host(self.sharepoint_host, "sharepoint_host"),
         )
         object.__setattr__(
             self,
             "sharepoint_personal_host",
             _normalize_host(self.sharepoint_personal_host, "sharepoint_personal_host"),
         )
-        object.__setattr__(self, "email_domain", _normalize_host(self.email_domain, "email_domain"))
+        object.__setattr__(
+            self, "email_domain", _normalize_host(self.email_domain, "email_domain")
+        )
         object.__setattr__(
             self,
             "recordings_folder_name",
-            _normalize_folder_name(self.recordings_folder_name, "recordings_folder_name"),
+            _normalize_folder_name(
+                self.recordings_folder_name, "recordings_folder_name"
+            ),
         )
         object.__setattr__(
             self,
             "week_folder_prefix",
             _normalize_folder_name(self.week_folder_prefix, "week_folder_prefix"),
         )
-        object.__setattr__(self, "timezone", _normalize_timezone(self.timezone, "timezone"))
+        object.__setattr__(
+            self, "timezone", _normalize_timezone(self.timezone, "timezone")
+        )
 
 
-def _coerce_field(name: str, value: Any) -> Any:
+def _coerce_semester_start(value: object) -> date:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+            raise ValueError(f"semester_start must use YYYY-MM-DD format: {value!r}")
+        return date.fromisoformat(cleaned)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    raise ValueError(f"semester_start must be an ISO YYYY-MM-DD date string: {value!r}")
+
+
+def _coerce_request_delay(value: object) -> float:
+    if isinstance(value, bool):
+        raise ValueError(  # noqa: TRY004
+            f"request_delay must be numeric, not bool: {value!r}"
+        )
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        return float(value.strip())
+    raise ValueError(f"request_delay must be numeric: {value!r}")
+
+
+def _coerce_field(name: str, value: object) -> object:
     if name == "semester_start":
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
-                raise ValueError(f"semester_start must use YYYY-MM-DD format: {value!r}")
-            return date.fromisoformat(cleaned)
-        if isinstance(value, date) and not isinstance(value, datetime):
-            return value
-        raise ValueError(f"semester_start must be an ISO YYYY-MM-DD date string: {value!r}")
-
+        return _coerce_semester_start(value)
     if name == "request_delay":
-        if isinstance(value, bool):
-            raise ValueError(f"request_delay must be numeric, not bool: {value!r}")
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            return float(value.strip())
-        raise ValueError(f"request_delay must be numeric: {value!r}")
-
+        return _coerce_request_delay(value)
     return value
 
 
 def load_config(root: str | Path = ".") -> SyncConfig:
-    """Load SyncConfig with precedence: IDAT_SYNC_* env vars > JSON file > root defaults."""
+    """Load SyncConfig: IDAT_SYNC_* env vars > JSON file > root defaults."""
     root_dir = _normalize_path(root, "root")
     if root_dir.exists() and not root_dir.is_dir():
         raise ValueError(f"root is not a directory: {root_dir}")
 
     raw_env_config = os.environ.get("IDAT_SYNC_CONFIG")
-    env_config_path = raw_env_config.strip() if raw_env_config and raw_env_config.strip() else None
-    target_path = Path(env_config_path) if env_config_path is not None else root_dir / "config.json"
+    env_config_path = (
+        raw_env_config.strip() if raw_env_config and raw_env_config.strip() else None
+    )
+    target_path = (
+        Path(env_config_path)
+        if env_config_path is not None
+        else root_dir / "config.json"
+    )
 
-    raw_json: dict[str, Any] = {}
+    raw_json: dict[str, object] = {}
     if target_path.exists():
         if not target_path.is_file():
             raise ValueError(f"Config path is not a file: {target_path}")
@@ -185,7 +231,7 @@ def load_config(root: str | Path = ".") -> SyncConfig:
     if unknown_keys:
         raise ValueError(f"Unknown configuration keys: {unknown_keys}")
 
-    overrides: dict[str, Any] = {
+    overrides: dict[str, object] = {
         "session_file": root_dir / "session.json",
         "log_file": root_dir / "log.err",
     }
@@ -196,4 +242,4 @@ def load_config(root: str | Path = ".") -> SyncConfig:
         elif field_name in raw_json:
             overrides[field_name] = _coerce_field(field_name, raw_json[field_name])
 
-    return SyncConfig(**overrides)
+    return SyncConfig(**overrides)  # type: ignore[arg-type]

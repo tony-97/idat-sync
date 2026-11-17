@@ -1,8 +1,10 @@
+"""Low-level SharePoint REST SDK client with cookie injection and rate limiting."""
+
 import asyncio
-from collections.abc import Awaitable, Callable
 import re
-from typing import BinaryIO, Self, TypeVar
 import urllib.parse
+from collections.abc import Awaitable, Callable
+from typing import BinaryIO, Self, TypeVar
 
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_result import ClientResult
@@ -29,6 +31,7 @@ class SharepointClient:
         academic_site_url: str,
         request_delay: float,
     ) -> None:
+        """Initialize the SharePoint client with cookies, hosts, and delay."""
         self.request_delay = request_delay
         self.properties_to_retrieve = [
             "Name",
@@ -50,6 +53,7 @@ class SharepointClient:
         academic_site_url: str,
         request_delay: float,
     ) -> Self:
+        """Create and initialize a SharepointClient, resolving the search context."""
         client = cls(
             cookies=cookies,
             sharepoint_personal_host=sharepoint_personal_host,
@@ -60,24 +64,30 @@ class SharepointClient:
             personal_site = await client._await_query(
                 client.personal_client.web.current_user.get_personal_site().execute_query_async()
             )
-            if not personal_site.url:
-                raise CredentialsExpiredError("SharePoint login expired")
-            client.search_client = client.get_client(personal_site.url)
-            return client
+            if personal_site.url:
+                client.search_client = client.get_client(personal_site.url)
         except BaseException:
             await client.aclose()
             raise
+        if not personal_site.url:
+            await client.aclose()
+            raise CredentialsExpiredError("SharePoint login expired")
+        return client
 
     async def aclose(self) -> None:
+        """Close the underlying async HTTPX transport."""
         await self._transport.aclose()
 
     async def __aenter__(self) -> Self:
+        """Enter the async context manager."""
         return self
 
     async def __aexit__(self, *args: object) -> None:
+        """Exit the async context manager and close the transport."""
         await self.aclose()
 
     def get_client(self, site_url: str) -> ClientContext:
+        """Create an authenticated SharePoint ClientContext for ``site_url``."""
         target_host = urllib.parse.urlparse(site_url).hostname or ""
         ctx = (
             ClientContext(site_url)
@@ -88,6 +98,7 @@ class SharepointClient:
         return ctx
 
     def get_client_from_url(self, url: str) -> ClientContext:
+        """Resolve the site ClientContext corresponding to ``url``."""
         parsed_url = urllib.parse.urlparse(url)
         site_url = None
         path_match = re.search(
@@ -105,6 +116,7 @@ class SharepointClient:
         return self.client
 
     def cookies_for_host(self, host: str) -> dict[str, str]:
+        """Return matching SharePoint auth cookies for ``host``."""
         target_host = host.lower()
         if not target_host:
             return {}
@@ -139,11 +151,10 @@ class SharepointClient:
         return result
 
     async def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
+        """Load standard metadata properties onto a SharePoint File or Folder."""
         ctx.load(entity, self.properties_to_retrieve)
         try:
-            await self._await_query(
-                ctx.execute_query_with_incremental_retry_async()
-            )
+            await self._await_query(ctx.execute_query_with_incremental_retry_async())
         except TypeError:
             # odata.null guest URL responses leave entity.resource_url as None
             await asyncio.sleep(self.request_delay)
@@ -151,6 +162,7 @@ class SharepointClient:
     async def search_for_recordings(
         self, course_name: str
     ) -> ClientResult[SearchResult]:
+        """Search personal SharePoint for recordings matching ``course_name``."""
         if self.search_client is None:
             raise CredentialsExpiredError("SharePoint login expired")
         return await self._await_query(
@@ -161,6 +173,7 @@ class SharepointClient:
         )
 
     async def fetch_document_library_items(self, site_url: str) -> list[ListItem]:
+        """Fetch all items from the default document library of ``site_url``."""
         client = self.get_client(site_url)
         doc_lib = client.web.default_document_library()
         items = await self._await_query(
@@ -186,35 +199,35 @@ class SharepointClient:
         return entity
 
     async def fetch_folder_by_guest_url(self, url: str) -> Folder:
+        """Resolve and load a SharePoint Folder from a guest sharing URL."""
         return await self._load_entity_at_url(
             url, lambda ctx: ctx.web.get_folder_by_guest_url(url)
         )
 
     async def fetch_file_by_guest_url(self, url: str) -> File:
+        """Resolve and load a SharePoint File from a guest sharing URL."""
         return await self._load_entity_at_url(
             url, lambda ctx: ctx.web.get_file_by_guest_url(url)
         )
 
     async def fetch_file_by_id(self, url: str, file_id: str) -> File:
+        """Resolve and load a SharePoint File by its unique ID."""
         return await self._load_entity_at_url(
             url, lambda ctx: ctx.web.get_file_by_id(file_id)
         )
 
     async def fetch_folder_files(self, folder: Folder) -> list[File]:
+        """Return all File children of ``folder``."""
         files = await self._await_query(
-            folder.get_files()
-            .select(self.properties_to_retrieve)
-            .execute_query_async()
+            folder.get_files().select(self.properties_to_retrieve).execute_query_async()
         )
         return list(files)
 
     async def fetch_subfolders(self, folder: Folder) -> list[Folder]:
-        folders = await self._await_query(
-            folder.get_folders().execute_query_async()
-        )
+        """Return all Folder children of ``folder``."""
+        folders = await self._await_query(folder.get_folders().execute_query_async())
         return list(folders)
 
     async def download_file(self, file: File, dest: BinaryIO) -> None:
-        await self._await_query(
-            file.download_session_async(dest, use_path=False)
-        )
+        """Stream ``file`` contents into ``dest``."""
+        await self._await_query(file.download_session_async(dest, use_path=False))

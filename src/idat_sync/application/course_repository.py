@@ -1,6 +1,8 @@
+"""Course repository coordinating gateways, URL strategies, and path layout."""
+
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from idat_sync.application.ports import (
     CourseGateway,
@@ -32,6 +34,7 @@ class CourseRepository:
         recording_gateway: RecordingGateway,
         url_strategies: Sequence[UrlContentStrategy],
     ) -> None:
+        """Initialize the repository with course/recording gateways and strategies."""
         self.course_gateway = course_gateway
         self.recording_gateway = recording_gateway
         self.url_strategies = list(url_strategies)
@@ -56,37 +59,42 @@ class CourseRepository:
     async def list_url_content(
         self, contents: Sequence[ModuleContent]
     ) -> list[Content]:
+        """Expand unresolved ModuleContent links into concrete Content items."""
         resolved_contents = list[Content]()
         for content in contents:
-            if content.fileurl and content.filename:
-                if strategy := self._get_strategy(content.fileurl):
-                    subfolder = self._safe_subfolder(content.filepath)
-                    try:
-                        items = (
-                            await strategy.list_url_content(
-                                content.fileurl,
-                                content.filename,
-                                content.timemodified,
-                            )
-                            or []
-                        )
-                    except CredentialsExpiredError:
-                        raise
-                    except Exception as exc:
-                        _logger.warning(
-                            "Skipping unresolved URL '%s': %s",
+            if (
+                content.fileurl
+                and content.filename
+                and (strategy := self._get_strategy(content.fileurl))
+            ):
+                subfolder = self._safe_subfolder(content.filepath)
+                try:
+                    items = (
+                        await strategy.list_url_content(
                             content.fileurl,
-                            exc,
+                            content.filename,
+                            content.timemodified,
                         )
-                        continue
-                    if subfolder is not None:
-                        items = [item.in_folder(subfolder) for item in items]
-                    resolved_contents.extend(items)
+                        or []
+                    )
+                except CredentialsExpiredError:
+                    raise
+                except Exception as exc:
+                    _logger.warning(
+                        "Skipping unresolved URL '%s': %s",
+                        content.fileurl,
+                        exc,
+                    )
+                    continue
+                if subfolder is not None:
+                    items = [item.in_folder(subfolder) for item in items]
+                resolved_contents.extend(items)
         return resolved_contents
 
     async def get_recordings(
         self, course_name: str, recordings_folder: str | Path = ""
     ) -> list[RecordingContent]:
+        """Fetch class recordings for ``course_name`` under ``recordings_folder``."""
         recordings = await self.recording_gateway.fetch_recordings(course_name)
         folder = Path(recordings_folder)
         return [r.in_folder(folder) for r in recordings]
@@ -109,9 +117,7 @@ class CourseRepository:
         safe_name = safe_suffixed_segment(module.name, f"-[{module.id}]")
         return [item.in_folder(safe_name) for item in items]
 
-    async def _get_section_content(
-        self, section: CourseSection
-    ) -> list[Content]:
+    async def _get_section_content(self, section: CourseSection) -> list[Content]:
         items: list[Content] = list(section.inline_contents)
         for module in section.modules:
             if module.name:
@@ -122,16 +128,12 @@ class CourseRepository:
     async def get_course_content(
         self, course: Course, course_dir: str | Path = ""
     ) -> list[Content]:
-        """Generate download tasks / Content objects for a course using domain models."""
+        """Generate Content objects for a course using domain models."""
         course_modules_contents = list[Content]()
         for section in course.sections:
             if section.name:
-                course_modules_contents.extend(
-                    await self._get_section_content(section)
-                )
-        return [
-            item.in_folder(course_dir) for item in course_modules_contents
-        ]
+                course_modules_contents.extend(await self._get_section_content(section))
+        return [item.in_folder(course_dir) for item in course_modules_contents]
 
 
 __all__ = ["CourseRepository"]

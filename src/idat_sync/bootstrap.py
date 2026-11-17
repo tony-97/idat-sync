@@ -1,3 +1,5 @@
+"""Composition root wiring application services, adapters, and logging."""
+
 import logging
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
 def configure_logging(log_file: Path) -> logging.Logger:
+    """Configure stream and file handlers on the ``idat_sync`` logger."""
     logger = logging.getLogger("idat_sync")
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -46,12 +49,9 @@ async def create_sync_service(
     credentials: Credentials,
     config: SyncConfig,
 ) -> IDATSync:
-    sharepoint_storage_state = credentials.get("sharepoint_storage_state")
-    cookies = (
-        sharepoint_storage_state.get("cookies", [])
-        if sharepoint_storage_state
-        else []
-    )
+    """Build a fully wired :class:`IDATSync` service from credentials and config."""
+    storage_state = credentials.get("sharepoint_storage_state")
+    cookies = storage_state.get("cookies", []) if storage_state else []
 
     moodle_client = MoodleClient(
         credentials.get("token"),
@@ -83,12 +83,6 @@ async def create_sync_service(
         timezone=config.timezone,
     )
 
-    course_repository = CourseRepository(
-        course_gateway=moodle_adapter,
-        recording_gateway=sharepoint_adapter,
-        url_strategies=[moodle_adapter, sharepoint_adapter],
-    )
-
     download_tasks_group: list[list[Downloader]] = [
         [MoodleDownloader(moodle_client)],
         [StringDownloader()],
@@ -100,20 +94,19 @@ async def create_sync_service(
             ),
         ],
     ]
-    downloaders: list[Downloader] = [
-        downloader
-        for downloaders in download_tasks_group
-        for downloader in downloaders
-    ]
-
     file_system = LocalFileSystemAdapter()
-    download_manager = DownloadManager(downloaders, file_system=file_system)
-    task_orchestrator = TaskOrchestrator(download_tasks_group)
 
     return IDATSync(
-        course_repository=course_repository,
-        download_manager=download_manager,
-        task_orchestrator=task_orchestrator,
+        course_repository=CourseRepository(
+            course_gateway=moodle_adapter,
+            recording_gateway=sharepoint_adapter,
+            url_strategies=[moodle_adapter, sharepoint_adapter],
+        ),
+        download_manager=DownloadManager(
+            [d for group in download_tasks_group for d in group],
+            file_system=file_system,
+        ),
+        task_orchestrator=TaskOrchestrator(download_tasks_group),
         file_system=file_system,
         recordings_folder_name=config.recordings_folder_name,
         closers=[moodle_client.aclose, sharepoint_raw_client.aclose],
@@ -121,6 +114,7 @@ async def create_sync_service(
 
 
 def create_auth_service(config: SyncConfig) -> AuthService:
+    """Build an :class:`AuthService` configured from ``config``."""
     return AuthService(
         moodle_auth=MoodleTokenAdapter(MoodleTokenClient(config.moodle_base_url)),
         sharepoint_auth=SharepointBrowserAuth(

@@ -1,8 +1,10 @@
+"""Anti-corruption adapters mapping Moodle HTTP payloads to domain models."""
+
 import html
 import logging
+import unicodedata
 from pathlib import Path
 from typing import Any
-import unicodedata
 from urllib.parse import urlparse
 
 from idat_sync.application.ports import AuthenticationError
@@ -19,13 +21,15 @@ from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClie
 _logger = logging.getLogger(__name__)
 
 
-class MoodleTokenAdapter:
+class MoodleTokenAdapter:  # pylint: disable=too-few-public-methods
     """Adapter implementing MoodleTokenPort over MoodleTokenClient."""
 
     def __init__(self, client: MoodleTokenClient) -> None:
+        """Initialize the token adapter with a MoodleTokenClient."""
         self.client = client
 
     async def fetch_token(self, username: str, password: str) -> str:
+        """Exchange ``username`` and ``password`` for a Moodle token."""
         payload = await self.client.request_token(username, password)
         if isinstance(payload, dict):
             if "error" in payload:
@@ -34,33 +38,36 @@ class MoodleTokenAdapter:
             token = payload.get("token")
             if isinstance(token, str) and token:
                 return token
-        msg = "Could not obtain token. Check URL/credentials or if mobile service is enabled."
+        msg = (
+            "Could not obtain token. Check URL/credentials or if mobile "
+            "service is enabled."
+        )
         _logger.warning("[!] %s", msg)
         raise AuthenticationError(msg)
 
 
 class MoodleAdapter:
-    """Anti-Corruption Layer (Adapter) that transforms raw vendor data from
-
-    MoodleClient into strongly-typed domain models.
-    """
+    """Anti-Corruption Layer mapping raw Moodle payloads into domain models."""
 
     def __init__(
         self,
         client: MoodleClient,
         moodle_base_url: str,
     ) -> None:
+        """Initialize the adapter with a MoodleClient and base URL."""
         self.client = client
         self.moodle_host = (urlparse(moodle_base_url).hostname or "").lower()
         self._assignments_cache: dict[int, dict[int, dict]] | None = None
 
     def can_handle(self, url: str) -> bool:
+        """Return whether ``url`` belongs to the configured Moodle host."""
         return (urlparse(url).hostname or "").lower() == self.moodle_host
 
     async def list_url_content(
         self, url: str, filename: str, last_modified: int
     ) -> list[MoodleContent]:
-        # TODO: list recursive moodle folder url
+        """Wrap a Moodle file URL as a single MoodleContent item."""
+        # Recursive Moodle folder URLs are not expanded yet.
         return [MoodleContent(Path(safe_path_segment(filename)), last_modified, url)]
 
     # -------------------------------------------------------------------------
@@ -141,7 +148,8 @@ class MoodleAdapter:
         if urls:
             label = html.escape(name)
             return "\n".join(
-                f'<p><a href="{html.escape(url, quote=True)}">{label or html.escape(url)}</a></p>'
+                f'<p><a href="{html.escape(url, quote=True)}">'
+                f"{label or html.escape(url)}</a></p>"
                 for url in urls
             )
         if name:
@@ -157,11 +165,7 @@ class MoodleAdapter:
         if "summary" in raw_section:
             inline_contents = [
                 StringContent(
-                    Path(
-                        safe_suffixed_segment(
-                            sec_name, f"-[{sec_id}]-resumen.html"
-                        )
-                    ),
+                    Path(safe_suffixed_segment(sec_name, f"-[{sec_id}]-resumen.html")),
                     0,
                     [raw_section.get("summary") or ""],
                 )
@@ -173,21 +177,23 @@ class MoodleAdapter:
         for module in raw_section.get("modules") or []:
             if not isinstance(module, dict):
                 continue
-            modname = module.get("modname")
-            if modname == "label":
+            if module.get("modname") == "label":
                 if desc := module.get("description", ""):
                     inline_parts.append(desc)
                 continue
-            if is_bib and modname == "url":
+            if is_bib and module.get("modname") == "url":
                 if entry := self._format_bibliografia_url(module):
                     inline_parts.append(entry)
                 continue
             modules.append(self._to_course_module(module, assignments))
 
         if inline_parts:
-            filename = "bibliografia.html" if is_bib else "info.html"
             inline_contents.append(
-                StringContent(Path(filename), 0, ["\n".join(inline_parts)])
+                StringContent(
+                    Path("bibliografia.html" if is_bib else "info.html"),
+                    0,
+                    ["\n".join(inline_parts)],
+                )
             )
         return CourseSection(
             id=sec_id,
@@ -221,7 +227,7 @@ class MoodleAdapter:
         return courses
 
     async def _get_assignments_by_course(self) -> dict[int, dict[int, dict]]:
-        """Fetch assignments across all enrolled courses organized by course_id -> {cmid: raw_assignment}."""
+        """Fetch assignments keyed by course_id -> {cmid: raw_assignment}."""
         raw_courses = await self.client.fetch_assignments()
         courses_assignments: dict[int, dict[int, dict]] = {}
         for raw_course in raw_courses:
@@ -250,7 +256,7 @@ class MoodleAdapter:
         ]
 
     async def populate_course_sections(self, course: Course) -> Course:
-        """Populate sections and modules for a single course, caching assignments once."""
+        """Populate sections and modules for ``course``, caching assignments once."""
         if self._assignments_cache is None:
             self._assignments_cache = await self._get_assignments_by_course()
         course_assignments = self._assignments_cache.get(course.id, {})

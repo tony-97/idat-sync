@@ -1,25 +1,32 @@
+"""Low-level HTTP clients for Moodle token exchange and Web Services API."""
+
 import asyncio
+from http import HTTPStatus
 from typing import Any, BinaryIO, Self
+
 import httpx
 
 from idat_sync.application.ports import CredentialsExpiredError
 
 REQUEST_HEADER = {
     "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 7.1.1; Moto G Play Build/NPIS26.48-43-2; wv) AppleWebKit/537.36"
-        + " (KHTML, like Gecko) Version/4.0 Chrome/71.0.3578.99 Mobile Safari/537.36 MoodleMobile"
+        "Mozilla/5.0 (Linux; Android 7.1.1; Moto G Play Build/NPIS26.48-43-2; wv) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/71.0.3578.99 "
+        "Mobile Safari/537.36 MoodleMobile"
     ),
     "Content-Type": "application/x-www-form-urlencoded",
 }
 
 
-class MoodleTokenClient:
+class MoodleTokenClient:  # pylint: disable=too-few-public-methods
     """Low-level HTTP client for obtaining raw Moodle mobile login payloads."""
 
     def __init__(self, base_url: str) -> None:
+        """Initialize the token client for ``base_url``."""
         self.base_url = base_url.rstrip("/")
 
     async def request_token(self, username: str, password: str) -> dict[str, Any]:
+        """Request a Moodle mobile token payload for ``username``."""
         payload = {
             "username": username,
             "password": password,
@@ -49,21 +56,25 @@ class MoodleClient:
         base_url: str,
         request_delay: float,
     ) -> None:
+        """Initialize the Moodle API client with token, base URL, and delay."""
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.request_delay = request_delay
         self._client = httpx.AsyncClient()
 
     async def aclose(self) -> None:
+        """Close the underlying HTTPX client."""
         await self._client.aclose()
 
     async def __aenter__(self) -> Self:
+        """Enter the async context manager."""
         return self
 
     async def __aexit__(self, *args: object) -> None:
+        """Exit the async context manager and close the client."""
         await self.aclose()
 
-    async def call_ws(self, function: str, **kwargs: Any) -> Any:
+    async def call_ws(self, function: str, **kwargs: Any) -> Any:  # noqa: ANN401
         """Call a Moodle web service endpoint with the provided parameters."""
         url = f"{self.base_url}/webservice/rest/server.php"
         payload = {
@@ -91,7 +102,7 @@ class MoodleClient:
     async def fetch_enrolled_courses(
         self, classification: str = "all", limit: int = 100, offset: int = 0
     ) -> list[dict]:
-        """Fetch raw enrolled courses via core_course_get_enrolled_courses_by_timeline_classification."""
+        """Fetch raw enrolled courses via Moodle's timeline classification WS."""
         courses: list[dict] = []
         current_offset = offset
         while True:
@@ -118,7 +129,7 @@ class MoodleClient:
         return courses
 
     async def fetch_assignments(self) -> list[dict]:
-        """Fetch raw assignments for all enrolled courses via mod_assign_get_assignments."""
+        """Fetch raw assignments for enrolled courses via mod_assign_get_assignments."""
         result = await self.call_ws("mod_assign_get_assignments")
         if isinstance(result, dict):
             return result.get("courses", [])
@@ -146,11 +157,11 @@ class MoodleClient:
             timeout=60,
             headers=REQUEST_HEADER,
         ) as response:
-            if response.status_code == 401:
+            if response.status_code == HTTPStatus.UNAUTHORIZED:
                 raise CredentialsExpiredError(
                     "401 Unauthorized: your session cookie/token is missing/expired."
                 )
-            if response.status_code == 403:
+            if response.status_code == HTTPStatus.FORBIDDEN:
                 raise CredentialsExpiredError(
                     "403 Forbidden: your session cookie is missing/expired."
                 )
@@ -166,9 +177,7 @@ class MoodleClient:
                     "token"
                 )
                 method = (
-                    exc.request.method
-                    if isinstance(exc.request.method, str)
-                    else "GET"
+                    exc.request.method if isinstance(exc.request.method, str) else "GET"
                 )
                 raise httpx.HTTPStatusError(
                     f"HTTP {response.status_code} for url '{safe_url}'",

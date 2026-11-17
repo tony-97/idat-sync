@@ -1,3 +1,5 @@
+"""Cross-platform path and filename sanitization helpers."""
+
 import re
 import unicodedata
 
@@ -15,11 +17,15 @@ MAX_EXTENSION_LEN = 15
 
 
 def split_extension(name: str) -> tuple[str, str]:
-    """Split a real extension (1-15 non-whitespace chars) from ``name``, or return ``(name, '')``."""
+    """Split a real extension (1-15 non-whitespace chars) from ``name``."""
     if "." not in name:
         return name, ""
     stem, dot, ext = name.rpartition(".")
-    if stem and 1 <= len(ext) <= MAX_EXTENSION_LEN and not any(ch.isspace() for ch in ext):
+    if (
+        stem
+        and 1 <= len(ext) <= MAX_EXTENSION_LEN
+        and not any(ch.isspace() for ch in ext)
+    ):
         return stem, f"{dot}{ext}"
     return name, ""
 
@@ -63,12 +69,14 @@ def _sanitize_segment(
 
 
 def safe_filename(s: str, replacement: str = " ", max_len: int = 100) -> str:
+    """Sanitize ``s`` into an ASCII-only filename safe across platforms."""
     return _sanitize_segment(
         s, replacement=replacement, max_len=max_len, ascii_only=True
     )
 
 
 def safe_path_segment(s: str, replacement: str = " ", max_len: int = 100) -> str:
+    """Sanitize ``s`` into a Unicode-preserving path segment with extension."""
     return _sanitize_segment(
         s,
         replacement=replacement,
@@ -78,9 +86,7 @@ def safe_path_segment(s: str, replacement: str = " ", max_len: int = 100) -> str
     )
 
 
-def safe_suffixed_segment(
-    prefix: str, suffix: str, *, max_len: int = 100
-) -> str:
+def safe_suffixed_segment(prefix: str, suffix: str, *, max_len: int = 100) -> str:
     """Sanitize ``prefix + suffix`` within ``max_len`` without truncating ``suffix``."""
     budget = max(1, max_len - len(suffix))
     bounded = safe_path_segment(prefix, max_len=budget) if prefix else ""

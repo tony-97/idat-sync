@@ -17,7 +17,7 @@ dependencies = [
 authors = [{ name = "Tony Acuña Flores", email = "toanacfl@gmail.com" }]
 description = "Sincroniza automáticamente el material y grabaciones de IDAT (Moodle, SharePoint, OneDrive) a una carpeta local, manteniendo la estructura original de los cursos."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -31,3 +31,86 @@ Issues = "https://github.com/tony-97/idat-sync/issues"
 
 [project.gui-scripts]
 idat_sync = "idat_sync.main:main"
+
+[dependency-groups]
+dev = ["ruff>=0.8.0", "pylint>=3.3.0"]
+
+# ==========================================
+# RUFF: MAXIMUM STRICT LINT & FORMAT
+# ==========================================
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["scripts", "colab.ipynb"]
+fix = false              # Prevent silent auto-fixes during strict CI checks
+
+[tool.ruff.lint]
+# Enable EVERY rule Ruff supports (Bugbear, Bandit security, Annotations, Docstrings, Complexity, etc.)
+select = ["ALL"]
+
+# Only ignore rules that directly conflict with each other, the Ruff formatter, or agreed project exclusions
+ignore = [
+    "D203",   # Conflicts with D211 (no-blank-line-before-class)
+    "D213",   # Conflicts with D212 (multi-line-summary-first-line)
+    "COM812", # Conflicts with Ruff formatter trailing commas
+    "ISC001", # Conflicts with Ruff formatter implicit string concatenation
+    "CPY001", # No per-file copyright headers required
+    "TRY003", # Allow descriptive messages directly in raise statements
+    "EM101",  # Allow string literals directly in exception constructors
+    "EM102",  # Allow f-strings directly in exception constructors
+    "BLE001", # Allow broad except Exception at boundary handlers
+]
+
+# Require Google-style docstrings strictly across all modules, classes, and functions
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# Allow tests to use `assert` statements and magic values without failing
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "PLR2004", "ANN"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true # Also format code snippets inside docstrings
+
+
+# ==========================================
+# PYLINT: MAXIMUM STRICT STATIC ANALYSIS
+# ==========================================
+[tool.pylint.main]
+py-version = "3.12"
+ignore-paths = ["^scripts/.*"]
+jobs = 0
+fail-under = 10.0   # Require a perfect 10.0/10.0 score to pass
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.design]
+# Tighten complexity and size thresholds
+max-args = 5
+max-locals = 12
+max-returns = 4
+max-branches = 10
+max-statements = 35
+max-attributes = 7
+
+[tool.pylint."messages control"]
+# Enable all optional Pylint extensions and warnings
+enable = ["all"]
+
+# Disable ONLY formatting/import rules that Ruff already enforces strictly
+disable = [
+    "line-too-long",
+    "unused-import",
+    "unused-variable",
+    "wrong-import-order",
+    "ungrouped-imports",
+    "bad-indentation",
+    "trailing-whitespace",
+    "missing-final-newline",
+    "suppressed-message",    # Keeps output clean when you must inline-disable a rule
+    "locally-disabled",
+    "broad-exception-caught", # Matches Ruff BLE001 exclusion
+]

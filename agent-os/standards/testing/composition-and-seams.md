@@ -5,14 +5,29 @@ Wire the production object graph solely in `bootstrap.py` (`create_sync_service`
 ```python
 # Production wiring in bootstrap.py
 async def create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync:
-    moodle_client = MoodleClient(credentials.get("token"), base_url=config.moodle_base_url, request_delay=config.request_delay)
-    moodle_adapter = MoodleAdapter(moodle_client, moodle_base_url=config.moodle_base_url)
+    moodle_client = MoodleClient(
+        credentials.get("token"),
+        base_url=config.moodle_base_url,
+        request_delay=config.request_delay,
+    )
+    moodle_adapter = MoodleAdapter(
+        moodle_client, moodle_base_url=config.moodle_base_url
+    )
     ...
-    return IDATSync(course_repository, download_manager, task_orchestrator, file_system, recordings_folder_name=config.recordings_folder_name)
+    return IDATSync(
+        course_repository,
+        download_manager,
+        task_orchestrator,
+        file_system,
+        recordings_folder_name=config.recordings_folder_name,
+    )
+
 
 # Seam testing with spec-constrained mocks + real domain objects
 mock_gw = MagicMock(spec=CourseGateway)
-repo = CourseRepository(course_gateway=mock_gw, recording_gateway=mock_rec, url_strategies=[mock_strat])
+repo = CourseRepository(
+    course_gateway=mock_gw, recording_gateway=mock_rec, url_strategies=[mock_strat]
+)
 ```
 
 - **Single composition root**: Only `create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync` and `create_auth_service(config: SyncConfig) -> AuthService` in `bootstrap.py` instantiate concrete clients, adapters, credential stores, filesystem adapters, and downloader groups from `Credentials` and `SyncConfig`.

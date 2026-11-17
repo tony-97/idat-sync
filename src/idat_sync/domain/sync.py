@@ -1,3 +1,5 @@
+"""Synchronization state and tree-diff domain models."""
+
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -7,6 +9,8 @@ from idat_sync.domain.content import Content
 
 
 class SyncStatus(Enum):
+    """Synchronization state of a single path."""
+
     SYNCED = auto()
     MISSING = auto()
     OUTDATED = auto()
@@ -15,6 +19,8 @@ class SyncStatus(Enum):
 
 @dataclass
 class SyncEntry:
+    """Single path paired with its synchronization status and optional content."""
+
     path: Path
     status: SyncStatus
     content: Content | None = None
@@ -22,6 +28,8 @@ class SyncEntry:
 
 @dataclass
 class SyncDiff:
+    """Comparison between a remote content tree and a local directory tree."""
+
     entries: list[SyncEntry]
     missing_paths: set[Path]
     outdated_paths: set[Path]
@@ -30,10 +38,12 @@ class SyncDiff:
 
     @property
     def to_download_paths(self) -> set[Path]:
+        """Return all remote paths that are missing or outdated locally."""
         return self.missing_paths | self.outdated_paths
 
     @property
     def pending_contents(self) -> list[Content]:
+        """Return remote content items that still need to be downloaded."""
         pending = self.to_download_paths
         return [
             entry.content
@@ -49,48 +59,50 @@ class SyncDiff:
         *,
         outdated_paths: Collection[Path] = (),
     ) -> "SyncDiff":
+        """Build a SyncDiff by comparing remote contents against local mtimes."""
         remote_map: dict[Path, Content] = {}
         for content in remote_contents:
             if content.path in remote_map:
                 raise ValueError(f"Duplicate remote content path: {content.path}")
             remote_map[content.path] = content
 
-        remote_keys = remote_map.keys()
-        local_keys = local_mtimes.keys()
+        missing_paths = set(remote_map.keys() - local_mtimes.keys())
+        common_paths = set(remote_map.keys() & local_mtimes.keys())
+        local_only_paths = set(local_mtimes.keys() - remote_map.keys())
+        outdated_paths = set(outdated_paths)
 
-        missing_paths: set[Path] = set(remote_keys - local_keys)
-        common_paths: set[Path] = set(remote_keys & local_keys)
-        local_only_paths: set[Path] = set(local_keys - remote_keys)
-        extra_outdated = set(outdated_paths)
-
-        resolved_outdated: set[Path] = {
+        resolved_outdated = {
             path
             for path in common_paths
-            if path in extra_outdated
+            if path in outdated_paths
             or (
                 remote_map[path].last_modified > 0
                 and remote_map[path].last_modified > local_mtimes[path]
             )
         }
-        synced_paths: set[Path] = common_paths - resolved_outdated
+        synced_paths = common_paths - resolved_outdated
 
-        entries: list[SyncEntry] = []
-        for path in missing_paths:
-            entries.append(
-                SyncEntry(path, SyncStatus.MISSING, remote_map[path])
-            )
-        for path in resolved_outdated:
-            entries.append(
-                SyncEntry(path, SyncStatus.OUTDATED, remote_map[path])
-            )
-        for path in synced_paths:
-            entries.append(
-                SyncEntry(path, SyncStatus.SYNCED, remote_map[path])
-            )
-        for path in local_only_paths:
-            entries.append(SyncEntry(path, SyncStatus.LOCAL_ONLY, None))
-
-        entries.sort(key=lambda e: e.path)
+        entries = sorted(
+            [
+                *(
+                    SyncEntry(path, SyncStatus.MISSING, remote_map[path])
+                    for path in missing_paths
+                ),
+                *(
+                    SyncEntry(path, SyncStatus.OUTDATED, remote_map[path])
+                    for path in resolved_outdated
+                ),
+                *(
+                    SyncEntry(path, SyncStatus.SYNCED, remote_map[path])
+                    for path in synced_paths
+                ),
+                *(
+                    SyncEntry(path, SyncStatus.LOCAL_ONLY, None)
+                    for path in local_only_paths
+                ),
+            ],
+            key=lambda entry: entry.path,
+        )
 
         return cls(
             entries=entries,

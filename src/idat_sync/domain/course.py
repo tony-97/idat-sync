@@ -1,6 +1,8 @@
+"""Curriculum domain models and academic term helpers."""
+
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-import re
 
 from idat_sync.domain.content import StringContent
 

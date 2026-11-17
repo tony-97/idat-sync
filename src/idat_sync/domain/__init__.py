@@ -1,3 +1,5 @@
+"""Domain models and pure synchronization primitives for idat_sync."""
+
 from idat_sync.domain.content import (
     Content,
     MoodleContent,
@@ -15,6 +17,7 @@ from idat_sync.domain.path_utils import WINDOWS_RESERVED, safe_filename
 from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
 
 __all__ = [
+    "WINDOWS_RESERVED",
     "Content",
     "Course",
     "CourseModule",
@@ -27,6 +30,5 @@ __all__ = [
     "SyncDiff",
     "SyncEntry",
     "SyncStatus",
-    "WINDOWS_RESERVED",
     "safe_filename",
 ]
