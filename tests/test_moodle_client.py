@@ -14,6 +14,7 @@ from idat_sync.infrastructure.moodle_client import (
     MoodleClient,
     MoodleTokenClient,
 )
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 
 
 def _mock_async_client(mock_client_cls, *, post_return=None, stream_cm=None):
@@ -26,6 +27,87 @@ def _mock_async_client(mock_client_cls, *, post_return=None, stream_cm=None):
     return mock_async_client
 
 
+class TestAsyncRateLimiter(unittest.IsolatedAsyncioTestCase):
+    """Tests for AsyncRateLimiter end-to-start cooldown and lock behavior."""
+
+    @patch(
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
+    )
+    @patch("idat_sync.infrastructure.rate_limiter.time.monotonic")
+    async def test_enforces_end_to_start_cooldown_and_skips_when_elapsed(
+        self, mock_monotonic, mock_sleep
+    ):
+        """Sleep only for remaining cooldown after exit, skipping when elapsed."""
+        limiter = AsyncRateLimiter(30.0)
+        mock_monotonic.side_effect = [100.0, 102.0, 114.0, 132.0, 170.0, 171.0]
+
+        async with limiter:
+            pass
+        mock_sleep.assert_not_awaited()
+
+        async with limiter:
+            pass
+        mock_sleep.assert_awaited_once_with(18.0)
+
+        mock_sleep.reset_mock()
+        async with limiter:
+            pass
+        mock_sleep.assert_not_awaited()
+
+    @patch(
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
+    )
+    async def test_zero_or_negative_delay_does_not_sleep(self, mock_sleep):
+        """Return immediately without sleeping when delay <= 0."""
+        for delay in (0.0, -5.0):
+            limiter = AsyncRateLimiter(delay)
+            async with limiter:
+                pass
+            async with limiter:
+                pass
+        mock_sleep.assert_not_awaited()
+
+    @patch(
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
+    )
+    @patch("idat_sync.infrastructure.rate_limiter.time.monotonic")
+    async def test_exception_inside_block_leaves_next_allowed_unchanged_and_unlocks(
+        self, mock_monotonic, mock_sleep
+    ):
+        """Do not stamp cooldown on exception and release lock for next caller."""
+        limiter = AsyncRateLimiter(30.0)
+        mock_monotonic.side_effect = [10.0, 11.0, 12.0]
+
+        with pytest.raises(RuntimeError, match="boom"):
+            async with limiter:
+                raise RuntimeError("boom")
+
+        async with limiter:
+            pass
+        mock_sleep.assert_not_awaited()
+
+    @patch("idat_sync.infrastructure.rate_limiter.time.monotonic", return_value=100.0)
+    async def test_cancellation_during_sleep_releases_lock(self, mock_monotonic):
+        """Release internal lock if cancelled while sleeping in __aenter__."""
+        assert mock_monotonic.return_value == 100.0
+        limiter = AsyncRateLimiter(30.0)
+        async with limiter:
+            pass
+
+        with (
+            patch(
+                "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
+                new_callable=AsyncMock,
+                side_effect=asyncio.CancelledError(),
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            async with limiter:
+                pass
+
+        assert not limiter._lock.locked()  # noqa: SLF001  # pylint: disable=protected-access
+
+
 class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
     """Tests for MoodleClient WS calls, pagination, and file downloads."""
 
@@ -34,19 +116,33 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         self.token = "fake_test_token"  # noqa: S105
         self.base_url = "https://aulavirtual.idat.edu.pe"
 
-    def _make_client(self, *, request_delay: float = 30.0) -> MoodleClient:
+    def _make_client(self, *, delay: float = 30.0) -> MoodleClient:
         return MoodleClient(
             token=self.token,
             base_url=self.base_url,
-            request_delay=request_delay,
+            rate_limiter=AsyncRateLimiter(delay),
         )
 
+    def test_requires_rate_limiter_and_rejects_request_delay(self):
+        """Require rate_limiter and reject legacy request_delay kwarg."""
+        with pytest.raises(TypeError, match="rate_limiter"):
+            MoodleClient(token=self.token, base_url=self.base_url)  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
+        with pytest.raises(TypeError, match="request_delay"):
+            MoodleClient(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
+                token=self.token,
+                base_url=self.base_url,
+                request_delay=1.0,  # type: ignore[call-arg]
+            )
+        client = self._make_client()
+        assert not hasattr(client, "request_delay")
+        assert isinstance(client.rate_limiter, AsyncRateLimiter)
+
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_call_ws_success(self, mock_client_cls, mock_sleep):
-        """Post WS payload with token and await request_delay on success."""
+        """Post WS payload with token and stamp rate limiter on success."""
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "courses": [{"id": 1, "fullname": "Test Course"}]
@@ -68,14 +164,15 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         assert payload["moodlewsrestformat"] == "json"
         assert payload["classification"] == "all"
         assert result == {"courses": [{"id": 1, "fullname": "Test Course"}]}
-        mock_sleep.assert_awaited_once_with(30.0)
+        mock_sleep.assert_not_awaited()
+        assert client.rate_limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_call_ws_moodle_exception(self, mock_client_cls, mock_sleep):
-        """Raise RuntimeError/CredentialsExpiredError when Moodle returns exception."""
+        """Raise CredentialsExpiredError without stamping cooldown on exception."""
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "exception": "moodle_exception",
@@ -90,6 +187,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
 
         assert "Invalid token" in str(ctx.value)
         mock_sleep.assert_not_awaited()
+        assert not client.rate_limiter._next_allowed  # noqa: SLF001  # pylint: disable=protected-access
 
     @patch(
         "idat_sync.infrastructure.moodle_client.MoodleClient.call_ws",
@@ -179,39 +277,42 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         assert isinstance(result[0], dict)
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
-    async def test_call_ws_uses_injected_base_url_and_request_delay(
+    async def test_call_ws_uses_injected_base_url_and_rate_limiter(
         self, mock_client_cls, mock_sleep
     ):
-        """Normalize injected base_url and honor injected request_delay."""
+        """Normalize injected base_url and honor injected rate_limiter."""
         mock_response = MagicMock()
         mock_response.json.return_value = {"ok": True}
         mock_async_client = _mock_async_client(
             mock_client_cls, post_return=mock_response
         )
 
+        limiter = AsyncRateLimiter(2.5)
         client = MoodleClient(
             token="tok",  # noqa: S106
             base_url="https://moodle.example.edu/",
-            request_delay=2.5,
+            rate_limiter=limiter,
         )
         await client.call_ws("core_webservice_get_site_info")
+        await client.call_ws("core_webservice_get_site_info")
 
-        mock_async_client.post.assert_awaited_once()
+        assert mock_async_client.post.await_count == 2
         args, _ = mock_async_client.post.call_args
         assert args[0] == "https://moodle.example.edu/webservice/rest/server.php"
-        mock_sleep.assert_awaited_once_with(2.5)
+        mock_sleep.assert_awaited_once()
+        assert 0.0 < mock_sleep.call_args.args[0] <= 2.5
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
-    async def test_download_file_streams_chunks_and_sleeps(
+    async def test_download_file_streams_chunks_and_enters_rate_limiter(
         self, mock_client_cls, mock_sleep
     ):
-        """Stream response bytes into destination and await request_delay."""
+        """Stream response bytes into destination and stamp rate limiter."""
 
         async def _aiter_bytes(chunk_size: int):  # noqa: ARG001  # pylint: disable=unused-argument
             for chunk in (b"chunk1-", b"", b"chunk2"):
@@ -246,16 +347,14 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_response.raise_for_status.assert_called_once_with()
         mock_response.aiter_bytes.assert_called_once_with(chunk_size=1024 * 256)
         assert dest.getvalue() == b"chunk1-chunk2"
-        mock_sleep.assert_awaited_once_with(30.0)
+        mock_sleep.assert_not_awaited()
+        assert client.rate_limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
 
-    @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
-    )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
-    async def test_download_file_exits_stream_before_sleeping(
-        self, mock_client_cls, mock_sleep
+    async def test_download_file_exits_stream_before_limiter_aexit(
+        self, mock_client_cls
     ):
-        """Close the HTTP stream context before sleeping for request_delay."""
+        """Close the HTTP stream context before AsyncRateLimiter.__aexit__."""
         events: list[str] = []
 
         async def _aiter_bytes(chunk_size: int):  # noqa: ARG001  # pylint: disable=unused-argument
@@ -264,10 +363,15 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         async def _on_aexit(*_args):
             events.append("exit_stream")
 
-        async def _on_sleep(_delay):
-            events.append("sleep")
+        class _SpyLimiter(AsyncRateLimiter):
+            async def __aenter__(self):
+                events.append("limiter_enter")
+                return await super().__aenter__()
 
-        mock_sleep.side_effect = _on_sleep
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                events.append("limiter_exit")
+                await super().__aexit__(exc_type, exc_val, exc_tb)
+
         mock_response = MagicMock(status_code=200)
         mock_response.aiter_bytes = MagicMock(side_effect=_aiter_bytes)
         stream_cm = MagicMock()
@@ -275,15 +379,19 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         stream_cm.__aexit__ = AsyncMock(side_effect=_on_aexit)
         _mock_async_client(mock_client_cls, stream_cm=stream_cm)
 
-        client = self._make_client(request_delay=1.5)
+        client = MoodleClient(
+            token=self.token,
+            base_url=self.base_url,
+            rate_limiter=_SpyLimiter(1.5),
+        )
         await client.download_file(
             "https://aulavirtual.idat.edu.pe/file.pdf", io.BytesIO()
         )
 
-        assert events == ["exit_stream", "sleep"]
+        assert events == ["limiter_enter", "exit_stream", "limiter_exit"]
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_download_file_raises_on_403(self, mock_client_cls, mock_sleep):
@@ -306,7 +414,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_download_file_propagates_http_error_without_sleeping(
@@ -337,7 +445,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_download_file_translates_request_error_and_redacts_tokens(
@@ -363,7 +471,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_download_file_redacts_tokens_from_http_status_error(
@@ -383,7 +491,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         client = MoodleClient(
             token="secret-tok",  # noqa: S106
             base_url="https://aulavirtual.idat.edu.pe",
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         )
 
         dest = io.BytesIO()
@@ -397,7 +505,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_call_ws_and_download_map_auth_failures(
@@ -448,7 +556,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_call_ws_translates_http_network_and_json_errors(
@@ -486,7 +594,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.moodle_client.asyncio.sleep", new_callable=AsyncMock
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep", new_callable=AsyncMock
     )
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_reuses_single_shared_async_client_and_closes(
@@ -508,7 +616,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             mock_client_cls, post_return=post_resp, stream_cm=stream_cm
         )
 
-        async with self._make_client(request_delay=0.0) as client:
+        async with self._make_client(delay=0.0) as client:
             await client.call_ws("core_webservice_get_site_info")
             await client.download_file(
                 "https://aulavirtual.idat.edu.pe/pluginfile.php/1/a.pdf",
@@ -519,7 +627,7 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_async_client.post.assert_awaited_once()
         mock_async_client.stream.assert_called_once()
         mock_async_client.aclose.assert_awaited_once_with()
-        mock_sleep.assert_awaited()
+        mock_sleep.assert_not_awaited()
 
 
 class TestMoodleTokenClient(unittest.TestCase):

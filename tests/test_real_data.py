@@ -32,6 +32,7 @@ from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import MoodleDownloader
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
 from idat_sync.infrastructure.moodle_client import MoodleClient
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
@@ -169,6 +170,9 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
 
             assert not rc
             assert mock_client_cls.call_args.args[0] == "saved-tok"
+            rate_limiter = mock_client_cls.call_args.kwargs["rate_limiter"]
+            assert isinstance(rate_limiter, AsyncRateLimiter)
+            assert rate_limiter.delay == load_config().request_delay
             assert (Path(tmpdir) / "all_courses_contents.json").is_file()
 
     async def test_moodle_json_script_returns_one_on_authentication_error(self):
@@ -488,7 +492,7 @@ class TestLiveCredentialsIntegration(unittest.IsolatedAsyncioTestCase):
         moodle_client = MoodleClient(
             self.credentials["token"],
             base_url=self.config.moodle_base_url,
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         )
         fn, url, ts = candidates[0]
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -509,7 +513,7 @@ class TestLiveCredentialsIntegration(unittest.IsolatedAsyncioTestCase):
             self.credentials.get("sharepoint_storage_state", {}).get("cookies", []),
             sharepoint_personal_host=self.config.sharepoint_personal_host,
             academic_site_url=self.config.sharepoint_academic_site_url,
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         )
         sp_adapter = SharepointApiAdapter(
             sp_client,

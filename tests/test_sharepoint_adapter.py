@@ -21,6 +21,7 @@ from office365.sharepoint.folders.folder import Folder
 
 from idat_sync.application.ports import CredentialsExpiredError, RemoteServiceError
 from idat_sync.domain.content import RecordingContent, SharepointContent
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
@@ -451,33 +452,43 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         assert recordings == []
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    async def test_sharepoint_client_uses_injected_hosts_and_delay(
+    async def test_sharepoint_client_uses_injected_hosts_and_rate_limiter(
         self, mock_ctx_cls, mock_sleep
     ):
-        """Use injected SharePoint hosts and request_delay on create()."""
+        """Use injected SharePoint hosts and rate_limiter on create()."""
         mock_ctx_cls.return_value = _make_sharepoint_ctx(
             "https://contoso-my.sharepoint.com/personal/user"
         )
+        with pytest.raises(TypeError, match="request_delay"):
+            await SharepointClient.create(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
+                cookies=[],
+                sharepoint_personal_host="contoso-my.sharepoint.com",
+                academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
+                request_delay=2.5,  # type: ignore[call-arg]
+            )
 
+        limiter = AsyncRateLimiter(2.5)
         client = await SharepointClient.create(
             cookies=[],
             sharepoint_personal_host="contoso-my.sharepoint.com",
             academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
-            request_delay=2.5,
+            rate_limiter=limiter,
         )
 
         called_urls = [call.args[0] for call in mock_ctx_cls.call_args_list]
         assert "https://contoso.sharepoint.com/sites/ACAD" in called_urls
         assert "https://contoso-my.sharepoint.com" in called_urls
-        assert client.request_delay == 2.5
-        mock_sleep.assert_awaited_once_with(2.5)
+        assert not hasattr(client, "request_delay")
+        assert client.rate_limiter is limiter
+        assert limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
+        mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -502,15 +513,15 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             cookies=cookies,  # type: ignore[arg-type]
             sharepoint_personal_host="intranet",
             academic_site_url="https://intranet/sites/ACAD",
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         )
 
         assert not hasattr(client, "sharepoint_cookies")
         assert client.cookies_for_host("intranet") == {"rtFa": "exact"}
-        mock_sleep.assert_awaited_once_with(0.0)
+        mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -568,7 +579,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             cookies=cookies,  # type: ignore[arg-type]
             sharepoint_personal_host="contoso-my.sharepoint.com",
             academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         )
 
         acad_cookies = client.cookies_for_host("contoso.sharepoint.com")
@@ -600,17 +611,17 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         )
         assert acad_cb() == {"FedAuth": "exact-acad-first", "rtFa": "exact-acad-last"}
         assert personal_cb() == {"FedAuth": "personal-fedauth", "rtFa": "personal-rtfa"}
-        mock_sleep.assert_awaited_once_with(0.0)
+        mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
-    async def test_sharepoint_client_sdk_queries_and_download_sleep(
+    async def test_sharepoint_client_sdk_queries_and_download_rate_limit(
         self, mock_ctx_cls, mock_sleep
     ):
-        """Sleep request_delay after each SharePoint SDK query and download."""
+        """Enter rate_limiter for each SharePoint SDK query and download."""
         mock_ctx = _make_sharepoint_ctx(
             "https://contoso-my.sharepoint.com/personal/user"
         )
@@ -621,7 +632,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             cookies=[],
             sharepoint_personal_host="contoso-my.sharepoint.com",
             academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
-            request_delay=1.75,
+            rate_limiter=AsyncRateLimiter(1.75),
         )
         mock_sleep.reset_mock()
 
@@ -666,10 +677,11 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             dest, use_path=False
         )
         assert mock_sleep.call_count == 6
-        mock_sleep.assert_called_with(1.75)
+        for call in mock_sleep.call_args_list:
+            assert 0.0 < call.args[0] <= 1.75
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -685,7 +697,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             cookies=[],
             sharepoint_personal_host="contoso-my.sharepoint.com",
             academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
-            request_delay=1.75,
+            rate_limiter=AsyncRateLimiter(1.75),
         )
         mock_sleep.reset_mock()
 
@@ -708,7 +720,8 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         items_query.select.return_value.expand.assert_called_once_with(["File"])
         get_all = items_query.select.return_value.expand.return_value.get_all_async
         get_all.assert_awaited_once_with(page_size=50)
-        mock_sleep.assert_awaited_once_with(1.75)
+        mock_sleep.assert_awaited_once()
+        assert 0.0 < mock_sleep.call_args.args[0] <= 1.75
 
     async def test_list_url_content_matches_guest_urls_case_insensitively(self):
         """Match SharePoint guest URLs and hosts case-insensitively."""
@@ -876,7 +889,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
     """Tests for SharepointClient creation, routing, auth errors, and cleanup."""
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -891,7 +904,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
                 academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-                request_delay=0.0,
+                rate_limiter=AsyncRateLimiter(0.0),
             )
 
         ctx_ok = _make_sharepoint_ctx("https://idat628-my.sharepoint.com/personal/user")
@@ -900,7 +913,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             cookies=[],
             sharepoint_personal_host="idat628-my.sharepoint.com",
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         )
 
         for status in (401, 403):
@@ -935,10 +948,10 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         client.search_client = None
         with pytest.raises(CredentialsExpiredError):
             await client.search_for_recordings("Algebra")
-        mock_sleep.assert_awaited()
+        mock_sleep.assert_not_awaited()
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -949,14 +962,16 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         ctx_ok = _make_sharepoint_ctx("https://idat628-my.sharepoint.com/personal/user")
         mock_ctx_cls.return_value = ctx_ok
 
+        limiter = AsyncRateLimiter(1.25)
         client = await SharepointClient.create(
             cookies=[],
             sharepoint_personal_host="idat628-my.sharepoint.com",
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-            request_delay=1.25,
+            rate_limiter=limiter,
         )
         mock_ctx_cls.reset_mock()
         mock_sleep.reset_mock()
+        limiter._next_allowed = 0.0  # noqa: SLF001  # pylint: disable=protected-access
 
         client.get_client_from_url(
             "https://idat628-my.sharepoint.com/:b:/g/personal/fjcanari_idat_pe/Ea7D?e=1"
@@ -980,16 +995,18 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             )
         )
         await client.load_entity(MagicMock(), ctx_ok)
-        mock_sleep.assert_awaited_once_with(1.25)
+        mock_sleep.assert_not_awaited()
+        assert limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
 
         ctx_ok.execute_query_with_incremental_retry_async = AsyncMock(
             side_effect=ClientRequestException(response=MagicMock(status_code=401))
         )
         with pytest.raises(CredentialsExpiredError):
             await client.load_entity(MagicMock(), ctx_ok)
+        mock_sleep.assert_awaited_once()
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
@@ -1007,7 +1024,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             cookies=[],
             sharepoint_personal_host="idat628-my.sharepoint.com",
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-            request_delay=2.0,
+            rate_limiter=AsyncRateLimiter(2.0),
         )
 
         assert client.search_client is None
@@ -1028,7 +1045,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         mock_transport_cls.return_value.aclose.assert_awaited_once_with()
 
     @patch(
-        "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
         new_callable=AsyncMock,
     )
     @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
@@ -1045,11 +1062,11 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
                 academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-                request_delay=0.0,
+                rate_limiter=AsyncRateLimiter(0.0),
             )
 
         mock_transport_cls.return_value.aclose.assert_awaited_once_with()
-        mock_sleep.assert_awaited_once_with(0.0)
+        mock_sleep.assert_not_awaited()
 
     @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -1071,10 +1088,44 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
                 academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-                request_delay=0.0,
+                rate_limiter=AsyncRateLimiter(0.0),
             )
 
         mock_transport_cls.return_value.aclose.assert_awaited_once_with()
+
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    async def test_cancelled_await_query_closes_unawaited_coroutine(
+        self, mock_ctx_cls, mock_transport_cls
+    ):
+        """Close unawaited query coroutine if rate_limiter.__aenter__ is cancelled."""
+        mock_transport_cls.return_value.aclose = AsyncMock()
+        mock_ctx = _make_sharepoint_ctx("https://idat628-my.sharepoint.com/personal/u")
+        mock_ctx_cls.return_value = mock_ctx
+
+        limiter = AsyncRateLimiter(10.0)
+        client = await SharepointClient.create(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic",
+            rate_limiter=limiter,
+        )
+
+        async def _never_awaited():
+            await asyncio.sleep(0)
+
+        coro = _never_awaited()
+        assert coro.cr_frame is not None
+        cancel_sleep = patch(
+            "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
+            new_callable=AsyncMock,
+            side_effect=asyncio.CancelledError(),
+        )
+        with cancel_sleep, pytest.raises(asyncio.CancelledError):
+            await client._await_query(coro)  # noqa: SLF001  # pylint: disable=protected-access
+
+        assert coro.cr_frame is None
+        assert not limiter._lock.locked()  # noqa: SLF001  # pylint: disable=protected-access
 
     @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
     @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
@@ -1092,7 +1143,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             cookies=[],
             sharepoint_personal_host="idat628-my.sharepoint.com",
             academic_site_url="https://idat628.sharepoint.com/sites/Academic",
-            request_delay=0.0,
+            rate_limiter=AsyncRateLimiter(0.0),
         ) as client:
             assert isinstance(client, SharepointClient)
 

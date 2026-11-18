@@ -86,6 +86,7 @@ from idat_sync.infrastructure.filesystem import (
 )
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
@@ -156,7 +157,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         self.string_downloader = StringDownloader()
         self.sharepoint_downloader = SharepointDownloader(client=MagicMock())
         self.recording_downloader = RecordingDownloader(
-            cookies=[], sharepoint_personal_host="idat628-my.sharepoint.com"
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            rate_limiter=AsyncRateLimiter(0.0),
         )
 
         self.groups = [
@@ -610,6 +613,17 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert "RQ_HEADER" not in downloader_imports
         assert "REQUEST_HEADER" not in downloader_imports
 
+        moodle_client_imports = _collect_downloader_imports(
+            src_root / "infrastructure" / "moodle_client.py"
+        )
+        assert "asyncio" not in moodle_client_imports
+        assert "time" not in moodle_client_imports
+
+        sp_client_imports = _collect_downloader_imports(
+            src_root / "infrastructure" / "sharepoint_client.py"
+        )
+        assert "time" not in sp_client_imports
+
         print_calls = _collect_print_calls(src_root)
         assert not print_calls, (
             f"Found forbidden print() calls in src/idat_sync/: {print_calls}"
@@ -637,6 +651,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         rec_dl = RecordingDownloader(
             cookies=[],
             sharepoint_personal_host="contoso-my.sharepoint.com",
+            rate_limiter=AsyncRateLimiter(0.0),
         )
         assert rec_dl.can_handle(
             RecordingContent(
@@ -796,7 +811,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 return_value=mock_ctx,
             ) as mock_ctx_cls,
             patch(
-                "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+                "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
                 new_callable=AsyncMock,
             ) as mock_sleep,
         ):
@@ -805,14 +820,16 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         called_urls = [call.args[0] for call in mock_ctx_cls.call_args_list]
         assert "https://contoso.sharepoint.com/sites/ACAD" in called_urls
         assert "https://contoso-my.sharepoint.com" in called_urls
-        mock_sleep.assert_awaited_once_with(1.5)
+        mock_sleep.assert_not_awaited()
 
         assert service.recordings_folder_name == "Videos"
         moodle_adapter = service.course_repository.course_gateway
         assert isinstance(moodle_adapter, MoodleAdapter)
         assert moodle_adapter.moodle_host == "lms.example.edu"
         assert moodle_adapter.client.base_url == "https://lms.example.edu"
-        assert moodle_adapter.client.request_delay == 1.5
+        assert isinstance(moodle_adapter.client.rate_limiter, AsyncRateLimiter)
+        assert moodle_adapter.client.rate_limiter.delay == 1.5
+        assert not hasattr(moodle_adapter.client, "request_delay")
 
         sp_adapter = service.course_repository.recording_gateway
         assert isinstance(sp_adapter, SharepointApiAdapter)
@@ -823,7 +840,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert sp_adapter.week_folder_prefix == "Week"
         assert sp_adapter.timezone == ZoneInfo("America/Bogota")
         assert not hasattr(sp_adapter, "request_delay")
-        assert sp_adapter.sp_client.request_delay == 1.5
+        assert isinstance(sp_adapter.sp_client.rate_limiter, AsyncRateLimiter)
+        assert sp_adapter.sp_client.rate_limiter.delay == 1.5
+        assert (
+            sp_adapter.sp_client.rate_limiter is not moodle_adapter.client.rate_limiter
+        )
+        assert not hasattr(sp_adapter.sp_client, "request_delay")
 
         downloaders = service.download_manager.strategies
         moodle_dl = next(d for d in downloaders if isinstance(d, MoodleDownloader))
@@ -834,6 +856,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert not hasattr(moodle_dl, "request_delay")
         assert not hasattr(sp_dl, "request_delay")
         assert rec_dl.sharepoint_personal_host == "contoso-my.sharepoint.com"
+        assert rec_dl.rate_limiter is sp_adapter.sp_client.rate_limiter
 
         with patch.object(
             sp_adapter.sp_client._transport,  # noqa: SLF001  # pylint: disable=protected-access
@@ -918,7 +941,31 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             content = RecordingContent(
                 target, 1700000000, "https://idat628-my.sharepoint.com/:v:/r/video.mp4"
             )
-            dl = RecordingDownloader([], "idat628-my.sharepoint.com")
+            dl = RecordingDownloader(
+                [], "idat628-my.sharepoint.com", AsyncRateLimiter(0.0)
+            )
+            with pytest.raises(TypeError, match="request_delay"):
+                RecordingDownloader(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
+                    cookies=[],
+                    sharepoint_personal_host="idat628-my.sharepoint.com",
+                    request_delay=1.0,  # type: ignore[call-arg]
+                )
+
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
+            ) as mock_ydl:
+                await dl.download(content)
+            assert not dl.rate_limiter._next_allowed  # noqa: SLF001  # pylint: disable=protected-access
+
+            paced_limiter = AsyncRateLimiter(15.0)
+            paced_dl = RecordingDownloader(
+                [], "idat628-my.sharepoint.com", paced_limiter
+            )
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
+            ) as mock_ydl:
+                await paced_dl.download(content)
+            assert paced_limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
 
             for msg in ("HTTP Error 401: Unauthorized", "HTTP Error 403: Forbidden"):
                 with patch(
@@ -1426,7 +1473,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 return_value=mock_ctx,
             ),
             patch(
-                "idat_sync.infrastructure.sharepoint_client.asyncio.sleep",
+                "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
@@ -1676,7 +1723,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 assert not str(key).startswith("\\\\?\\")
             assert fs.read_bytes(deep_string) == b"hello long path"
 
-            rec_dl = RecordingDownloader([], "idat628-my.sharepoint.com")
+            rec_dl = RecordingDownloader(
+                [], "idat628-my.sharepoint.com", AsyncRateLimiter(0.0)
+            )
             with patch(
                 "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
             ) as mock_ydl:
@@ -1709,7 +1758,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 1700000000,
                 "https://idat628-my.sharepoint.com/:v:/r/video.mp4",
             )
-            dl = RecordingDownloader([], "idat628-my.sharepoint.com")
+            dl = RecordingDownloader(
+                [], "idat628-my.sharepoint.com", AsyncRateLimiter(0.0)
+            )
 
             def fake_ydl_factory(opts):
                 captured_hooks.extend(opts.get("progress_hooks", []))

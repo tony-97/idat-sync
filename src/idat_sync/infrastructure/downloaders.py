@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from idat_sync.infrastructure.moodle_client import MoodleClient
+    from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
     from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 _logger = logging.getLogger(__name__)
@@ -121,10 +122,12 @@ class RecordingDownloader(Downloader[RecordingContent]):
         self,
         cookies: list[CookieData],
         sharepoint_personal_host: str,
+        rate_limiter: AsyncRateLimiter,
     ) -> None:
-        """Initialize the recording downloader with cookies and personal host."""
+        """Initialize the recording downloader with cookies, host, and limiter."""
         self.cookies = self.netscape_cookies_format(cookies)
         self.sharepoint_personal_host = sharepoint_personal_host.lower()
+        self.rate_limiter = rate_limiter
 
     def can_handle(self, content: RecordingContent) -> bool:
         """Return whether ``content`` points to the configured personal host."""
@@ -219,11 +222,12 @@ class RecordingDownloader(Downloader[RecordingContent]):
     async def download(self, content: RecordingContent) -> None:
         """Download ``content`` in a worker thread, supporting cancellation."""
         cancel_event = threading.Event()
-        try:
-            await asyncio.to_thread(self._download_sync, content, cancel_event)
-        except asyncio.CancelledError:
-            cancel_event.set()
-            raise
+        async with self.rate_limiter:
+            try:
+                await asyncio.to_thread(self._download_sync, content, cancel_event)
+            except asyncio.CancelledError:
+                cancel_event.set()
+                raise
 
 
 __all__ = [

@@ -1,9 +1,9 @@
 """Low-level SharePoint REST SDK client with cookie injection and rate limiting."""
 
-import asyncio
+import contextlib
 import re
 import urllib.parse
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import BinaryIO, Self, TypeVar
 
 import httpx
@@ -21,6 +21,7 @@ from idat_sync.application.ports import (
     CredentialsExpiredError,
     RemoteServiceError,
 )
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 
 _EntityT = TypeVar("_EntityT", File, Folder)
 _ResultT = TypeVar("_ResultT")
@@ -34,10 +35,10 @@ class SharepointClient:
         cookies: list[CookieData],
         sharepoint_personal_host: str,
         academic_site_url: str,
-        request_delay: float,
+        rate_limiter: AsyncRateLimiter,
     ) -> None:
-        """Initialize the SharePoint client with cookies, hosts, and delay."""
-        self.request_delay = request_delay
+        """Initialize the SharePoint client with cookies, hosts, and limiter."""
+        self.rate_limiter = rate_limiter
         self.properties_to_retrieve = [
             "Name",
             "ServerRelativeUrl",
@@ -56,14 +57,14 @@ class SharepointClient:
         cookies: list[CookieData],
         sharepoint_personal_host: str,
         academic_site_url: str,
-        request_delay: float,
+        rate_limiter: AsyncRateLimiter,
     ) -> Self:
         """Create and initialize a SharepointClient, resolving the search context."""
         client = cls(
             cookies=cookies,
             sharepoint_personal_host=sharepoint_personal_host,
             academic_site_url=academic_site_url,
-            request_delay=request_delay,
+            rate_limiter=rate_limiter,
         )
         try:
             personal_site = await client._await_query(
@@ -142,8 +143,11 @@ class SharepointClient:
         return {**wildcard_cookies, **exact_cookies}
 
     async def _await_query(self, coro: Awaitable[_ResultT]) -> _ResultT:
+        entered = False
         try:
-            result = await coro
+            async with self.rate_limiter:
+                entered = True
+                return await coro
         except ClientRequestException as exc:
             response = getattr(exc, "response", None)
             status_code = getattr(response, "status_code", None)
@@ -154,17 +158,21 @@ class SharepointClient:
             raise RemoteServiceError(f"SharePoint error: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RemoteServiceError(f"SharePoint request failed: {exc}") from exc
-        await asyncio.sleep(self.request_delay)
-        return result
+        except BaseException:
+            if not entered and isinstance(coro, Coroutine):
+                coro.close()
+            raise
 
     async def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
         """Load standard metadata properties onto a SharePoint File or Folder."""
         ctx.load(entity, self.properties_to_retrieve)
-        try:
-            await self._await_query(ctx.execute_query_with_incremental_retry_async())
-        except TypeError:
+
+        async def _exec() -> None:
             # odata.null guest URL responses leave entity.resource_url as None
-            await asyncio.sleep(self.request_delay)
+            with contextlib.suppress(TypeError):
+                await ctx.execute_query_with_incremental_retry_async()
+
+        await self._await_query(_exec())
 
     async def search_for_recordings(
         self, course_name: str

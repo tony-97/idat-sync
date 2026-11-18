@@ -5,10 +5,11 @@ Wire the production object graph solely in `bootstrap.py` (`create_sync_service`
 ```python
 # Production wiring in bootstrap.py
 async def create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync:
+    moodle_limiter = AsyncRateLimiter(config.request_delay)
     moodle_client = MoodleClient(
         credentials.get("token"),
         base_url=config.moodle_base_url,
-        request_delay=config.request_delay,
+        rate_limiter=moodle_limiter,
     )
     moodle_adapter = MoodleAdapter(
         moodle_client, moodle_base_url=config.moodle_base_url
@@ -36,7 +37,8 @@ repo = CourseRepository(
   - `idat_sync.config` (`SyncConfig`, `load_config`): unit-tested directly against normalization, validation, and precedence rules.
   - `bootstrap.create_sync_service`: tested by calling the real factory with `SyncConfig` while patching only external HTTP/SDK transport (`ClientContext`).
   - `bootstrap.create_auth_service`: tested by calling the real factory with `SyncConfig` and verifying wired `MoodleTokenAdapter` (wrapping `MoodleTokenClient`), `SharepointBrowserAuth`, and `JsonCredentialStore` attributes.
-  - `*Client` tests (`MoodleClient`, `MoodleTokenClient`, `SharepointClient`): patch HTTP/SDK transport (`httpx.AsyncClient`, `ClientContext`, `HttpxTransport`, `asyncio.sleep`).
+  - `*Client` tests (`MoodleClient`, `MoodleTokenClient`, `SharepointClient`): patch HTTP/SDK transport (`httpx.AsyncClient`, `ClientContext`, `HttpxTransport`, `idat_sync.infrastructure.rate_limiter.asyncio.sleep`).
+  - `AsyncRateLimiter` (`src/idat_sync/infrastructure/rate_limiter.py`): unit-tested directly against end-to-start cooldown, `delay <= 0`, exception unlocking, and cancellation during sleep.
   - `SharepointBrowserAuth` tests: patch external Playwright entrypoint (`idat_sync.infrastructure.sharepoint_auth.async_playwright`, plus `asyncio.sleep`).
   - `JsonCredentialStore` tests: tested against real temporary files (`tempfile.TemporaryDirectory()` and unreadable-file `PermissionError`).
   - `*Adapter` tests (`MoodleAdapter`, `MoodleTokenAdapter`, `SharepointApiAdapter`): inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (`Course`, `CourseSection`, `CourseModule`, `RecordingContent`) or port return values, never raw dicts or SDK objects.

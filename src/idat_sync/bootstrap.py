@@ -20,6 +20,7 @@ from idat_sync.infrastructure.downloaders import (
 from idat_sync.infrastructure.filesystem import LocalFileSystemAdapter
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
@@ -53,10 +54,13 @@ async def create_sync_service(
     storage_state = credentials.get("sharepoint_storage_state")
     cookies = storage_state.get("cookies", []) if storage_state else []
 
+    moodle_limiter = AsyncRateLimiter(config.request_delay)
+    sharepoint_limiter = AsyncRateLimiter(config.request_delay)
+
     moodle_client = MoodleClient(
         credentials.get("token"),
         base_url=config.moodle_base_url,
-        request_delay=config.request_delay,
+        rate_limiter=moodle_limiter,
     )
     moodle_adapter = MoodleAdapter(
         moodle_client,
@@ -68,7 +72,7 @@ async def create_sync_service(
             cookies,
             sharepoint_personal_host=config.sharepoint_personal_host,
             academic_site_url=config.sharepoint_academic_site_url,
-            request_delay=config.request_delay,
+            rate_limiter=sharepoint_limiter,
         )
     except BaseException:
         await moodle_client.aclose()
@@ -91,6 +95,7 @@ async def create_sync_service(
             RecordingDownloader(
                 cookies,
                 sharepoint_personal_host=config.sharepoint_personal_host,
+                rate_limiter=sharepoint_limiter,
             ),
         ],
     ]

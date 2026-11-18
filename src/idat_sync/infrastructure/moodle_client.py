@@ -1,12 +1,12 @@
 """Low-level HTTP clients for Moodle token exchange and Web Services API."""
 
-import asyncio
 from http import HTTPStatus
 from typing import Any, BinaryIO, Self
 
 import httpx
 
 from idat_sync.application.ports import CredentialsExpiredError, RemoteServiceError
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 
 REQUEST_HEADER = {
     "User-Agent": (
@@ -65,12 +65,12 @@ class MoodleClient:
         self,
         token: str,
         base_url: str,
-        request_delay: float,
+        rate_limiter: AsyncRateLimiter,
     ) -> None:
-        """Initialize the Moodle API client with token, base URL, and delay."""
+        """Initialize the Moodle API client with token, base URL, and limiter."""
         self.token = token
         self.base_url = base_url.rstrip("/")
-        self.request_delay = request_delay
+        self.rate_limiter = rate_limiter
         self._client = httpx.AsyncClient()
 
     async def aclose(self) -> None:
@@ -94,35 +94,36 @@ class MoodleClient:
             "moodlewsrestformat": "json",
             **kwargs,
         }
-        try:
-            response = await self._client.post(url, data=payload, timeout=45)
-            if response.status_code in (401, 403):
-                raise CredentialsExpiredError(
-                    f"HTTP {response.status_code}: Moodle credentials expired."
-                )
-            response.raise_for_status()
-            result = response.json()
-        except httpx.HTTPStatusError as exc:
-            raise RemoteServiceError(
-                f"HTTP {exc.response.status_code} from Moodle web service ({function})."
-            ) from exc
-        except httpx.RequestError as exc:
-            raise RemoteServiceError(
-                f"Moodle web service request failed ({function}): {exc}"
-            ) from exc
-        except ValueError as exc:
-            raise RemoteServiceError(
-                f"Invalid JSON response from Moodle web service ({function})."
-            ) from exc
+        async with self.rate_limiter:
+            try:
+                response = await self._client.post(url, data=payload, timeout=45)
+                if response.status_code in (401, 403):
+                    raise CredentialsExpiredError(
+                        f"HTTP {response.status_code}: Moodle credentials expired."
+                    )
+                response.raise_for_status()
+                result = response.json()
+            except httpx.HTTPStatusError as exc:
+                raise RemoteServiceError(
+                    f"HTTP {exc.response.status_code} "
+                    f"from Moodle web service ({function})."
+                ) from exc
+            except httpx.RequestError as exc:
+                raise RemoteServiceError(
+                    f"Moodle web service request failed ({function}): {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise RemoteServiceError(
+                    f"Invalid JSON response from Moodle web service ({function})."
+                ) from exc
 
-        if isinstance(result, dict) and result.get("exception"):
-            error_code = result.get("errorcode")
-            msg = f"{error_code}: {result.get('message')}"
-            if error_code == "invalidtoken":
-                raise CredentialsExpiredError(msg)
-            raise RemoteServiceError(msg)
-        await asyncio.sleep(self.request_delay)
-        return result
+            if isinstance(result, dict) and result.get("exception"):
+                error_code = result.get("errorcode")
+                msg = f"{error_code}: {result.get('message')}"
+                if error_code == "invalidtoken":
+                    raise CredentialsExpiredError(msg)
+                raise RemoteServiceError(msg)
+            return result
 
     async def fetch_enrolled_courses(
         self, classification: str = "all", limit: int = 100, offset: int = 0
@@ -171,47 +172,47 @@ class MoodleClient:
         return []
 
     async def download_file(self, url: str, dest: BinaryIO) -> None:
-        """Stream an authenticated Moodle file into dest and await request_delay."""
+        """Stream an authenticated Moodle file into dest under the rate limiter."""
         target_url = httpx.URL(url).copy_merge_params(
             {"wstoken": self.token, "token": self.token}
         )
         safe_url = target_url.copy_remove_param("wstoken").copy_remove_param("token")
-        try:
-            async with self._client.stream(
-                "GET",
-                target_url,
-                follow_redirects=True,
-                timeout=60,
-                headers=REQUEST_HEADER,
-            ) as response:
-                if response.status_code == HTTPStatus.UNAUTHORIZED:
-                    raise CredentialsExpiredError(
-                        "401 Unauthorized: your session cookie/token "
-                        "is missing/expired."
-                    )
-                if response.status_code == HTTPStatus.FORBIDDEN:
-                    raise CredentialsExpiredError(
-                        "403 Forbidden: your session cookie is missing/expired."
-                    )
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    raw_url = (
-                        exc.request.url
-                        if isinstance(exc.request.url, httpx.URL)
-                        else target_url
-                    )
-                    err_url = raw_url.copy_remove_param("wstoken").copy_remove_param(
-                        "token"
-                    )
-                    raise RemoteServiceError(
-                        f"HTTP {response.status_code} for url '{err_url}'"
-                    ) from None
-                async for part in response.aiter_bytes(chunk_size=1024 * 256):
-                    if part:
-                        dest.write(part)
-        except httpx.RequestError:
-            raise RemoteServiceError(
-                f"Network error downloading '{safe_url}'"
-            ) from None
-        await asyncio.sleep(self.request_delay)
+        async with self.rate_limiter:
+            try:
+                async with self._client.stream(
+                    "GET",
+                    target_url,
+                    follow_redirects=True,
+                    timeout=60,
+                    headers=REQUEST_HEADER,
+                ) as response:
+                    if response.status_code == HTTPStatus.UNAUTHORIZED:
+                        raise CredentialsExpiredError(
+                            "401 Unauthorized: your session cookie/token "
+                            "is missing/expired."
+                        )
+                    if response.status_code == HTTPStatus.FORBIDDEN:
+                        raise CredentialsExpiredError(
+                            "403 Forbidden: your session cookie is missing/expired."
+                        )
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        raw_url = (
+                            exc.request.url
+                            if isinstance(exc.request.url, httpx.URL)
+                            else target_url
+                        )
+                        err_url = raw_url.copy_remove_param(
+                            "wstoken"
+                        ).copy_remove_param("token")
+                        raise RemoteServiceError(
+                            f"HTTP {response.status_code} for url '{err_url}'"
+                        ) from None
+                    async for part in response.aiter_bytes(chunk_size=1024 * 256):
+                        if part:
+                            dest.write(part)
+            except httpx.RequestError:
+                raise RemoteServiceError(
+                    f"Network error downloading '{safe_url}'"
+                ) from None

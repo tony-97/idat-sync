@@ -9,6 +9,7 @@ from idat_sync.config import load_config
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.moodle_adapter import MoodleTokenAdapter
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
+from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 
 
 async def _get_token(config) -> str | None:
@@ -40,7 +41,7 @@ async def main() -> int:
     async with MoodleClient(
         token,
         base_url=config.moodle_base_url,
-        request_delay=config.request_delay,
+        rate_limiter=AsyncRateLimiter(config.request_delay),
     ) as client:
         print("Fetching enrolled courses...")
         courses = await client.fetch_enrolled_courses()
