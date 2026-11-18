@@ -212,11 +212,15 @@ class IDATSync:
         self,
         root_folder: str | Path,
         courses: Sequence[Course],
+        *,
+        refresh: bool = False,
     ) -> AsyncIterator[SyncEvent]:
         """Synchronize all ``courses`` under ``root_folder``, yielding SyncEvents."""
         self.course_repository.invalidate_cache()
         root_path = Path(root_folder)
         for course in courses:
+            if refresh:
+                course.sections.clear()
             course_dir = root_path / safe_filename(course.name)
             try:
                 async for event in self.sync_course(course, course_dir):

@@ -1632,6 +1632,44 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert len(suffixed) <= 100
         assert " (2)" in suffixed
 
+    async def test_idat_sync_sync_courses_refresh_clears_sections(self):
+        """Clear pre-populated Course.sections only when refresh=True."""
+        course_cached = Course(
+            id=1, name="Cached", sections=[CourseSection(id=10, name="Old")]
+        )
+        course_refreshed = Course(
+            id=2, name="Refreshed", sections=[CourseSection(id=20, name="Old")]
+        )
+        mock_repo = MagicMock(spec=CourseRepository)
+        mock_repo.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_repo.get_course_content = AsyncMock(return_value=[])
+        mock_repo.get_recordings = AsyncMock(return_value=[])
+        fs = MagicMock(spec=FileSystemPort)
+        fs.scan_mtimes.return_value = {}
+        sync = IDATSync(
+            mock_repo,
+            DownloadManager([], fs),
+            TaskOrchestrator([]),
+            fs,
+            "Grabaciones",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _ = [e async for e in sync.sync_courses(tmpdir, [course_cached])]
+            mock_repo.populate_course_sections.assert_not_awaited()
+            assert len(course_cached.sections) == 1
+
+            _ = [
+                e
+                async for e in sync.sync_courses(
+                    tmpdir, [course_refreshed], refresh=True
+                )
+            ]
+            mock_repo.populate_course_sections.assert_awaited_once_with(
+                course_refreshed
+            )
+            assert not course_refreshed.sections
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import idat_sync.main as main_module
 import idat_sync.ui as ui_pkg
 import idat_sync.ui.app as app_module
 import idat_sync.ui.sync_frame as sync_frame_mod
@@ -40,6 +41,8 @@ from idat_sync.domain.course import Course, CourseSection
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.ui.app import AppFrame, MainApp
+from idat_sync.ui.course_tree import CourseTree, RowStatus
+from idat_sync.ui.icons import Icons
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
 
@@ -1174,9 +1177,12 @@ class TestSyncFrame(unittest.TestCase):
                             raise RuntimeError("network offline")
                         return mock_sync
 
-                    async def fake_sync_courses(root_folder, courses):
+                    async def fake_sync_courses(root_folder, courses, *, refresh=False):
                         assert root_folder == tmpdir
                         assert courses == [current_course]
+                        if refresh:
+                            for c in courses:
+                                c.sections.clear()
                         c_dir = Path(tmpdir) / current_course.name
                         synced_p = c_dir / "S1" / "already.pdf"
                         ok_p = c_dir / "S1" / "new.pdf"
@@ -1217,35 +1223,33 @@ class TestSyncFrame(unittest.TestCase):
                         assert mock_factory.call_count == 2
                         assert not frame.is_syncing.get()
 
-                        top_items = frame.tree.get_children("")
+                        tree = frame.course_tree.tree
+                        icons = frame.course_tree.icons
+                        top_items = tree.get_children("")
                         assert len(top_items) == 2
-                        assert (
-                            frame.tree.item(top_items[0], "text") == current_course.name
-                        )
-                        assert frame.tree.item(top_items[0], "image") == (
-                            str(frame._checked_icon),  # noqa: SLF001  # pylint: disable=protected-access
-                        )
-                        assert frame.tree.item(top_items[1], "text") == past_course.name
-                        assert frame.tree.item(top_items[1], "image") == (
-                            str(frame._unchecked_icon),  # noqa: SLF001  # pylint: disable=protected-access
+                        assert tree.item(top_items[0], "text") == current_course.name
+                        assert tree.item(top_items[0], "image") == (str(icons.checked),)
+                        assert tree.item(top_items[1], "text") == past_course.name
+                        assert tree.item(top_items[1], "image") == (
+                            str(icons.unchecked),
                         )
 
-                        assert frame.tree.item(top_items[0], "values") == (
+                        assert tree.item(top_items[0], "values") == (
                             "Failed",
                             "66%",
                         )
-                        folder_items = frame.tree.get_children(top_items[0])
+                        folder_items = tree.get_children(top_items[0])
                         assert len(folder_items) == 1
-                        assert frame.tree.item(folder_items[0], "text") == "S1"
-                        assert frame.tree.item(folder_items[0], "image") == (
-                            str(frame._folder_icon),  # noqa: SLF001  # pylint: disable=protected-access
+                        assert tree.item(folder_items[0], "text") == "S1"
+                        assert tree.item(folder_items[0], "image") == (
+                            str(icons.folder),
                         )
-                        file_items = frame.tree.get_children(folder_items[0])
-                        file_icon = (str(frame._file_icon),)  # noqa: SLF001  # pylint: disable=protected-access
+                        file_items = tree.get_children(folder_items[0])
+                        file_icon = (str(icons.file),)
                         child_rows = {
-                            frame.tree.item(cid, "text"): (
-                                frame.tree.item(cid, "values"),
-                                frame.tree.item(cid, "image"),
+                            tree.item(cid, "text"): (
+                                tree.item(cid, "values"),
+                                tree.item(cid, "image"),
                             )
                             for cid in file_items
                         }
@@ -1260,22 +1264,23 @@ class TestSyncFrame(unittest.TestCase):
                         frame.select_all()
                         assert str(frame.sync_button["state"]) == "normal"
                         assert all(
-                            frame.tree.item(iid, "image") == (str(frame._checked_icon),)  # noqa: SLF001  # pylint: disable=protected-access
-                            for iid in frame.tree.get_children("")
+                            tree.item(iid, "image") == (str(icons.checked),)
+                            for iid in tree.get_children("")
                         )
                         frame.select_in_progress()
-                        assert frame.tree.item(top_items[0], "image") == (
-                            str(frame._checked_icon),  # noqa: SLF001  # pylint: disable=protected-access
+                        assert tree.item(top_items[0], "image") == (str(icons.checked),)
+                        assert tree.item(top_items[1], "image") == (
+                            str(icons.unchecked),
                         )
-                        assert frame.tree.item(top_items[1], "image") == (
-                            str(frame._unchecked_icon),  # noqa: SLF001  # pylint: disable=protected-access
-                        )
-                        frame.toggle_course_row(top_items[0])
+                        frame.toggle_course(current_course.id)
                         assert str(frame.sync_button["state"]) == "disabled"
-                        frame.toggle_course_row(top_items[0])
+                        frame.toggle_course(current_course.id)
                         assert str(frame.sync_button["state"]) == "normal"
 
-                        async def fail_sync_courses(_root_folder, _courses):
+                        async def fail_sync_courses(
+                            _root_folder, _courses, *, refresh=False
+                        ):
+                            _ = refresh
                             raise CredentialsExpiredError("401 expired")
                             yield  # pragma: no cover
 
@@ -1357,7 +1362,7 @@ class TestSyncFrame(unittest.TestCase):
             asyncio.run(exercise())
 
     def test_ui_app_main_configures_logging_without_stdio_hijack(self):
-        """Verify ui.app.main configures logging without replacing stdio."""
+        """Verify main.main configures logging without replacing stdio."""
         orig_stdout = sys.stdout
         orig_stderr = sys.stderr
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1365,15 +1370,13 @@ class TestSyncFrame(unittest.TestCase):
             cfg = SyncConfig(log_file=Path(tmpdir) / "app.log")
             with (
                 patch(
-                    "idat_sync.ui.app.user_data_path", return_value=fake_root
+                    "idat_sync.main.user_data_path", return_value=fake_root
                 ) as mock_user_data_path,
-                patch(
-                    "idat_sync.ui.app.load_config", return_value=cfg
-                ) as mock_load_cfg,
-                patch("idat_sync.ui.app.configure_logging") as mock_cfg_log,
-                patch("idat_sync.ui.app.MainApp") as mock_app,
+                patch("idat_sync.main.load_config", return_value=cfg) as mock_load_cfg,
+                patch("idat_sync.main.configure_logging") as mock_cfg_log,
+                patch("idat_sync.main.MainApp") as mock_app,
             ):
-                app_module.main()
+                main_module.main()
 
             mock_user_data_path.assert_called_once_with("idat-sync", appauthor=False)
             mock_load_cfg.assert_called_once_with(fake_root)
@@ -1401,7 +1404,7 @@ class TestSyncFrame(unittest.TestCase):
                     active_frame.aclose = AsyncMock(
                         side_effect=RuntimeError("close error")
                     )
-                    app._MainApp__frame = active_frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    app._frame = active_frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
                     with patch.object(
                         app, "destroy", wraps=app.destroy
@@ -1428,7 +1431,7 @@ class TestSyncFrame(unittest.TestCase):
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
-                    frame = app._MainApp__frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     assert isinstance(frame, LoginFrame)
 
                     frame.user_var.set("jdoe")
@@ -1497,7 +1500,7 @@ class TestSyncFrame(unittest.TestCase):
                 app = MainApp(config=cfg)
                 app.withdraw()
                 try:
-                    frame = app._MainApp__frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     assert isinstance(frame, LoginFrame)
                     frame.user_var.set("jdoe")
                     frame.pass_var.set("secret")
@@ -1542,7 +1545,7 @@ class TestSyncFrame(unittest.TestCase):
                 app.withdraw()
                 try:
                     frame = SyncFrame(app, creds, cfg)
-                    app._MainApp__frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    app._frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     load_started = asyncio.Event()
                     load_cancelled = asyncio.Event()
 
@@ -1576,16 +1579,16 @@ class TestSyncFrame(unittest.TestCase):
                 app.withdraw()
                 try:
                     frame = SyncFrame(app, creds, cfg)
-                    app._MainApp__frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
-                    c1 = Course(id=1, name="Course 1")
-                    frame._populate_courses([c1])  # noqa: SLF001  # pylint: disable=protected-access
+                    app._frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame._populate_courses([Course(id=1, name="Course 1")])  # noqa: SLF001  # pylint: disable=protected-access
                     frame.selected_course_ids = {1}
                     frame.folder_path.set(tmpdir)
 
                     sync_started = asyncio.Event()
                     sync_cancelled = asyncio.Event()
 
-                    async def slow_sync_courses(_path, _selected):
+                    async def slow_sync_courses(_path, _selected, *, refresh=False):
+                        _ = refresh
                         sync_started.set()
                         try:
                             await asyncio.Future()
@@ -1633,7 +1636,8 @@ class TestSyncFrame(unittest.TestCase):
                     frame.selected_course_ids = {1}
                     frame.folder_path.set(tmpdir)
 
-                    async def err_sync_courses(_path, _selected):
+                    async def err_sync_courses(_path, _selected, *, refresh=False):
+                        _ = refresh
                         yield CourseSyncCompleted(c1, RuntimeError("boom"))
 
                     mock_service = MagicMock()
@@ -1643,7 +1647,8 @@ class TestSyncFrame(unittest.TestCase):
                     await frame.do_sync()
                     assert frame.status_var.get() == "Sync completed with errors."
 
-                    async def ok_sync_courses(_path, _selected):
+                    async def ok_sync_courses(_path, _selected, *, refresh=False):
+                        _ = refresh
                         yield CourseSyncCompleted(c1, None)
 
                     mock_service.sync_courses = ok_sync_courses
@@ -1655,6 +1660,110 @@ class TestSyncFrame(unittest.TestCase):
                     app.loop.close()
 
         asyncio.run(exercise())
+
+
+class TestIcons(unittest.TestCase):
+    """Tests for UI pixel-art Icons bundle."""
+
+    def test_icons_create_builds_distinct_16x16_photo_images(self):
+        """Build four 16x16 PhotoImage icons with distinct checked/unchecked pixels."""
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            icons = Icons.create()
+            for img in (icons.checked, icons.unchecked, icons.folder, icons.file):
+                assert isinstance(img, tk.PhotoImage)
+                assert img.width() == 16
+                assert img.height() == 16
+            assert icons.checked.get(11, 5) == (255, 255, 255)
+            assert icons.unchecked.get(11, 5) == (255, 255, 255)
+            assert icons.checked.get(3, 3) == (0, 120, 212)
+            assert icons.unchecked.get(3, 3) == (255, 255, 255)
+        finally:
+            root.destroy()
+
+
+class TestAppFrameBusy(unittest.TestCase):
+    """Tests for AppFrame._busy async context manager."""
+
+    def test_busy_sets_active_task_and_resets_flag_on_exit_and_destroy(self):
+        """Track _active_task and reset flag only while widget still exists."""
+
+        async def exercise() -> None:
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                frame = AppFrame(root)
+                flag = tk.BooleanVar(value=False)
+
+                async with frame._busy(flag):  # noqa: SLF001  # pylint: disable=protected-access
+                    assert flag.get() is True
+                    assert frame._active_task is asyncio.current_task()  # noqa: SLF001  # pylint: disable=protected-access
+
+                assert flag.get() is False
+                assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
+
+                async def fail_after_destroy() -> None:
+                    async with frame._busy(flag):  # noqa: SLF001  # pylint: disable=protected-access
+                        assert flag.get() is True
+                        frame.destroy()
+                        raise RuntimeError("boom")
+
+                with pytest.raises(RuntimeError, match="boom"):
+                    await fail_after_destroy()
+
+                assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
+            finally:
+                with contextlib.suppress(tk.TclError):
+                    root.destroy()
+
+        asyncio.run(exercise())
+
+
+class TestCourseTree(unittest.TestCase):
+    """Tests for CourseTree selection, file discovery, and progress updates."""
+
+    def test_course_tree_lifecycle_and_progress(self):
+        """Manage course rows, nested folders, progress, and interactivity."""
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            toggled: list[int] = []
+            ct = CourseTree(root, on_toggle=toggled.append)
+            c1 = Course(id=1, name="Course One")
+            c2 = Course(id=2, name="Course Two")
+            ct.set_courses([c1, c2], selected={1})
+
+            top = ct.tree.get_children("")
+            assert len(top) == 2
+            assert ct.tree.item(top[0], "image") == (str(ct.icons.checked),)
+            assert ct.tree.item(top[1], "image") == (str(ct.icons.unchecked),)
+            assert ct.tree.item(top[0], "values") == (RowStatus.IDLE, "0%")
+
+            ct.refresh_selection({2})
+            assert ct.tree.item(top[0], "image") == (str(ct.icons.unchecked),)
+            assert ct.tree.item(top[1], "image") == (str(ct.icons.checked),)
+
+            ct.reset_for_sync([1])
+            assert ct.tree.item(top[0], "values") == (RowStatus.QUEUED, "0%")
+
+            c_dir = Path("Course One")
+            synced_p = c_dir / "S1" / "done.pdf"
+            pending_p = c_dir / "S1" / "todo.pdf"
+            ct.show_files(1, c_dir, (synced_p,), (pending_p,))
+            assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "50%")
+
+            ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
+            ct.set_file_status(pending_p, RowStatus.COMPLETED)
+            assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "100%")
+
+            ct.set_course_status(1, RowStatus.COMPLETED)
+            assert ct.tree.item(top[0], "values") == (RowStatus.COMPLETED, "100%")
+
+            ct.set_interactive(enabled=False)
+            assert not toggled
+        finally:
+            root.destroy()
 
 
 if __name__ == "__main__":

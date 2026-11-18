@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import tkinter as tk
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from async_tkinter_loop import async_handler, async_mainloop
-from platformdirs import user_data_path
 
-from idat_sync.bootstrap import configure_logging, create_auth_service
-from idat_sync.config import SyncConfig, load_config
+from idat_sync.bootstrap import create_auth_service
 from idat_sync.ui.base import AppFrame
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
+
+if TYPE_CHECKING:
+    from idat_sync.config import SyncConfig
 
 
 class MainApp(tk.Tk):
@@ -25,7 +26,7 @@ class MainApp(tk.Tk):
         self.loop = asyncio.new_event_loop()
         self.config = config
         self.auth = create_auth_service(self.config)
-        self.__frame: AppFrame | None = None
+        self._frame: AppFrame | None = None
         self._closing = False
         self.protocol("WM_DELETE_WINDOW", async_handler(self.on_close))
         if self.auth.is_authenticated():
@@ -39,8 +40,8 @@ class MainApp(tk.Tk):
             return
         self._closing = True
         try:
-            if self.__frame is not None:
-                await self.__frame.aclose()
+            if self._frame is not None:
+                await self._frame.aclose()
         finally:
             self.destroy()
 
@@ -56,28 +57,20 @@ class MainApp(tk.Tk):
         center_y = int(screen_height / 2 - window_height / 2)
         self.geometry(f"{window_width}x{window_height}+{center_x}+{center_y}")
 
-    def __change(self, frame: type[AppFrame], **kwargs: Any) -> None:  # noqa: ANN401
-        if self.__frame:
-            self.__frame.destroy()
-        self.__frame = frame(self, **kwargs)
-        self.__frame.pack()
+    def _show(self, frame: type[AppFrame], **kwargs: Any) -> None:  # noqa: ANN401
+        if self._frame:
+            self._frame.destroy()
+        self._frame = frame(self, **kwargs)
+        self._frame.pack()
 
     def switch_to_sync(self) -> None:
         """Switch the active view to SyncFrame when Credentials exist."""
         if credentials := self.auth.get_credentials():
-            self.__change(SyncFrame, credentials=credentials, config=self.config)
+            self._show(SyncFrame, credentials=credentials, config=self.config)
 
     def switch_to_login(self) -> None:
         """Switch the active view to LoginFrame."""
-        self.__change(LoginFrame, auth=self.auth)
+        self._show(LoginFrame, auth=self.auth)
 
 
-def main() -> None:
-    """Load configuration, initialize logging, and run the desktop app."""
-    config = load_config(user_data_path("idat-sync", appauthor=False))
-    configure_logging(config.log_file)
-    app = MainApp(config=config)
-    app.run()
-
-
-__all__ = ["AppFrame", "MainApp", "main"]
+__all__ = ["AppFrame", "MainApp"]
