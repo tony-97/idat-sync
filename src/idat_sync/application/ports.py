@@ -6,6 +6,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
+from idat_sync.application.exceptions import (
+    AuthenticationError,
+    CredentialsExpiredError,
+    CredentialStoreError,
+    FileSystemError,
+    IDATSyncError,
+    RemoteServiceError,
+)
 from idat_sync.domain.content import Content
 
 if TYPE_CHECKING:
@@ -152,14 +160,6 @@ class SharepointAuthPort(Protocol):  # pylint: disable=too-few-public-methods
         ...
 
 
-class AuthenticationError(RuntimeError):
-    """Raised when Moodle or SharePoint login credentials or MFA are rejected."""
-
-
-class CredentialsExpiredError(RuntimeError):
-    """Raised when stored Moodle or SharePoint Credentials are rejected or expired."""
-
-
 class CredentialStorePort(Protocol):
     """Port for persisting and clearing user Credentials."""
 
@@ -167,12 +167,12 @@ class CredentialStorePort(Protocol):
         """Load stored credentials, or return None if unavailable."""
         ...
 
-    def save(self, credentials: Credentials) -> bool:
-        """Persist ``credentials`` and return whether saving succeeded."""
+    def save(self, credentials: Credentials) -> None:
+        """Persist ``credentials`` or raise CredentialStoreError on failure."""
         ...
 
     def clear(self) -> None:
-        """Remove stored credentials."""
+        """Remove stored credentials or raise CredentialStoreError on failure."""
         ...
 
 
@@ -180,14 +180,18 @@ __all__ = [
     "AuthenticationError",
     "CookieData",
     "CourseGateway",
+    "CredentialStoreError",
     "CredentialStorePort",
     "Credentials",
     "CredentialsExpiredError",
     "DownloadTask",
     "Downloader",
+    "FileSystemError",
     "FileSystemPort",
+    "IDATSyncError",
     "MoodleTokenPort",
     "RecordingGateway",
+    "RemoteServiceError",
     "SharepointAuthPort",
     "StorageStateData",
     "UrlContentStrategy",

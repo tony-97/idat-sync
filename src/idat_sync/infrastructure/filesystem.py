@@ -4,7 +4,7 @@ import os
 import platform
 from pathlib import Path
 
-from idat_sync.application.ports import FileSystemPort
+from idat_sync.application.ports import FileSystemError, FileSystemPort
 
 
 def windows_long_path(path: Path | str) -> Path:
@@ -32,17 +32,27 @@ class LocalFileSystemAdapter(FileSystemPort):
         caller_root = Path(root_dir)
         os_root = windows_long_path(caller_root)
         local_map: dict[Path, int] = {}
-        if os_root.exists():
-            for path in os_root.rglob("*"):
-                if path.is_file() and not path.name.endswith(".part"):
-                    local_map[caller_root / path.relative_to(os_root)] = int(
-                        path.stat().st_mtime
-                    )
+        try:
+            if os_root.exists():
+                for path in os_root.rglob("*"):
+                    if path.is_file() and not path.name.endswith(".part"):
+                        local_map[caller_root / path.relative_to(os_root)] = int(
+                            path.stat().st_mtime
+                        )
+        except OSError as exc:
+            raise FileSystemError(
+                f"Could not scan directory '{root_dir}': {exc}"
+            ) from exc
         return local_map
 
     def ensure_dir(self, path: Path | str) -> None:
         """Ensure directory ``path`` exists."""
-        windows_long_path(path).mkdir(parents=True, exist_ok=True)
+        try:
+            windows_long_path(path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise FileSystemError(
+                f"Could not create directory '{path}': {exc}"
+            ) from exc
 
     def read_bytes(self, path: Path | str) -> bytes | None:
         """Read bytes from ``path``, or return None on OSError."""

@@ -20,6 +20,8 @@ from idat_sync.application.ports import (
     CookieData,
     CredentialsExpiredError,
     Downloader,
+    FileSystemError,
+    RemoteServiceError,
 )
 from idat_sync.domain.content import (
     MoodleContent,
@@ -43,12 +45,15 @@ async def _atomic_download(
     target_path: Path, writer: Callable[[BinaryIO], Awaitable[None]]
 ) -> None:
     os_target = windows_long_path(target_path)
-    os_target.parent.mkdir(parents=True, exist_ok=True)
     part_path = os_target.with_name(f"{os_target.name}.part")
     try:
+        os_target.parent.mkdir(parents=True, exist_ok=True)
         with part_path.open("wb") as f:
             await writer(f)
         part_path.replace(os_target)
+    except OSError as exc:
+        part_path.unlink(missing_ok=True)
+        raise FileSystemError(f"Failed to write '{target_path}': {exc}") from exc
     except BaseException:
         part_path.unlink(missing_ok=True)
         raise
@@ -166,7 +171,12 @@ class RecordingDownloader(Downloader[RecordingContent]):
     ) -> None:
         _logger.info("Downloading share url: %s", content.url)
         os_target = windows_long_path(content.path)
-        os_target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os_target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise FileSystemError(
+                f"Could not create directory for '{content.path}': {exc}"
+            ) from exc
         output_path_template = (
             str(os_target)
             if platform.system() == "Windows"
@@ -200,7 +210,11 @@ class RecordingDownloader(Downloader[RecordingContent]):
                 str(exc),
             ):
                 raise CredentialsExpiredError(str(exc)) from exc
-            raise
+            raise RemoteServiceError(str(exc)) from exc
+        except OSError as exc:
+            raise FileSystemError(
+                f"Failed to write recording '{content.path}': {exc}"
+            ) from exc
 
     async def download(self, content: RecordingContent) -> None:
         """Download ``content`` in a worker thread, supporting cancellation."""

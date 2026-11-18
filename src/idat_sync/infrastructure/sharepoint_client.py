@@ -6,6 +6,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from typing import BinaryIO, Self, TypeVar
 
+import httpx
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_result import ClientResult
 from office365.runtime.transport.httpx_transport import HttpxTransport
@@ -15,7 +16,11 @@ from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
 from office365.sharepoint.search.result import SearchResult
 
-from idat_sync.application.ports import CookieData, CredentialsExpiredError
+from idat_sync.application.ports import (
+    CookieData,
+    CredentialsExpiredError,
+    RemoteServiceError,
+)
 
 _EntityT = TypeVar("_EntityT", File, Folder)
 _ResultT = TypeVar("_ResultT")
@@ -146,7 +151,9 @@ class SharepointClient:
                 raise CredentialsExpiredError(
                     f"HTTP {status_code}: SharePoint credentials expired."
                 ) from exc
-            raise
+            raise RemoteServiceError(f"SharePoint error: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise RemoteServiceError(f"SharePoint request failed: {exc}") from exc
         await asyncio.sleep(self.request_delay)
         return result
 

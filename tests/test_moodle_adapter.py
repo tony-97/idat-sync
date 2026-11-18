@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 
-from idat_sync.application.ports import AuthenticationError, CourseGateway
+from idat_sync.application.ports import (
+    AuthenticationError,
+    CourseGateway,
+    RemoteServiceError,
+)
 from idat_sync.domain.content import MoodleContent, StringContent
 from idat_sync.domain.course import Course, CourseSection, ModuleContent
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAdapter
@@ -705,16 +708,14 @@ class TestMoodleTokenAdapter(unittest.TestCase):
                 assert any("[!]" in msg for msg in cm.output)
 
     def test_fetch_token_propagates_client_http_error(self):
-        """Propagate HTTPStatusError from MoodleTokenClient."""
+        """Propagate RemoteServiceError from MoodleTokenClient."""
         mock_client = MagicMock(spec=MoodleTokenClient)
         mock_client.request_token = AsyncMock(
-            side_effect=httpx.HTTPStatusError(
-                "500 Server Error", request=MagicMock(), response=MagicMock()
-            )
+            side_effect=RemoteServiceError("HTTP 500 from Moodle login endpoint.")
         )
         adapter = MoodleTokenAdapter(mock_client)
 
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(RemoteServiceError, match="HTTP 500"):
             asyncio.run(adapter.fetch_token("jdoe", "pw"))
 
 

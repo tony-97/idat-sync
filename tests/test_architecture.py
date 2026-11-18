@@ -61,6 +61,31 @@ class TestArchitectureBoundaries(unittest.TestCase):
             f"task_orchestrator.py must not import events or threading: {violations}"
         )
 
+    def test_exceptions_and_ports_have_zero_vendor_or_outer_layer_imports(self):
+        """Ensure application.exceptions and ports avoid outer layers and SDKs."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        forbidden = (
+            "idat_sync.config",
+            "idat_sync.infrastructure",
+            "idat_sync.ui",
+            "requests",
+            "httpx",
+            "office365",
+            "yt_dlp",
+            "playwright",
+            "tkinter",
+        )
+        exceptions_path = src_root / "application" / "exceptions.py"
+        ports_path = src_root / "application" / "ports.py"
+        assert exceptions_path.is_file(), "application/exceptions.py must exist"
+        violations = [
+            f"{py_file.name}:{lineno} imports {name}"
+            for py_file in (exceptions_path, ports_path)
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, forbidden)
+        ]
+        assert violations == [], f"Forbidden imports in exceptions/ports: {violations}"
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,10 @@ from idat_sync.application.events import (
 from idat_sync.application.ports import (
     CredentialsExpiredError,
     DownloadTask,
+    FileSystemError,
     FileSystemPort,
+    IDATSyncError,
+    RemoteServiceError,
 )
 from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.domain.content import Content
@@ -129,44 +132,57 @@ class IDATSync:
         remote_tree = await self.get_course_remote_tree(course, course_dir)
         return self.download_manager.diff_trees(course_dir, remote_tree)
 
+    async def _run_single_task(
+        self,
+        task: DownloadTask,
+        event_queue: asyncio.Queue[SyncEvent | None],
+        errors: list[IDATSyncError],
+    ) -> None:
+        await event_queue.put(TaskDownloadStarted(task.path))
+        try:
+            await task.download()
+        except CredentialsExpiredError as exc:
+            await event_queue.put(TaskDownloadFailed(task.path, exc))
+            raise
+        except (RemoteServiceError, FileSystemError) as exc:
+            errors.append(exc)
+            await event_queue.put(TaskDownloadFailed(task.path, exc))
+        else:
+            await event_queue.put(TaskDownloadCompleted(task.path))
+
+    async def _run_task_group(
+        self,
+        tasks: Sequence[DownloadTask],
+        event_queue: asyncio.Queue[SyncEvent | None],
+        errors: list[IDATSyncError],
+    ) -> None:
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for coro in self.task_orchestrator.create_coroutines(
+                    tasks,
+                    lambda task: self._run_single_task(task, event_queue, errors),
+                ):
+                    tg.create_task(coro)
+        finally:
+            await event_queue.put(None)
+
     async def _execute_tasks(
         self,
         tasks: Sequence[DownloadTask],
-        errors: list[Exception],
+        errors: list[IDATSyncError],
     ) -> AsyncIterator[SyncEvent]:
         event_queue: asyncio.Queue[SyncEvent | None] = asyncio.Queue()
-
-        async def _run_task(task: DownloadTask) -> None:
-            await event_queue.put(TaskDownloadStarted(task.path))
-            try:
-                await task.download()
-            except CredentialsExpiredError as exc:
-                await event_queue.put(TaskDownloadFailed(task.path, exc))
-                raise
-            except Exception as exc:
-                errors.append(exc)
-                await event_queue.put(TaskDownloadFailed(task.path, exc))
-            else:
-                await event_queue.put(TaskDownloadCompleted(task.path))
-
-        async def _run_all() -> None:
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    for coro in self.task_orchestrator.create_coroutines(
-                        tasks, _run_task
-                    ):
-                        tg.create_task(coro)
-            finally:
-                await event_queue.put(None)
-
-        runner = asyncio.create_task(_run_all())
+        runner = asyncio.create_task(self._run_task_group(tasks, event_queue, errors))
         try:
+            cred_group: ExceptionGroup[CredentialsExpiredError] | None = None
             try:
                 while (event := await event_queue.get()) is not None:
                     yield _emit(event)
                 await runner
             except* CredentialsExpiredError as eg:
-                raise eg.exceptions[0] from eg
+                cred_group = eg
+            if cred_group is not None:
+                raise cred_group.exceptions[0] from cred_group
         finally:
             if not runner.done():
                 runner.cancel()
@@ -182,7 +198,7 @@ class IDATSync:
         course_path = Path(course_dir)
         recordings_folder = course_path / self.recordings_folder_name
         yield _emit(CourseSyncStarted(course))
-        errors: list[Exception] = []
+        errors: list[IDATSyncError] = []
 
         try:
             if not course.sections:
@@ -202,7 +218,7 @@ class IDATSync:
             )
             async for event in self._execute_tasks(tasks, errors):
                 yield event
-        except Exception as exc:
+        except IDATSyncError as exc:
             yield _emit(CourseSyncCompleted(course, exc))
             raise
 
@@ -227,7 +243,7 @@ class IDATSync:
                     yield event
             except CredentialsExpiredError:
                 raise
-            except Exception:  # noqa: S110  # Logged via CourseSyncCompleted
+            except IDATSyncError:  # Logged via CourseSyncCompleted
                 pass
 
 

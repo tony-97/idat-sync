@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from idat_sync.application.exceptions import IDATSyncError
     from idat_sync.domain.course import Course
 
 _logger = logging.getLogger("idat_sync")
@@ -50,7 +51,7 @@ class TaskDownloadFailed:
     """Emitted when downloading a single content item raises an error."""
 
     path: Path
-    error: Exception
+    error: IDATSyncError
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ class CourseSyncCompleted:
     """Emitted when synchronization finishes for a course."""
 
     course: Course
-    error: Exception | None = None
+    error: IDATSyncError | None = None
 
 
 SyncEvent = (

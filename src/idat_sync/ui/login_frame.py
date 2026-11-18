@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from async_tkinter_loop import async_handler
 
+from idat_sync.application.ports import CredentialStoreError, IDATSyncError
 from idat_sync.ui.base import AppFrame
 from idat_sync.ui.mfa_dialog import ask_mfa_code
 
@@ -36,7 +37,11 @@ class LoginFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-insta
         super().__init__(master, **kwargs)
         self.app = master
         self.auth = auth
-        self.auth.logout()
+        self.error_var = tk.StringVar(value="")
+        try:
+            self.auth.logout()
+        except CredentialStoreError as exc:
+            self.error_var.set(str(exc))
         self.app.center_window(_WINDOW_WIDTH, _WINDOW_HEIGHT)
         self.app.title("IDAT Sync Login")
 
@@ -54,7 +59,6 @@ class LoginFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-insta
         self.pass_entry.pack()
         self.pass_entry.bind("<Return>", async_handler(self.do_login))
 
-        self.error_var = tk.StringVar(value="")
         tk.Label(
             self, textvariable=self.error_var, fg="red", wraplength=_ERROR_WRAP_LENGTH
         ).pack(pady=(5, 0))
@@ -96,16 +100,9 @@ class LoginFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-insta
         self.error_var.set("")
         async with self._busy(self.is_login):
             try:
-                if await self.auth.login(user, password, self.get_mfa_code):
-                    self.app.switch_to_sync()
-                else:
-                    self.error_var.set(
-                        "Login failed. Check your credentials or MFA and try again."
-                    )
-            except Exception as exc:
-                errors = exc.exceptions if isinstance(exc, ExceptionGroup) else (exc,)
-                for err in errors:
-                    _logger.error("Login error: %s", err)  # noqa: TRY400
-                self.error_var.set(
-                    "; ".join(str(err) for err in errors) or "Login failed."
-                )
+                await self.auth.login(user, password, self.get_mfa_code)
+            except IDATSyncError as exc:
+                _logger.error("Login error: %s", exc)  # noqa: TRY400
+                self.error_var.set(str(exc))
+            else:
+                self.app.switch_to_sync()

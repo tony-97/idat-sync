@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import sys
 
-from idat_sync.application.ports import AuthenticationError
+from idat_sync.application.ports import IDATSyncError
 from idat_sync.config import load_config
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.moodle_adapter import MoodleTokenAdapter
@@ -25,7 +25,7 @@ async def _get_token(config) -> str | None:
         return await MoodleTokenAdapter(
             MoodleTokenClient(config.moodle_base_url)
         ).fetch_token(username, password)
-    except AuthenticationError as exc:
+    except IDATSyncError as exc:
         print(f"Login failed: {exc}", file=sys.stderr)
         return None
 

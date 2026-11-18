@@ -10,6 +10,7 @@ from idat_sync.application.ports import (
     AuthenticationError,
     Credentials,
     CredentialStorePort,
+    IDATSyncError,
     MoodleTokenPort,
     SharepointAuthPort,
 )
@@ -44,9 +45,9 @@ class AuthService:
         username: str,
         password: str,
         get_mfa_code: Callable[[], Awaitable[str]],
-    ) -> bool:
+    ) -> None:
         """Log in to Moodle and SharePoint concurrently and persist Credentials."""
-        rejected = False
+        idat_error_group: ExceptionGroup[IDATSyncError] | None = None
         try:
             async with asyncio.TaskGroup() as tg:
                 moodle_task = tg.create_task(
@@ -59,23 +60,23 @@ class AuthService:
                     ),
                     name="sharepoint_auth",
                 )
-        except* AuthenticationError:
-            rejected = True
-        if rejected:
-            return False
+        except* IDATSyncError as eg:
+            idat_error_group = eg
+        if idat_error_group is not None:
+            raise idat_error_group.exceptions[0] from idat_error_group
         token = moodle_task.result()
         sharepoint_storage_state = sharepoint_task.result()
         if not sharepoint_storage_state or not token:
-            return False
+            raise AuthenticationError(
+                "Authentication failed: empty token or SharePoint storage state."
+            )
 
         credentials = Credentials(
             sharepoint_storage_state=sharepoint_storage_state,
             token=token,
         )
-        saved = await asyncio.to_thread(self.credential_store.save, credentials)
-        if saved:
-            _logger.info("User '%s' is now logged in.", username.split("@", 1)[0])
-        return saved
+        await asyncio.to_thread(self.credential_store.save, credentials)
+        _logger.info("User '%s' is now logged in.", username.split("@", 1)[0])
 
     def logout(self) -> None:
         """Clear persisted Credentials."""

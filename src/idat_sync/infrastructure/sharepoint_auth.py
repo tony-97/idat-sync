@@ -14,6 +14,9 @@ from playwright.async_api import (
     Playwright,
     async_playwright,
 )
+from playwright.async_api import (
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from idat_sync.application.ports import AuthenticationError, StorageStateData
 
@@ -150,6 +153,9 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
                     await _close_resources(context, browser, cancelled=cancelled)
         except AuthenticationError:
             raise
+        except PlaywrightTimeoutError as exc:
+            _logger.exception("SharePoint sign-in timed out")
+            raise AuthenticationError("SharePoint sign-in timed out.") from exc
         except Exception as exc:
             _logger.exception("SharePoint browser authentication failed")
             raise AuthenticationError(

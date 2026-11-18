@@ -14,12 +14,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import idat_sync.main as main_module
 import idat_sync.ui as ui_pkg
 import idat_sync.ui.app as app_module
 import idat_sync.ui.sync_frame as sync_frame_mod
-from idat_sync.application import ports
+from idat_sync.application import exceptions, ports
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.events import (
     CourseFilesDiscovered,
@@ -33,6 +34,10 @@ from idat_sync.application.ports import (
     AuthenticationError,
     Credentials,
     CredentialsExpiredError,
+    CredentialStoreError,
+    FileSystemError,
+    IDATSyncError,
+    RemoteServiceError,
     SharepointAuthPort,
     StorageStateData,
 )
@@ -96,11 +101,11 @@ class InMemoryCredentialStore:
         """Return stored Credentials."""
         return self.stored
 
-    def save(self, credentials: Credentials) -> bool:
-        """Store Credentials if ``save_result`` is True."""
-        if self.save_result:
-            self.stored = credentials
-        return self.save_result
+    def save(self, credentials: Credentials) -> None:
+        """Store Credentials or raise CredentialStoreError on failure."""
+        if not self.save_result:
+            raise CredentialStoreError("Could not create credentials file")
+        self.stored = credentials
 
     def clear(self) -> None:
         """Clear stored Credentials."""
@@ -131,9 +136,9 @@ class TestAuthService(unittest.TestCase):
             credential_store=store,
         )
 
-        ok = asyncio.run(service.login("jdoe@custom.edu", "secret", _mfa_code))
-
-        assert ok
+        assert (
+            asyncio.run(service.login("jdoe@custom.edu", "secret", _mfa_code)) is None
+        )
         assert moodle.calls == [("jdoe", "secret")]
         assert sharepoint.calls == [("jdoe@custom.edu", "secret", "123456")]
         assert store.stored == {
@@ -146,7 +151,7 @@ class TestAuthService(unittest.TestCase):
         main_thread_id = threading.get_ident()
         save_threads: list[int] = []
 
-        async def exercise() -> bool:
+        async def exercise() -> None:
             sp_started = asyncio.Event()
 
             class ConcurrentMoodlePort:  # pylint: disable=too-few-public-methods
@@ -174,9 +179,9 @@ class TestAuthService(unittest.TestCase):
             class ThreadCheckingStore(InMemoryCredentialStore):
                 """Store recording which thread executes save()."""
 
-                def save(self, credentials: Credentials) -> bool:
+                def save(self, credentials: Credentials) -> None:
                     save_threads.append(threading.get_ident())
-                    return super().save(credentials)
+                    super().save(credentials)
 
             store = ThreadCheckingStore()
             service = AuthService(
@@ -184,16 +189,15 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=ConcurrentSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
-            return await service.login("jdoe@idat.pe", "secret", _mfa_code)
+            await service.login("jdoe@idat.pe", "secret", _mfa_code)
 
-        ok = asyncio.run(exercise())
+        asyncio.run(exercise())
 
-        assert ok
         assert len(save_threads) == 1
         assert save_threads[0] != main_thread_id
 
-    def test_login_returns_false_without_saving_when_either_provider_fails(self):
-        """Return False without saving when either provider or store fails."""
+    def test_login_raises_without_saving_when_either_provider_or_store_fails(self):
+        """Raise AuthenticationError or CredentialStoreError without saving."""
         state: StorageStateData = {"cookies": []}
 
         for token, sp_state in [(None, state), ("", state), ("tok", None), ("tok", {})]:
@@ -204,8 +208,8 @@ class TestAuthService(unittest.TestCase):
                     sharepoint_auth=FakeSharepointAuthPort(storage_state=sp_state),
                     credential_store=store,
                 )
-                ok = asyncio.run(service.login("jdoe", "secret", _mfa_code))
-                assert not ok
+                with pytest.raises(AuthenticationError):
+                    asyncio.run(service.login("jdoe", "secret", _mfa_code))
                 assert store.stored is None
 
         failing_store = InMemoryCredentialStore(save_result=False)
@@ -214,7 +218,8 @@ class TestAuthService(unittest.TestCase):
             sharepoint_auth=FakeSharepointAuthPort(storage_state=state),
             credential_store=failing_store,
         )
-        assert not asyncio.run(service.login("jdoe", "secret", _mfa_code))
+        with pytest.raises(CredentialStoreError):
+            asyncio.run(service.login("jdoe", "secret", _mfa_code))
 
     def test_logout_is_authenticated_and_get_credentials_delegate_to_store(self):
         """Delegate is_authenticated, get_credentials, and logout to store."""
@@ -263,7 +268,7 @@ class TestAuthService(unittest.TestCase):
         assert moodle.calls == [("jdoe", "secret")]
 
     def test_login_cancels_sharepoint_task_on_moodle_error(self):
-        """Cancel sibling SharePoint task and raise ExceptionGroup on error."""
+        """Cancel sibling SharePoint task and unwrap IDATSyncError on error."""
         sp_cancelled: list[bool] = []
         sp_cleaned_up: list[bool] = []
         store = InMemoryCredentialStore()
@@ -272,14 +277,14 @@ class TestAuthService(unittest.TestCase):
             sp_started = asyncio.Event()
 
             class FailingMoodlePort:  # pylint: disable=too-few-public-methods
-                """Stub Moodle port raising RuntimeError after SharePoint starts."""
+                """Stub Moodle port raising RemoteServiceError."""
 
                 async def fetch_token(
                     self, _username: str, _password: str
                 ) -> str | None:
-                    """Raise RuntimeError once SharePoint starts."""
+                    """Raise RemoteServiceError once SharePoint starts."""
                     await asyncio.wait_for(sp_started.wait(), timeout=2.0)
-                    raise RuntimeError("moodle HTTP 500")
+                    raise RemoteServiceError("moodle HTTP 500")
 
             class HangingSharepointPort:  # pylint: disable=too-few-public-methods
                 """Stub SharePoint port recording cancellation."""
@@ -304,20 +309,19 @@ class TestAuthService(unittest.TestCase):
                 credential_store=store,
             )
 
-            with pytest.raises(ExceptionGroup) as ctx:
+            with pytest.raises(RemoteServiceError, match="moodle HTTP 500"):
                 await service.login("jdoe", "secret", _mfa_code)
             assert sp_cancelled == [True]
             assert sp_cleaned_up == [True]
-            assert [str(exc) for exc in ctx.value.exceptions] == ["moodle HTTP 500"]
 
         asyncio.run(exercise())
         assert store.stored is None
 
     def test_login_cancels_sibling_on_moodle_authentication_error(self):
-        """Cancel SharePoint and return False when Moodle raises AuthenticationError."""
-        assert issubclass(AuthenticationError, RuntimeError)
+        """Cancel SharePoint and raise AuthenticationError directly."""
+        assert issubclass(AuthenticationError, IDATSyncError)
 
-        async def exercise() -> bool:
+        async def exercise() -> None:
             sp_started = asyncio.Event()
             sp_cancelled: list[bool] = []
 
@@ -350,17 +354,17 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=SlowSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
-            ok = await service.login("jdoe", "bad", _mfa_code)
+            with pytest.raises(AuthenticationError, match="invalid moodle creds"):
+                await service.login("jdoe", "bad", _mfa_code)
             assert sp_cancelled == [True]
             assert store.stored is None
-            return ok
 
-        assert not asyncio.run(exercise())
+        asyncio.run(exercise())
 
     def test_login_cancels_sibling_on_sharepoint_auth_and_mixed_errors(self):
         """Cancel Moodle on SharePoint AuthenticationError and surface crashes."""
 
-        async def exercise_sharepoint_rejected() -> bool:
+        async def exercise_sharepoint_rejected() -> None:
             moodle_started = asyncio.Event()
             moodle_cancelled: list[bool] = []
 
@@ -393,10 +397,10 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=RejectedSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
-            ok = await service.login("jdoe", "bad", _mfa_code)
+            with pytest.raises(AuthenticationError, match="blank MFA"):
+                await service.login("jdoe", "bad", _mfa_code)
             assert moodle_cancelled == [True]
             assert store.stored is None
-            return ok
 
         async def exercise_mixed_error() -> None:
             class RejectedMoodlePort:  # pylint: disable=too-few-public-methods
@@ -424,7 +428,7 @@ class TestAuthService(unittest.TestCase):
                 await service.login("jdoe", "bad", _mfa_code)
             assert [str(e) for e in ctx.value.exceptions] == ["sp crash"]
 
-        assert not asyncio.run(exercise_sharepoint_rejected())
+        asyncio.run(exercise_sharepoint_rejected())
         asyncio.run(exercise_mixed_error())
 
 
@@ -453,7 +457,7 @@ class TestJsonCredentialStore(unittest.TestCase):
                     ]
                 },
             }
-            assert store.save(creds)
+            assert store.save(creds) is None
             assert credentials_path.exists()
             assert store.load() == creds
 
@@ -493,19 +497,41 @@ class TestJsonCredentialStore(unittest.TestCase):
             ):
                 assert JsonCredentialStore(missing_path).load() is None
 
-    def test_save_returns_false_on_os_error(self):
-        """Return False and log error when saving to a directory fails."""
+    def test_save_and_clear_raise_credential_store_error_on_os_error(self):
+        """Raise CredentialStoreError and log error when saving or clearing fails."""
         with tempfile.TemporaryDirectory() as tmpdir:
             store = JsonCredentialStore(Path(tmpdir))
             creds: Credentials = {
                 "token": "tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
-            with self.assertLogs(
-                "idat_sync.infrastructure.credential_store", level="ERROR"
-            ) as cm:
-                assert not store.save(creds)
+            with (
+                self.assertLogs(
+                    "idat_sync.infrastructure.credential_store", level="ERROR"
+                ) as cm,
+                pytest.raises(
+                    CredentialStoreError, match="credentials file"
+                ) as save_ctx,
+            ):
+                store.save(creds)
+            assert isinstance(save_ctx.value.__cause__, OSError)
             assert "credentials file" in " ".join(cm.output)
+
+            clear_target = Path(tmpdir) / "locked.json"
+            clear_target.write_text("{}", encoding="utf-8")
+            clear_store = JsonCredentialStore(clear_target)
+            with (
+                patch.object(Path, "unlink", side_effect=PermissionError("locked")),
+                self.assertLogs(
+                    "idat_sync.infrastructure.credential_store", level="ERROR"
+                ) as clear_cm,
+                pytest.raises(
+                    CredentialStoreError, match="credentials file"
+                ) as clear_ctx,
+            ):
+                clear_store.clear()
+            assert isinstance(clear_ctx.value.__cause__, OSError)
+            assert "credentials file" in " ".join(clear_cm.output)
 
     def test_save_restricts_credentials_file_permissions_to_owner(self):
         """Apply 0o600 permissions to the temporary credentials file."""
@@ -517,7 +543,7 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "sharepoint_storage_state": {"cookies": []},
             }
             with patch.object(Path, "chmod") as mock_chmod:
-                assert store.save(creds)
+                assert store.save(creds) is None
 
             mock_chmod.assert_called_once_with(0o600)
 
@@ -535,15 +561,16 @@ class TestJsonCredentialStore(unittest.TestCase):
                 "token": "updated-tok",
                 "sharepoint_storage_state": {"cookies": []},
             }
-            assert store.save(original)
+            assert store.save(original) is None
 
             with (
                 patch.object(Path, "replace", side_effect=OSError("disk full")),
                 self.assertLogs(
                     "idat_sync.infrastructure.credential_store", level="ERROR"
                 ),
+                pytest.raises(CredentialStoreError),
             ):
-                assert not store.save(updated)
+                store.save(updated)
 
             assert store.load() == original
             assert not part_path.exists()
@@ -708,6 +735,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             configure_mocks,
             *,
             expected_exception: type[BaseException] | None = None,
+            expected_auth: tuple[str, type[BaseException]] | None = None,
             expect_context_close: bool = False,
             expect_browser_close: bool = False,
         ) -> None:
@@ -731,10 +759,15 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                         self.assertLogs(
                             "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
                         ) as log_cm,
-                        pytest.raises(AuthenticationError),
+                        pytest.raises(
+                            AuthenticationError,
+                            match=expected_auth[0] if expected_auth else None,
+                        ) as auth_ctx,
                     ):
                         asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
                     assert any(r.exc_info is not None for r in log_cm.records)
+                    if expected_auth is not None:
+                        assert isinstance(auth_ctx.value.__cause__, expected_auth[1])
             if expect_context_close:
                 mock_context.close.assert_awaited_once()
             else:
@@ -749,6 +782,19 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             lambda cm, _b, _c, _p: setattr(
                 cm, "__aenter__", AsyncMock(side_effect=RuntimeError("driver failed"))
             ),
+            expected_auth=("SharePoint browser authentication failed", RuntimeError),
+        )
+
+        # Playwright timeout failure translates to distinct timeout message
+        run_failure_case(
+            lambda _cm, _b, _c, p: setattr(
+                p,
+                "wait_for_url",
+                AsyncMock(side_effect=PlaywrightTimeoutError("timed out")),
+            ),
+            expected_auth=(r"SharePoint sign-in timed out\.", PlaywrightTimeoutError),
+            expect_context_close=True,
+            expect_browser_close=True,
         )
 
         # Launch failure
@@ -976,7 +1022,7 @@ class TestLoginFrame(unittest.TestCase):
         async def exercise_do_login() -> None:
             sharepoint.started = asyncio.Event()
             sharepoint.release = asyncio.Event()
-            sharepoint.error = RuntimeError("sso boom")
+            sharepoint.error = RemoteServiceError("sso boom")
 
             with self.assertLogs("idat_sync.ui.login_frame", level="ERROR") as log_cm:
                 task = asyncio.create_task(frame.do_login())
@@ -990,7 +1036,7 @@ class TestLoginFrame(unittest.TestCase):
                 await task
 
             assert any("sso boom" in msg for msg in log_cm.output)
-            assert "sso boom" in frame.error_var.get()
+            assert frame.error_var.get() == "sso boom"
             assert str(login_button["state"]) == "normal"
             assert not master.switched_to_sync
 
@@ -1036,31 +1082,53 @@ class TestLoginFrame(unittest.TestCase):
 
         asyncio.run(exercise_do_login())
 
-    def test_credentials_expired_error_exported_without_vendor_imports(self):
-        """Export auth errors from application.ports with zero vendor imports."""
-        err_cls = ports.CredentialsExpiredError
-        assert issubclass(err_cls, RuntimeError)
-        assert "CredentialsExpiredError" in ports.__all__
-        auth_err_cls = ports.AuthenticationError
-        assert issubclass(auth_err_cls, RuntimeError)
-        assert "AuthenticationError" in ports.__all__
-
-        tree = ast.parse(Path(ports.__file__).read_text(encoding="utf-8"))
-        imported = {
-            node.module.split(".")[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module
-        } | {
-            alias.name.split(".")[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
-        assert (
-            imported
-            & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"}
-            == set()
+    def test_login_frame_surfaces_logout_credential_store_error_on_init(self):
+        """Show CredentialStoreError in error_var if logout fails during init."""
+        mock_auth = MagicMock(spec=AuthService)
+        mock_auth.logout.side_effect = CredentialStoreError(
+            "Could not remove credentials file: locked"
         )
+        master = self._create_master()
+        frame = LoginFrame(master, mock_auth)  # type: ignore[arg-type]
+        assert "Could not remove credentials file: locked" in frame.error_var.get()
+
+    def test_credentials_expired_error_exported_without_vendor_imports(self):
+        """Export IDATSyncError hierarchy cleanly without vendor imports."""
+        base_cls = exceptions.IDATSyncError
+        assert issubclass(base_cls, Exception)
+        assert not issubclass(base_cls, RuntimeError)
+        expected_names = (
+            "IDATSyncError",
+            "AuthenticationError",
+            "CredentialsExpiredError",
+            "CredentialStoreError",
+            "RemoteServiceError",
+            "FileSystemError",
+        )
+        for name in expected_names:
+            exc_cls = getattr(exceptions, name)
+            assert issubclass(exc_cls, base_cls)
+            assert getattr(ports, name) is exc_cls
+            assert name in exceptions.__all__
+            assert name in ports.__all__
+
+        for mod in (exceptions, ports):
+            tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+            imported = {
+                node.module.split(".")[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module
+            } | {
+                alias.name.split(".")[0]
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+            assert (
+                imported
+                & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"}
+                == set()
+            )
 
     def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):  # pylint: disable=too-many-statements
         """Verify MFA popup Return/close handling and dead UI symbol removal."""
@@ -1174,7 +1242,7 @@ class TestSyncFrame(unittest.TestCase):
                         nonlocal attempts
                         attempts += 1
                         if attempts == 1:
-                            raise RuntimeError("network offline")
+                            raise RemoteServiceError("network offline")
                         return mock_sync
 
                     async def fake_sync_courses(root_folder, courses, *, refresh=False):
@@ -1197,9 +1265,9 @@ class TestSyncFrame(unittest.TestCase):
                         yield TaskDownloadStarted(ok_p)
                         yield TaskDownloadCompleted(ok_p)
                         yield TaskDownloadStarted(err_p)
-                        yield TaskDownloadFailed(err_p, OSError("disk full"))
+                        yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
                         yield CourseSyncCompleted(
-                            current_course, RuntimeError("partial")
+                            current_course, RemoteServiceError("partial")
                         )
 
                     mock_sync.sync_courses.side_effect = fake_sync_courses
@@ -1334,7 +1402,7 @@ class TestSyncFrame(unittest.TestCase):
                     partial_sync = MagicMock()
                     partial_sync.aclose = AsyncMock()
                     partial_sync.list_courses = AsyncMock(
-                        side_effect=RuntimeError("list failed")
+                        side_effect=RemoteServiceError("list failed")
                     )
 
                     with patch(
@@ -1346,6 +1414,13 @@ class TestSyncFrame(unittest.TestCase):
                     partial_sync.aclose.assert_awaited_once_with()
                     assert frame.idat_sync is None
                     assert "list failed" in frame.status_var.get()
+
+                    with patch(
+                        "idat_sync.ui.sync_frame.create_sync_service",
+                        new=AsyncMock(return_value=None),
+                    ):
+                        await frame.load_idat_sync(creds)
+                    assert "Sync service failed to initialize" in frame.status_var.get()
 
                     failing_sync = MagicMock()
                     failing_sync.aclose = AsyncMock(
@@ -1445,7 +1520,6 @@ class TestSyncFrame(unittest.TestCase):
                         await asyncio.sleep(0)
                         mfa_ready.set()
                         await mfa_task
-                        return True
 
                     with patch.object(app.auth, "login", side_effect=slow_login):
                         assert frame.pass_entry.bind("<Return>")
@@ -1512,7 +1586,6 @@ class TestSyncFrame(unittest.TestCase):
                                 "sharepoint_storage_state": {"cookies": []},
                             }
                         )
-                        return True
 
                     with (
                         patch.object(app.auth, "login", side_effect=ok_login),
@@ -1638,7 +1711,7 @@ class TestSyncFrame(unittest.TestCase):
 
                     async def err_sync_courses(_path, _selected, *, refresh=False):
                         _ = refresh
-                        yield CourseSyncCompleted(c1, RuntimeError("boom"))
+                        yield CourseSyncCompleted(c1, RemoteServiceError("boom"))
 
                     mock_service = MagicMock()
                     mock_service.sync_courses = err_sync_courses

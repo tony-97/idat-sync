@@ -11,6 +11,7 @@ from idat_sync.application.ports import (
     CourseGateway,
     CredentialsExpiredError,
     RecordingGateway,
+    RemoteServiceError,
     UrlContentStrategy,
 )
 from idat_sync.domain.content import (
@@ -477,9 +478,9 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
     async def test_list_url_content_skips_broken_link_and_propagates_auth_error(
         self,
     ):
-        """Warn and skip broken links, but re-raise CredentialsExpiredError."""
+        """Warn and skip RemoteServiceError links, propagating auth and bug errors."""
         self.mock_sp_strategy.list_url_content.side_effect = [
-            RuntimeError("404 not found"),
+            RemoteServiceError("404 not found"),
             [MoodleContent(Path("valid.pdf"), 20, "https://sharepoint/valid.pdf")],
         ]
         items = [
@@ -499,6 +500,10 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
             "401 expired"
         )
         with pytest.raises(CredentialsExpiredError):
+            await self.repo.list_url_content(items)
+
+        self.mock_sp_strategy.list_url_content.side_effect = RuntimeError("bug")
+        with pytest.raises(RuntimeError, match="bug"):
             await self.repo.list_url_content(items)
 
 

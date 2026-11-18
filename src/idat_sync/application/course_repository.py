@@ -6,8 +6,8 @@ from pathlib import Path
 
 from idat_sync.application.ports import (
     CourseGateway,
-    CredentialsExpiredError,
     RecordingGateway,
+    RemoteServiceError,
     UrlContentStrategy,
 )
 from idat_sync.domain.content import Content, RecordingContent
@@ -77,9 +77,7 @@ class CourseRepository:
                         )
                         or []
                     )
-                except CredentialsExpiredError:
-                    raise
-                except Exception as exc:
+                except RemoteServiceError as exc:
                     _logger.warning(
                         "Skipping unresolved URL '%s': %s",
                         content.fileurl,

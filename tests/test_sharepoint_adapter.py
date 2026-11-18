@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_runtime_context import ClientRuntimeContext
@@ -18,7 +19,7 @@ from office365.runtime.paths.resource_path import ResourcePath
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 
-from idat_sync.application.ports import CredentialsExpiredError
+from idat_sync.application.ports import CredentialsExpiredError, RemoteServiceError
 from idat_sync.domain.content import RecordingContent, SharepointContent
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
@@ -915,10 +916,25 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
             side_effect=err_404
         )
-        with pytest.raises(ClientRequestException) as ctx:
+        with pytest.raises(RemoteServiceError) as ctx:
             await client.search_for_recordings("Algebra")
         assert not isinstance(ctx.value, CredentialsExpiredError)
+        assert isinstance(ctx.value.__cause__, ClientRequestException)
         assert ctx_ok.search.query.return_value.execute_query_async.call_count == 1
+
+        http_err = httpx.ConnectError("sp timeout", request=MagicMock())
+        ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
+            side_effect=http_err
+        )
+        with pytest.raises(
+            RemoteServiceError, match="SharePoint request failed"
+        ) as hctx:
+            await client.search_for_recordings("Algebra")
+        assert isinstance(hctx.value.__cause__, httpx.HTTPError)
+
+        client.search_client = None
+        with pytest.raises(CredentialsExpiredError):
+            await client.search_for_recordings("Algebra")
         mock_sleep.assert_awaited()
 
     @patch(

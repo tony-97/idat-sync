@@ -13,7 +13,11 @@ from urllib.parse import urlparse
 import pytest
 
 from idat_sync.application.course_repository import CourseRepository
-from idat_sync.application.ports import AuthenticationError, RecordingGateway
+from idat_sync.application.ports import (
+    AuthenticationError,
+    RecordingGateway,
+    RemoteServiceError,
+)
 from idat_sync.config import load_config
 from idat_sync.domain.content import (
     Content,
@@ -36,14 +40,18 @@ COURSES_JSON_PATH = Path("./all_courses_contents.json")
 CREDENTIALS_JSON_PATH = Path("./session.json")
 
 
-def _load_moodle_json_module(name: str) -> object:
-    script_path = REPO_ROOT / "scripts" / "moodle_json.py"
+def _load_script_module(rel_path: str, name: str) -> object:
+    script_path = REPO_ROOT / rel_path
     spec = importlib.util.spec_from_file_location(name, script_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_moodle_json_module(name: str) -> object:
+    return _load_script_module("scripts/moodle_json.py", name)
 
 
 class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
@@ -164,26 +172,65 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
             assert (Path(tmpdir) / "all_courses_contents.json").is_file()
 
     async def test_moodle_json_script_returns_one_on_authentication_error(self):
-        """Return exit code 1 when MoodleTokenAdapter raises AuthenticationError."""
+        """Return 1 and print stderr when MoodleTokenAdapter raises IDATSyncError."""
         module = _load_moodle_json_module("moodle_json_auth_err")
         mock_store = MagicMock()
         mock_store.load.return_value = None
-        mock_token_adapter = MagicMock()
-        mock_token_adapter.fetch_token = AsyncMock(
-            side_effect=AuthenticationError("Invalid login")
-        )
 
+        for err, expected in [
+            (AuthenticationError("Invalid login"), "Login failed: Invalid login"),
+            (RemoteServiceError("HTTP 500"), "Login failed: HTTP 500"),
+        ]:
+            mock_token_adapter = MagicMock()
+            mock_token_adapter.fetch_token = AsyncMock(side_effect=err)
+            stderr = io.StringIO()
+            with (
+                patch("builtins.input", return_value="jdoe@idat.pe"),
+                patch.object(module.getpass, "getpass", return_value="bad"),
+                patch.object(module, "JsonCredentialStore", return_value=mock_store),
+                patch.object(
+                    module, "MoodleTokenAdapter", return_value=mock_token_adapter
+                ),
+                patch.object(module, "MoodleClient") as mock_client_cls,
+                patch("sys.stderr", stderr),
+            ):
+                rc = await module.main()
+
+            assert rc == 1
+            assert expected in stderr.getvalue()
+            mock_client_cls.assert_not_called()
+
+    def test_login_cli_script_catches_idat_sync_error_and_returns_one(self):
+        """Catch IDATSyncError in login_cli.main(), print to stderr, and return 1."""
+        module = _load_script_module("scripts/login_cli.py", "login_cli")
+        mock_auth = MagicMock()
+        mock_auth.login = AsyncMock(
+            side_effect=AuthenticationError("MFA code is required")
+        )
+        stderr = io.StringIO()
         with (
             patch("builtins.input", return_value="jdoe@idat.pe"),
-            patch.object(module.getpass, "getpass", return_value="bad"),
-            patch.object(module, "JsonCredentialStore", return_value=mock_store),
-            patch.object(module, "MoodleTokenAdapter", return_value=mock_token_adapter),
-            patch.object(module, "MoodleClient") as mock_client_cls,
+            patch.object(module.getpass, "getpass", return_value="secret"),
+            patch.object(module, "load_config", return_value=load_config()),
+            patch.object(module, "create_auth_service", return_value=mock_auth),
+            patch("sys.stderr", stderr),
         ):
-            rc = await module.main()
-
+            rc = module.main()
         assert rc == 1
-        mock_client_cls.assert_not_called()
+        assert "Login failed: MFA code is required" in stderr.getvalue()
+
+        mock_auth.login = AsyncMock(return_value=None)
+        stdout = io.StringIO()
+        with (
+            patch("builtins.input", return_value="jdoe@idat.pe"),
+            patch.object(module.getpass, "getpass", return_value="secret"),
+            patch.object(module, "load_config", return_value=load_config()),
+            patch.object(module, "create_auth_service", return_value=mock_auth),
+            patch("sys.stdout", stdout),
+        ):
+            rc_ok = module.main()
+        assert not rc_ok
+        assert "Credentials saved to" in stdout.getvalue()
 
     async def test_moodle_json_script_closes_client_on_completion_and_failure(self):
         """Ensure MoodleClient async context manager closes on success and error."""

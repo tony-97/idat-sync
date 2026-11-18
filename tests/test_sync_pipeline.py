@@ -39,8 +39,11 @@ from idat_sync.application.ports import (
     CredentialsExpiredError,
     Downloader,
     DownloadTask,
+    FileSystemError,
     FileSystemPort,
+    IDATSyncError,
     RecordingGateway,
+    RemoteServiceError,
     UrlContentStrategy,
 )
 from idat_sync.application.sync_service import IDATSync
@@ -484,6 +487,33 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert html_diff.synced_paths == {unchanged_html, empty_html}
             assert html_diff.outdated_paths == {changed_html}
 
+    def test_local_filesystem_adapter_translates_os_errors(self):
+        """Translate OSError in scan_mtimes and ensure_dir while keeping read_bytes."""
+        fs = LocalFileSystemAdapter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            test_file = tmp_path / "test.txt"
+            test_file.write_text("ok", encoding="utf-8")
+
+            with (
+                patch.object(Path, "mkdir", side_effect=PermissionError("no perms")),
+                pytest.raises(FileSystemError, match="no perms") as dir_err,
+            ):
+                fs.ensure_dir(tmp_path / "blocked")
+            assert isinstance(dir_err.value.__cause__, OSError)
+
+            with (
+                patch.object(Path, "rglob", side_effect=OSError("io failure")),
+                pytest.raises(FileSystemError, match="io failure") as scan_err,
+            ):
+                fs.scan_mtimes(tmp_path)
+            assert isinstance(scan_err.value.__cause__, OSError)
+
+            with patch.object(
+                Path, "read_bytes", side_effect=PermissionError("locked")
+            ):
+                assert fs.read_bytes(test_file) is None
+
     async def test_idat_sync_orchestration_with_injected_collaborators(self):
         """Verify IDATSync orchestration events and directory creation."""
         mock_repo = MagicMock(spec=CourseRepository)
@@ -676,7 +706,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             async def failing_sp(_file, fh):
                 observed_paths.append(fh.name)
                 fh.write(b"partial")
-                raise RuntimeError("network drop")
+                raise RemoteServiceError("network drop")
 
             mock_moodle = MagicMock(spec=MoodleClient)
             mock_moodle.download_file = AsyncMock(side_effect=ok_moodle)
@@ -689,7 +719,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert moodle_target.read_bytes() == b"ok"
             assert not moodle_target.with_name("a.pdf.part").exists()
 
-            with pytest.raises(RuntimeError):
+            with pytest.raises(RemoteServiceError):
                 await SharepointDownloader(mock_sp).download(
                     SharepointContent(sp_target, 0, MagicMock())
                 )
@@ -906,9 +936,17 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 dl_mock.download.side_effect = DownloadError(
                     "HTTP Error 404: Not Found"
                 )
-                with pytest.raises(DownloadError) as ctx:
+                with pytest.raises(RemoteServiceError, match="HTTP Error 404") as ctx:
                     await dl.download(content)
                 assert not isinstance(ctx.value, CredentialsExpiredError)
+                assert isinstance(ctx.value.__cause__, DownloadError)
+
+            with (
+                patch.object(Path, "mkdir", side_effect=PermissionError("no mkdir")),
+                pytest.raises(FileSystemError, match="no mkdir") as fs_ctx,
+            ):
+                await dl.download(content)
+            assert isinstance(fs_ctx.value.__cause__, OSError)
 
     async def test_task_orchestrator_create_coroutines_groups_and_skips_empty_groups(
         self,
@@ -1012,7 +1050,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         mock_course_gw.list_courses.return_value = [c1, c2]
         mock_rec_gw = MagicMock(spec=RecordingGateway)
         mock_rec_gw.fetch_recordings.side_effect = [
-            RuntimeError("course 1 transient failure"),
+            RemoteServiceError("course 1 transient failure"),
             [],
         ]
 
@@ -1040,7 +1078,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 if isinstance(e, CourseSyncCompleted)
             ]
             assert completed_courses[0][0] == 1
-            assert isinstance(completed_courses[0][1], RuntimeError)
+            assert isinstance(completed_courses[0][1], RemoteServiceError)
             assert completed_courses[1] == (2, None)
 
             events.clear()
@@ -1059,6 +1097,83 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert len(aborted_courses) == 1
             assert aborted_courses[0].course.id == 1
             assert isinstance(aborted_courses[0].error, CredentialsExpiredError)
+
+    async def test_idat_sync_isolates_task_level_remote_and_filesystem_errors(self):
+        """Isolate RemoteServiceError and FileSystemError while keeping bugs fatal."""
+
+        class SelectiveFailingDownloader(Downloader[StringContent]):
+            """Downloader raising configured errors per target filename."""
+
+            content_type = StringContent
+
+            def __init__(self) -> None:
+                self.downloaded: list[Path] = []
+                self.bugs_fatal = False
+
+            async def download(self, content: StringContent) -> None:
+                """Raise configured error or record success."""
+                if content.path.name == "remote_err.html":
+                    raise RemoteServiceError("upstream 502")
+                if content.path.name == "fs_err.html":
+                    raise FileSystemError("disk full")
+                if self.bugs_fatal and content.path.name == "bug.html":
+                    raise RuntimeError("internal bug")
+                self.downloaded.append(content.path)
+
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
+        dl = SelectiveFailingDownloader()
+        sync = IDATSync(
+            CourseRepository(MagicMock(spec=CourseGateway), mock_rec_gw, []),
+            DownloadManager([dl], mock_fs),
+            TaskOrchestrator([[dl]]),
+            mock_fs,
+            "Grabaciones",
+        )
+
+        course = Course(
+            id=1,
+            name="Resilient Course",
+            sections=[
+                CourseSection(
+                    id=1,
+                    name="S1",
+                    inline_contents=[
+                        StringContent(Path("remote_err.html"), 1, ["a"]),
+                        StringContent(Path("fs_err.html"), 1, ["b"]),
+                        StringContent(Path("ok.html"), 1, ["c"]),
+                    ],
+                )
+            ],
+        )
+        events = [e async for e in sync.sync_course(course, Path("out"))]
+        assert dl.downloaded == [Path("out/S1/ok.html")]
+        failed = {
+            e.path.name: e.error for e in events if isinstance(e, TaskDownloadFailed)
+        }
+        assert set(failed) == {"remote_err.html", "fs_err.html"}
+        assert isinstance(failed["remote_err.html"], RemoteServiceError)
+        assert isinstance(failed["fs_err.html"], FileSystemError)
+        assert isinstance(events[-1], CourseSyncCompleted)
+        assert isinstance(events[-1].error, (RemoteServiceError, FileSystemError))
+
+        dl.bugs_fatal = True
+        bug_course = Course(
+            id=2,
+            name="Bug Course",
+            sections=[
+                CourseSection(
+                    id=2,
+                    name="S1",
+                    inline_contents=[StringContent(Path("bug.html"), 1, ["x"])],
+                )
+            ],
+        )
+        with pytest.raises(ExceptionGroup) as eg_ctx:
+            _ = [e async for e in sync.sync_course(bug_course, Path("out2"))]
+        assert [str(exc) for exc in eg_ctx.value.exceptions] == ["internal bug"]
 
     async def test_idat_sync_cancels_sibling_group_tasks_on_credentials_expired(self):  # pylint: disable=too-many-locals
         """Cancel sibling groups when a task raises CredentialsExpiredError."""
@@ -1233,12 +1348,14 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         t_done = events_mod.TaskDownloadCompleted(path=Path("/tmp/Algebra/b.pdf"))  # noqa: S108
         t_fail = events_mod.TaskDownloadFailed(
             path=Path("/tmp/Algebra/b.pdf"),  # noqa: S108
-            error=OSError("disk full"),
+            error=FileSystemError("disk full"),
         )
         c_ok = events_mod.CourseSyncCompleted(course=course)
         c_err = events_mod.CourseSyncCompleted(
-            course=course, error=RuntimeError("boom")
+            course=course, error=RemoteServiceError("boom")
         )
+        assert isinstance(t_fail.error, IDATSyncError)
+        assert isinstance(c_err.error, IDATSyncError)
 
         for ev in (started, discovered, t_start, t_done, t_fail, c_ok, c_err):
             assert dataclasses.is_dataclass(ev)
@@ -1343,9 +1460,10 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             with (
                 patch.object(Path, "replace", side_effect=OSError("disk error")),
-                pytest.raises(OSError, match="disk error"),
+                pytest.raises(FileSystemError, match="disk error") as err_ctx,
             ):
                 await dl.download(StringContent(target, 0, ["<p>Corrupted</p>"]))
+            assert isinstance(err_ctx.value.__cause__, OSError)
 
             assert target.read_text(encoding="utf-8") == "<p>Hola</p>"
             assert not part_path.exists()

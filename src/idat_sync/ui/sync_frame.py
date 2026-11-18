@@ -18,7 +18,11 @@ from idat_sync.application.events import (
     TaskDownloadFailed,
     TaskDownloadStarted,
 )
-from idat_sync.application.ports import Credentials, CredentialsExpiredError
+from idat_sync.application.ports import (
+    Credentials,
+    CredentialsExpiredError,
+    IDATSyncError,
+)
 from idat_sync.bootstrap import create_sync_service
 from idat_sync.domain.course import Course, get_in_progress_course_ids
 from idat_sync.ui.base import AppFrame
@@ -215,18 +219,18 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instan
         if created:
             self.idat_sync = await create_sync_service(self.credentials, self.config)
         if self.idat_sync is None:
-            raise RuntimeError("Sync service failed to initialize")
+            raise IDATSyncError("Sync service failed to initialize")
         try:
             if not self.courses_loaded:
                 courses = await self.idat_sync.list_courses()
                 self._populate_courses(courses)
-        except Exception:
+        except IDATSyncError:
             if created:
                 await self.aclose()
             raise
         return self.idat_sync
 
-    def _set_error_status(self, exc: Exception) -> None:
+    def _set_error_status(self, exc: IDATSyncError) -> None:
         if isinstance(exc, CredentialsExpiredError):
             msg = f"Credentials expired: {exc}. Click Logout to sign in again."
         else:
@@ -239,7 +243,7 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instan
         async with self._busy(self.is_syncing):
             try:
                 await self._ensure_sync_service()
-            except Exception as exc:
+            except IDATSyncError as exc:
                 await self.aclose()
                 self.courses_loaded = False
                 self._set_error_status(exc)
@@ -266,7 +270,7 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instan
     def _on_download_failed(self, path: Path) -> None:
         self.course_tree.set_file_status(path, RowStatus.FAILED)
 
-    def _on_course_completed(self, course: Course, error: Exception | None) -> None:
+    def _on_course_completed(self, course: Course, error: IDATSyncError | None) -> None:
         status = RowStatus.COMPLETED if error is None else RowStatus.FAILED
         self.course_tree.set_course_status(course.id, status)
 
@@ -309,7 +313,7 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instan
         async with self._busy(self.is_syncing):
             try:
                 await self._run_sync(path)
-            except Exception as exc:
+            except IDATSyncError as exc:
                 self._set_error_status(exc)
 
     def browse_folder(self) -> None:

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import cast
 
-from idat_sync.application.ports import Credentials
+from idat_sync.application.ports import Credentials, CredentialStoreError
 
 _logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class JsonCredentialStore:
             return None
         return cast("Credentials", data)
 
-    def save(self, credentials: Credentials) -> bool:
+    def save(self, credentials: Credentials) -> None:
         """Atomically persist ``credentials`` with 0o600 permissions."""
         part_path = self.credentials_file.with_name(
             f"{self.credentials_file.name}.part"
@@ -50,11 +50,12 @@ class JsonCredentialStore:
                 json.dump(credentials, f)
             part_path.chmod(0o600)
             part_path.replace(self.credentials_file)
-        except OSError:
+        except OSError as exc:
             part_path.unlink(missing_ok=True)
             _logger.exception("Could not create credentials file")
-            return False
-        return True
+            raise CredentialStoreError(
+                f"Could not create credentials file: {exc}"
+            ) from exc
 
     def clear(self) -> None:
         """Delete the credentials file if it exists."""
@@ -64,5 +65,8 @@ class JsonCredentialStore:
                 _logger.info("User has been logged out.")
             else:
                 _logger.info("Already logged out (no credentials file found).")
-        except OSError:
+        except OSError as exc:
             _logger.exception("Could not remove credentials file")
+            raise CredentialStoreError(
+                f"Could not remove credentials file: {exc}"
+            ) from exc

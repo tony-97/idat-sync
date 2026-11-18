@@ -2,6 +2,7 @@ import asyncio
 import getpass
 import sys
 
+from idat_sync.application.ports import IDATSyncError
 from idat_sync.bootstrap import create_auth_service
 from idat_sync.config import load_config
 
@@ -20,9 +21,10 @@ def main() -> int:
 
     config = load_config()
     auth_service = create_auth_service(config)
-    ok = asyncio.run(auth_service.login(username, password, _get_mfa_code))
-    if not ok:
-        print("Login failed.", file=sys.stderr)
+    try:
+        asyncio.run(auth_service.login(username, password, _get_mfa_code))
+    except IDATSyncError as exc:
+        print(f"Login failed: {exc}", file=sys.stderr)
         return 1
 
     print(f"Credentials saved to {config.session_file}")
