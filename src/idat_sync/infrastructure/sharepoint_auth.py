@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import fnmatch
 import importlib
 import json
@@ -30,6 +31,13 @@ _logger = logging.getLogger(__name__)
 _POLL_INTERVAL_S = 0.15
 _TIMEOUT_S = 180.0
 _SETTLE_SLEEP_S = 3
+_GWL_EXSTYLE = -20
+_WS_EX_APPWINDOW = 0x00040000
+_WS_EX_TOOLWINDOW = 0x00000080
+_WS_EX_TRANSPARENT = 0x00000020
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_NOACTIVATE = 0x08000000
+_LWA_ALPHA = 0x2
 
 
 class WebViewDriver(Protocol):
@@ -95,15 +103,55 @@ def _dispatch_worker_cmd(backend: _WindowBackend, req: dict[str, Any]) -> object
     raise ValueError(f"Unknown standalone worker command: {cmd!r}")
 
 
+def _cloak_win32_window(window: Any) -> None:  # noqa: ANN401
+    """Hide a Win32 window via layered alpha=0 so WebView2 keeps rAF/CSS active."""
+    native = getattr(window, "native", None)
+    handle = getattr(native, "Handle", None)
+    if handle is None:
+        return
+    hwnd = handle.ToInt64() if hasattr(handle, "ToInt64") else int(handle)
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    style = user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
+    cloaked = (
+        (style & ~_WS_EX_APPWINDOW)
+        | _WS_EX_TOOLWINDOW
+        | _WS_EX_TRANSPARENT
+        | _WS_EX_LAYERED
+        | _WS_EX_NOACTIVATE
+    )
+    user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, cloaked)
+    user32.SetLayeredWindowAttributes(hwnd, 0, 0, _LWA_ALPHA)
+
+
+def _create_hidden_window(webview: Any, url: str) -> Any:  # noqa: ANN401
+    """Create a hidden pywebview window without freezing WebView2 on Windows."""
+    if sys.platform == "win32":
+        # Form.Hide() sets WebView2 visibilityState='hidden' and freezes CSS/rAF.
+        window = webview.create_window(
+            "", url, focus=False, frameless=True, shadow=False
+        )
+        events = getattr(window, "events", None)
+        if events is not None and hasattr(events, "before_show"):
+            events.before_show += lambda: _cloak_win32_window(window)
+        _cloak_win32_window(window)
+        return window
+    window = webview.create_window("", url, hidden=True)
+    # Linux GTK dynamic secondary windows ignore hidden=True once running.
+    if getattr(webview, "windows", None):
+        window.hide()
+    return window
+
+
 def _run_standalone_worker(initial_url: str, stdin: TextIO, stdout: TextIO) -> None:
     """Run a hidden pywebview window on the main thread controlled via JSON lines."""
     webview = importlib.import_module("webview")
-    window = webview.create_window("", initial_url, hidden=True)
+    window = _create_hidden_window(webview, initial_url)
 
     def _serve(win: Any) -> None:  # noqa: ANN401
         backend = _InProcessWindow(win)
         try:
-            win.hide()
+            if sys.platform != "win32":
+                win.hide()
             stdout.write(json.dumps({"ok": True}) + "\n")
             stdout.flush()
             for raw_line in stdin:
@@ -259,9 +307,7 @@ class PyWebviewDriver:
             return
         webview = importlib.import_module("webview")
         if getattr(webview, "windows", None):
-            window = webview.create_window("", url, hidden=True)
-            # Linux GTK dynamic secondary windows ignore hidden=True once running.
-            window.hide()
+            window = _create_hidden_window(webview, url)
             self._backend = _InProcessWindow(window)
             return
         self._backend = _SubprocessWorker(url)
@@ -459,7 +505,10 @@ def _js_visible_el(selector: str, body: str) -> str:
         f"(() => {{"
         f"for (const el of document.querySelectorAll({sel_json})) {{"
         f"const r = el.getBoundingClientRect();"
-        f"if (r.width > 0 && r.height > 0) {{"
+        f"const cs = getComputedStyle(el);"
+        f"if (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden'"
+        f" && parseFloat(cs.opacity) > 0 && !el.disabled"
+        f" && el.getAttribute('aria-disabled') !== 'true') {{"
         f"{body}"
         f"return true;"
         f"}}"
@@ -588,7 +637,7 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
         await _fill(driver, "#i0118", password)
         await _click(driver, "#idSIButton9")
         await _wait_for_url(driver, "https://login.microsoftonline.com/*/login")
-        await _click(driver, "#idDiv_SAOTCS_Proofs > div:nth-child(2)")
+        await _click(driver, '#idDiv_SAOTCS_Proofs > div:nth-child(2) [role="button"]')
 
         mfa_code = (await get_mfa_code()).strip()
         if not mfa_code:

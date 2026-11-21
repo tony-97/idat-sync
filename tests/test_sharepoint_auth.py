@@ -202,6 +202,37 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                     "value"
                 ] == ("pers-spo")
 
+    def test_dom_actions_require_visible_opaque_enabled_elements(self) -> None:
+        """Gate fill/click JS on visibility, opacity > 0, and enabled state."""
+        driver = FakeWebViewDriver()
+        auth = SharepointBrowserAuth(
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            email_domain="example.edu",
+            driver=driver,
+        )
+        with patch(
+            "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+
+        action_scripts = [
+            s for s in driver.scripts if "#i0118" in s or "#idSIButton9" in s
+        ]
+        assert action_scripts
+        for script in action_scripts:
+            assert "getComputedStyle(el)" in script
+            assert "visibility !== 'hidden'" in script
+            assert "parseFloat(cs.opacity) > 0" in script
+            assert "!el.disabled" in script
+            assert "getAttribute('aria-disabled') !== 'true'" in script
+        assert any(
+            '#idDiv_SAOTCS_Proofs > div:nth-child(2) [role=\\"button\\"]' in s
+            and ".click()" in s
+            for s in driver.scripts
+        )
+
     def test_blank_mfa_raises_authentication_error_and_closes_driver(self) -> None:
         """Raise AuthenticationError without filling OTP when MFA code is blank."""
         driver = FakeWebViewDriver()
@@ -351,9 +382,12 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
             await driver.aclose()
             return cookies
 
-        with patch(
-            "idat_sync.infrastructure.sharepoint_auth.importlib.import_module",
-            return_value=fake_webview,
+        with (
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.importlib.import_module",
+                return_value=fake_webview,
+            ),
+            patch.object(sys, "platform", "linux"),
         ):
             cookies = asyncio.run(_exercise())
 
@@ -385,6 +419,53 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
                 "secure": False,
             },
         ]
+
+    def test_pywebview_driver_cloaks_win32_window_without_hide(self) -> None:
+        """On Windows, cloak via Win32 layered style instead of Form.Hide()."""
+        mock_handle = MagicMock()
+        mock_handle.ToInt64.return_value = 12345
+        mock_window = MagicMock()
+        mock_window.native = types.SimpleNamespace(Handle=mock_handle)
+        mock_window.events = types.SimpleNamespace(before_show=MagicMock())
+        fake_webview = types.SimpleNamespace(
+            windows=[MagicMock()],
+            create_window=MagicMock(return_value=mock_window),
+        )
+        fake_user32 = MagicMock()
+        fake_user32.GetWindowLongW.return_value = 0x00040000
+        fake_ctypes = types.SimpleNamespace(
+            windll=types.SimpleNamespace(user32=fake_user32)
+        )
+
+        async def _exercise() -> None:
+            driver = PyWebviewDriver()
+            await driver.goto(
+                "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx"
+            )
+            await driver.aclose()
+
+        with (
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.importlib.import_module",
+                return_value=fake_webview,
+            ),
+            patch.object(sys, "platform", "win32"),
+            patch.object(sp_auth_mod, "ctypes", fake_ctypes),
+        ):
+            asyncio.run(_exercise())
+
+        fake_webview.create_window.assert_called_once_with(
+            "",
+            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+            focus=False,
+            frameless=True,
+            shadow=False,
+        )
+        mock_window.hide.assert_not_called()
+        fake_user32.SetWindowLongW.assert_called_once_with(
+            12345, -20, 0x00000080 | 0x00000020 | 0x00080000 | 0x08000000
+        )
+        fake_user32.SetLayeredWindowAttributes.assert_called_once_with(12345, 0, 0, 0x2)
 
     def test_pywebview_driver_standalone_mode_uses_subprocess_worker(
         self,
@@ -473,6 +554,7 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
 
         with (
             patch.dict(sys.modules, {"webview": fake_webview}),
+            patch.object(sys, "platform", "linux"),
             patch.object(
                 sys,
                 "argv",
