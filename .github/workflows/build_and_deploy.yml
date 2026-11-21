@@ -29,6 +29,20 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build Frontend
+        run: npm --prefix frontend ci && npm --prefix frontend run build
+
+      - name: Install WebKitGTK on Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-webkit2-4.1 libgirepository1.0-dev libcairo2-dev
+
       - name: Enable Git long paths
         if: matrix.os == 'windows-latest'
         run: git config --system core.longpaths true
@@ -37,9 +51,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Installs the package and its dependencies from pyproject.toml
-          pip install .
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            pip install ".[linux]"
+          else
+            pip install .
+          fi
           # Install PyInstaller
           pip install pyinstaller
+        shell: bash
 
       - name: Build Python Package (sdist and wheel)
         # We only need to build the Python package once, so we tie it to the Linux runner
@@ -47,18 +66,6 @@ jobs:
         run: |
           pip install build
           python -m build
-
-      - name: Install chromium on Linux
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          export PLAYWRIGHT_BROWSERS_PATH=0
-          playwright install --no-shell chromium
-
-      - name: Install webkit on MacOS
-        if: matrix.os == 'macos-latest'
-        run: |
-          export PLAYWRIGHT_BROWSERS_PATH=0
-          playwright install webkit
 
       - name: Build Executable with PyInstaller
         shell: bash
@@ -90,6 +97,7 @@ jobs:
           --copy-metadata yt-dlp \
           --hidden-import yt_dlp.extractor \
           --hidden-import yt_dlp.postprocessor \
+          --add-data "src/idat_sync/ui/index.html${SEP}idat_sync/ui" \
           --add-binary "$FFMPEG_PATH${SEP}." \
           --add-binary "$FFPROBE_PATH${SEP}." \
           --name idat_sync \
@@ -99,46 +107,13 @@ jobs:
       - name: Fix MacOS app bundle
         if: matrix.os == 'macos-latest'
         run: |
-          # 1. Clean garbage files and linker stubs that break macOS codesign
+          # Clean garbage files and linker stubs that break macOS codesign
           find dist/idat_sync.app -name ".DS_Store" -delete
           find dist/idat_sync.app -name "._*" -delete
           find dist/idat_sync.app -name "*.tbd" -delete
 
-          # 2. Delete broken PyInstaller signatures
+          # Delete broken PyInstaller signatures and ad-hoc sign the app bundle
           find dist/idat_sync.app -type d -name "_CodeSignature" -exec rm -rf {} +
-
-          # 3. THE FIX: Dynamically rebuild Apple's exact framework symlink structure
-          echo "=== Fixing PyInstaller Framework structures ==="
-          find dist/idat_sync.app/Contents/Frameworks/playwright -type d -name "*.framework" | while read -r fw; do
-              if [ -d "$fw/Versions/A" ]; then
-                  echo "Repairing structure of: $(basename "$fw")"
-                  
-                  # A. Delete everything in the root EXCEPT the 'Versions' directory
-                  find "$fw" -mindepth 1 -maxdepth 1 ! -name "Versions" -exec rm -rf {} +
-                  
-                  # B. Re-link Current -> A
-                  rm -rf "$fw/Versions/Current"
-                  ln -s "A" "$fw/Versions/Current"
-                  
-                  # C. Dynamically create correct symlinks in the root pointing to Versions/Current/
-                  for item in "$fw/Versions/A"/*; do
-                      item_name=$(basename "$item")
-                      ln -s "Versions/Current/$item_name" "$fw/$item_name"
-                  done
-              else
-                  echo "Warning: No Versions/A found in $(basename "$fw")"
-              fi
-          done
-
-          # 4. Sign inner Playwright libraries and binaries (.dylib and .so)
-          find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.dylib" -o -name "*.so" | \
-            xargs -I{} codesign -s - --force {}
-
-          # 5. Sign the newly repaired Playwright frameworks
-          find dist/idat_sync.app/Contents/Frameworks/playwright -name "*.framework" | \
-            xargs -I{} codesign -s - --force --options runtime {}
-
-          # 6. Finally, sign the outer application wrapper
           codesign -s - --force --options runtime dist/idat_sync.app
 
       - name: Create DMG

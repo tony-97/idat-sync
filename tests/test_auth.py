@@ -47,6 +47,7 @@ from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.course_tree import CourseTree, RowStatus
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
+from tests.test_architecture import FORBIDDEN_INNER_LAYER_IMPORTS
 
 
 class FakeMoodleTokenPort:  # pylint: disable=too-few-public-methods
@@ -742,11 +743,7 @@ class TestLoginFrame(unittest.TestCase):
                 if isinstance(node, ast.Import)
                 for alias in node.names
             }
-            assert (
-                imported
-                & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"}
-                == set()
-            )
+            assert imported & set(FORBIDDEN_INNER_LAYER_IMPORTS) == set()
 
     def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):
         """Verify inline async MFA future handling and dead UI symbol removal."""
