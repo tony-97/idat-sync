@@ -10,6 +10,16 @@ from pathlib import Path, PurePath
 from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+WEBVIEW_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; SM-A556E) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+)
+
+
+def is_android() -> bool:
+    """Return True when running inside the Android Python runtime."""
+    return "ANDROID_ARGUMENT" in os.environ or "ANDROID_BOOTLOGO" in os.environ
+
 
 def _normalize_url(value: str, field_name: str) -> str:
     if not isinstance(value, str):

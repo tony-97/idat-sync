@@ -4,19 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
-
-
-@dataclass(frozen=True)
-class FolderSelection:
-    """Outcome of a desktop folder picker request."""
-
-    available: bool
-    path: str = ""
 
 
 class AppFrame:

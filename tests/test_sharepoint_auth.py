@@ -8,6 +8,8 @@ import inspect
 import io
 import json
 import os
+import runpy
+import sys
 import threading
 import types
 import unittest
@@ -19,14 +21,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from idat_sync.application.ports import AuthenticationError, CookieData
-from idat_sync.bootstrap import WEBVIEW_USER_AGENT, create_webview_driver
+from idat_sync.bootstrap import create_auth_service
+from idat_sync.config import WEBVIEW_USER_AGENT, SyncConfig
+from idat_sync.infrastructure import sharepoint_auth as sp_auth_mod
 from idat_sync.infrastructure.sharepoint_auth import (
-    _GALAXY_A55_UA,
     AndroidWebViewDriver,
     PyWebviewDriver,
     SharepointBrowserAuth,
-    _js_is_visible,
-    _run_standalone_worker,
 )
 
 
@@ -149,7 +150,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                     sharepoint_host="contoso.sharepoint.com",
                     sharepoint_personal_host="contoso-my.sharepoint.com",
                     email_domain="example.edu",
-                    driver_factory=lambda d=driver: d,
+                    driver=driver,
                 )
                 with patch(
                     "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
@@ -170,6 +171,17 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                 assert any("#i0118" in s and "pw" in s for s in driver.scripts)
                 assert any(
                     "#idTxtBx_SAOTCC_OTC" in s and "123456" in s for s in driver.scripts
+                )
+                kmsi_wait_scripts = [
+                    s
+                    for s in driver.scripts
+                    if "#skipMfaRegistrationLink, #KmsiCheckboxField" in s
+                ]
+                assert kmsi_wait_scripts
+                assert all(
+                    "document.querySelectorAll(" in s
+                    and "document.querySelector(" not in s
+                    for s in kmsi_wait_scripts
                 )
                 skip_clicked = any(
                     "#skipMfaRegistrationLink" in s and ".click()" in s
@@ -197,7 +209,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
-            driver_factory=lambda: driver,
+            driver=driver,
         )
 
         async def _blank_mfa() -> str:
@@ -226,7 +238,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
-            driver_factory=lambda: timeout_driver,
+            driver=timeout_driver,
         )
         with (
             self.assertLogs(
@@ -248,7 +260,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
-            driver_factory=lambda: err_driver,
+            driver=err_driver,
         )
         with (
             self.assertLogs(
@@ -271,7 +283,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             sharepoint_host="contoso.sharepoint.com",
             sharepoint_personal_host="contoso-my.sharepoint.com",
             email_domain="example.edu",
-            driver_factory=lambda: cancel_driver,
+            driver=cancel_driver,
         )
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(auth_cancel.fetch_storage_state("jdoe", "pw", _mfa_code))
@@ -281,21 +293,21 @@ class TestSharepointBrowserAuth(unittest.TestCase):
 class TestDriverSelectionAndAdapters(unittest.TestCase):
     """Tests for default driver selection, PyWebviewDriver, and AndroidWebViewDriver."""
 
-    def test_create_webview_driver_selects_platform_adapter(self) -> None:
+    def test_create_auth_service_wires_platform_webview_driver(self) -> None:
         """Select AndroidWebViewDriver on Android env markers, PyWebviewDriver else."""
-        assert WEBVIEW_USER_AGENT == _GALAXY_A55_UA
+        cfg = SyncConfig()
         with patch.dict(os.environ, {}, clear=True):
-            assert isinstance(create_webview_driver(), PyWebviewDriver)
+            auth_service = create_auth_service(cfg)
+            assert isinstance(auth_service.sharepoint_auth, SharepointBrowserAuth)
+            assert isinstance(auth_service.sharepoint_auth.driver, PyWebviewDriver)
         with patch.dict(os.environ, {"ANDROID_ARGUMENT": "1"}, clear=True):
-            assert isinstance(create_webview_driver(), AndroidWebViewDriver)
+            auth_service = create_auth_service(cfg)
+            assert isinstance(auth_service.sharepoint_auth, SharepointBrowserAuth)
+            assert isinstance(auth_service.sharepoint_auth.driver, AndroidWebViewDriver)
         with patch.dict(os.environ, {"ANDROID_BOOTLOGO": "1"}, clear=True):
-            assert isinstance(create_webview_driver(), AndroidWebViewDriver)
-
-    def test_js_is_visible_checks_all_matching_elements(self) -> None:
-        """Multi-selector visibility checks iterate querySelectorAll for any match."""
-        script = _js_is_visible("#skipMfaRegistrationLink, #KmsiCheckboxField")
-        assert "document.querySelectorAll(" in script
-        assert "document.querySelector(" not in script
+            auth_service = create_auth_service(cfg)
+            assert isinstance(auth_service.sharepoint_auth, SharepointBrowserAuth)
+            assert isinstance(auth_service.sharepoint_auth.driver, AndroidWebViewDriver)
 
     def test_pywebview_driver_lifecycle_and_cookie_conversion(self) -> None:
         """Create hidden window, call hide(), convert SimpleCookie, and destroy."""
@@ -459,15 +471,20 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
         )
         stdout = io.StringIO()
 
-        with patch(
-            "idat_sync.infrastructure.sharepoint_auth.importlib.import_module",
-            return_value=fake_webview,
+        with (
+            patch.dict(sys.modules, {"webview": fake_webview}),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "sharepoint_auth",
+                    "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+                ],
+            ),
+            patch.object(sys, "stdin", stdin),
+            patch.object(sys, "stdout", stdout),
         ):
-            _run_standalone_worker(
-                "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-                stdin,
-                stdout,
-            )
+            runpy.run_path(sp_auth_mod.__file__, run_name="__main__")
 
         assert start_calls == [(True, {"user_agent": WEBVIEW_USER_AGENT})]
         mock_window.hide.assert_called_once_with()
@@ -516,9 +533,7 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
 
         assert mocks.settings.setJavaScriptEnabled.call_args.args == (True,)
         assert mocks.settings.setDomStorageEnabled.call_args.args == (True,)
-        mocks.settings.setUserAgentString.assert_called_once_with(
-            WEBVIEW_USER_AGENT
-        )
+        mocks.settings.setUserAgentString.assert_called_once_with(WEBVIEW_USER_AGENT)
         mocks.wv.setWebViewClient.assert_called_once_with(mocks.client_cls.return_value)
         mocks.wv.setVisibility.assert_called_once_with(4)
         mocks.params_cls.assert_called_once_with(1, 1)

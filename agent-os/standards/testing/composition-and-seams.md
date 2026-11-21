@@ -34,9 +34,9 @@ repo = CourseRepository(
 - **Single composition root**: Only `create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync` and `create_auth_service(config: SyncConfig) -> AuthService` in `bootstrap.py` instantiate concrete clients, adapters, credential stores, filesystem adapters, and downloader groups from `Credentials` and `SyncConfig`.
 - **Pure constructors**: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync`, and `*Adapter` classes must only store injected dependencies in `__init__` — never instantiate clients from raw tokens/cookies or perform network/disk I/O in `__init__`.
 - **Confirmed test seams**:
-  - `idat_sync.config` (`SyncConfig`, `load_config`): unit-tested directly against normalization, validation, and precedence rules.
+  - `idat_sync.config` (`SyncConfig`, `load_config`, `is_android`, `WEBVIEW_USER_AGENT`): unit-tested directly against normalization, validation, and precedence rules.
   - `bootstrap.create_sync_service`: tested by calling the real factory with `SyncConfig` while patching only external HTTP/SDK transport (`ClientContext`).
-  - `bootstrap.create_auth_service`: tested by calling the real factory with `SyncConfig` and verifying wired `MoodleTokenAdapter` (wrapping `MoodleTokenClient`), `SharepointBrowserAuth`, and `JsonCredentialStore` attributes.
+  - `bootstrap.create_auth_service`: tested by calling the real factory with `SyncConfig` and verifying wired `MoodleTokenAdapter` (wrapping `MoodleTokenClient`), `SharepointBrowserAuth` (with platform `PyWebviewDriver` or `AndroidWebViewDriver`), and `JsonCredentialStore` attributes.
   - `*Client` tests (`MoodleClient`, `MoodleTokenClient`, `SharepointClient`): patch HTTP/SDK transport (`httpx.AsyncClient`, `ClientContext`, `HttpxTransport`, `idat_sync.infrastructure.rate_limiter.asyncio.sleep`).
   - `AsyncRateLimiter` (`src/idat_sync/infrastructure/rate_limiter.py`): unit-tested directly against end-to-start cooldown, `delay <= 0`, exception unlocking, and cancellation during sleep.
   - `SharepointBrowserAuth` tests: inject a fake `WebViewDriver` (and patch `asyncio.sleep` / native `webview` or Android JNI entrypoints only for driver adapter tests).

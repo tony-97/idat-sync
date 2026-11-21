@@ -20,16 +20,13 @@ from idat_sync.application.ports import (
     CookieData,
     StorageStateData,
 )
+from idat_sync.config import WEBVIEW_USER_AGENT
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
 
-_GALAXY_A55_UA = (
-    "Mozilla/5.0 (Linux; Android 14; SM-A556E) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-)
 _POLL_INTERVAL_S = 0.15
 _TIMEOUT_S = 180.0
 _SETTLE_SLEEP_S = 3
@@ -84,19 +81,17 @@ def _cookies_for_url(raw_cookies: list[Any], url: str) -> list[CookieData]:
     return _parse_simple_cookies(raw_cookies, urlparse(url).hostname or "")
 
 
-def _dispatch_worker_cmd(window: Any, req: dict[str, Any]) -> object:  # noqa: ANN401
+def _dispatch_worker_cmd(backend: _WindowBackend, req: dict[str, Any]) -> object:
     cmd = req.get("cmd")
     if cmd == "goto":
-        window.load_url(req["url"])
+        backend.goto(req["url"])
         return None
     if cmd == "get_url":
-        return str(window.get_current_url() or "")
+        return backend.get_url()
     if cmd == "evaluate_js":
-        return window.evaluate_js(req["script"])
+        return backend.evaluate_js(req["script"])
     if cmd == "get_cookies":
-        return _cookies_for_url(
-            window.get_cookies() or [], str(window.get_current_url() or "")
-        )
+        return backend.get_cookies()
     raise ValueError(f"Unknown standalone worker command: {cmd!r}")
 
 
@@ -106,6 +101,7 @@ def _run_standalone_worker(initial_url: str, stdin: TextIO, stdout: TextIO) -> N
     window = webview.create_window("", initial_url, hidden=True)
 
     def _serve(win: Any) -> None:  # noqa: ANN401
+        backend = _InProcessWindow(win)
         try:
             win.hide()
             stdout.write(json.dumps({"ok": True}) + "\n")
@@ -120,16 +116,16 @@ def _run_standalone_worker(initial_url: str, stdin: TextIO, stdout: TextIO) -> N
                     stdout.flush()
                     break
                 try:
-                    result = _dispatch_worker_cmd(win, req)
+                    result = _dispatch_worker_cmd(backend, req)
                     resp: dict[str, Any] = {"ok": True, "result": result}
                 except Exception as exc:
                     resp = {"ok": False, "error": str(exc)}
                 stdout.write(json.dumps(resp) + "\n")
                 stdout.flush()
         finally:
-            win.destroy()
+            backend.close()
 
-    webview.start(_serve, window, user_agent=_GALAXY_A55_UA)
+    webview.start(_serve, window, user_agent=WEBVIEW_USER_AGENT)
 
 
 class _WindowBackend(Protocol):
@@ -299,6 +295,7 @@ class PyWebviewDriver:
     async def aclose(self) -> None:
         """Destroy the hidden pywebview window or stop the standalone worker."""
         backend, self._backend = self._backend, None
+        self._current_url = ""
         if backend is not None:
             await asyncio.to_thread(backend.close)
 
@@ -358,7 +355,7 @@ class AndroidWebViewDriver:
         settings = wv.getSettings()
         settings.setJavaScriptEnabled(True)
         settings.setDomStorageEnabled(True)
-        settings.setUserAgentString(_GALAXY_A55_UA)
+        settings.setUserAgentString(WEBVIEW_USER_AGENT)
         # Standard WebViewClient avoids PyWebViewClient POST body stripping.
         wv.setWebViewClient(client_cls())
         # Keep View.INVISIBLE (not View.GONE) so JS timers stay active.
@@ -443,6 +440,7 @@ class AndroidWebViewDriver:
         """Detach and destroy the Android WebView on the UI thread."""
         wv = self._webview
         self._webview = None
+        self._current_url = ""
         if wv is None:
             return
 
@@ -566,13 +564,13 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
         sharepoint_host: str,
         sharepoint_personal_host: str,
         email_domain: str,
-        driver_factory: Callable[[], WebViewDriver],
+        driver: WebViewDriver,
     ) -> None:
-        """Initialize the authenticator with SharePoint hosts and email domain."""
+        """Initialize the authenticator with SharePoint hosts and WebView driver."""
         self.sharepoint_host = sharepoint_host
         self.sharepoint_personal_host = sharepoint_personal_host
         self.email_domain = email_domain
-        self._driver_factory = driver_factory
+        self.driver = driver
 
     async def _complete_login(
         self,
@@ -626,24 +624,21 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
         """Authenticate via hidden WebView/MFA and return SharePoint storage state."""
         site_url = f"https://{self.sharepoint_host}/_layouts/15/sharepoint.aspx"
         login_email = username if "@" in username else f"{username}@{self.email_domain}"
-        driver: WebViewDriver | None = None
         cancelled = False
         try:
             try:
-                driver = self._driver_factory()
                 return await self._complete_login(
-                    driver, site_url, login_email, password, get_mfa_code
+                    self.driver, site_url, login_email, password, get_mfa_code
                 )
             except asyncio.CancelledError:
                 cancelled = True
                 raise
             finally:
-                if driver is not None:
-                    try:
-                        await driver.aclose()
-                    except Exception:
-                        if not cancelled:
-                            raise
+                try:
+                    await self.driver.aclose()
+                except Exception:
+                    if not cancelled:
+                        raise
         except AuthenticationError:
             raise
         except TimeoutError as exc:

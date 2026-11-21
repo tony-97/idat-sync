@@ -42,12 +42,10 @@ from idat_sync.application.ports import (
     StorageStateData,
 )
 from idat_sync.application.sync_service import IDATSync
-from idat_sync.bootstrap import WEBVIEW_USER_AGENT
-from idat_sync.config import SyncConfig
+from idat_sync.config import WEBVIEW_USER_AGENT, SyncConfig
 from idat_sync.domain.course import Course, CourseSection
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.ui.app import AppFrame, MainApp
-from idat_sync.ui.base import FolderSelection
 from idat_sync.ui.course_tree import CourseTree, RowStatus
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
@@ -812,9 +810,9 @@ class _SyncStubMaster:
         """Count state pushes."""
         self.push_count += 1
 
-    def pick_folder(self) -> FolderSelection:
-        """Simulate an unavailable desktop dialog."""
-        return FolderSelection(available=False)
+    def pick_folder(self) -> str:
+        """Simulate a cancelled desktop dialog."""
+        return ""
 
 
 class TestSyncFrame(unittest.TestCase):
@@ -1133,7 +1131,7 @@ class TestSyncFrame(unittest.TestCase):
             mock_window = MagicMock()
             app = MainApp(config=cfg, window=mock_window)
             try:
-                assert isinstance(app._frame, LoginFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert isinstance(app.active_frame, LoginFrame)
                 assert app.get_state()["view"] == "login"
 
                 mock_window.evaluate_js.reset_mock()
@@ -1154,11 +1152,11 @@ class TestSyncFrame(unittest.TestCase):
                     }
                 )
                 app.switch_to_sync()
-                assert isinstance(app._frame, SyncFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert isinstance(app.active_frame, SyncFrame)
                 assert app.get_state()["view"] == "sync"
 
                 app.switch_to_login()
-                assert isinstance(app._frame, LoginFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert isinstance(app.active_frame, LoginFrame)
                 assert app.get_state()["view"] == "login"
             finally:
                 app.loop.close()
@@ -1172,7 +1170,7 @@ class TestSyncFrame(unittest.TestCase):
             )
             app_authed = MainApp(config=cfg, window=MagicMock())
             try:
-                assert isinstance(app_authed._frame, SyncFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert isinstance(app_authed.active_frame, SyncFrame)
                 assert app_authed.get_state()["view"] == "sync"
             finally:
                 app_authed.loop.close()
@@ -1182,33 +1180,36 @@ class TestSyncFrame(unittest.TestCase):
 
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
-                cfg = SyncConfig(session_file=Path(tmpdir) / "credentials.json")
+                creds_path = Path(tmpdir) / "credentials.json"
+                cfg = SyncConfig(session_file=creds_path)
                 mock_window = MagicMock()
-                app = MainApp(config=cfg, window=mock_window)
+                real_auth = AuthService(
+                    moodle_auth=FakeMoodleTokenPort("tok"),
+                    sharepoint_auth=FakeSharepointAuthPort({"cookies": []}),
+                    credential_store=JsonCredentialStore(credentials_file=creds_path),
+                )
+                with patch(
+                    "idat_sync.ui.app.create_auth_service", return_value=real_auth
+                ):
+                    app = MainApp(config=cfg, window=mock_window)
                 try:
-                    frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame = app.active_frame
                     assert isinstance(frame, LoginFrame)
                     frame.username = "jdoe"
                     frame.password = "secret"  # noqa: S105
 
-                    mfa_ready = asyncio.Event()
+                    login_task = asyncio.create_task(frame.do_login())
+                    for _ in range(50):
+                        if frame.mfa_open:
+                            break
+                        await asyncio.sleep(0.01)
+                    assert frame.mfa_open
 
-                    async def slow_login(_username, _password, get_mfa_code):
-                        mfa_task = asyncio.create_task(get_mfa_code())
-                        await asyncio.sleep(0)
-                        mfa_ready.set()
-                        await mfa_task
-
-                    with patch.object(app.auth, "login", side_effect=slow_login):
-                        login_task = asyncio.create_task(frame.do_login())
-                        await asyncio.wait_for(mfa_ready.wait(), timeout=2.0)
-                        assert frame.mfa_open
-
-                        await app.on_close()
-                        assert not frame.mfa_open
-                        mock_window.destroy.assert_called_once_with()
-                        with pytest.raises(asyncio.CancelledError):
-                            await login_task
+                    await app.on_close()
+                    assert not frame.mfa_open
+                    mock_window.destroy.assert_called_once_with()
+                    with pytest.raises(asyncio.CancelledError):
+                        await login_task
                 finally:
                     app.loop.close()
 
@@ -1221,25 +1222,31 @@ class TestSyncFrame(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmpdir:
                 creds_path = Path(tmpdir) / "credentials.json"
                 cfg = SyncConfig(session_file=creds_path)
-                app = MainApp(config=cfg, window=MagicMock())
+                real_auth = AuthService(
+                    moodle_auth=FakeMoodleTokenPort("tok"),
+                    sharepoint_auth=FakeSharepointAuthPort({"cookies": []}),
+                    credential_store=JsonCredentialStore(credentials_file=creds_path),
+                )
+                with patch(
+                    "idat_sync.ui.app.create_auth_service", return_value=real_auth
+                ):
+                    app = MainApp(config=cfg, window=MagicMock())
                 try:
-                    frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame = app.active_frame
                     assert isinstance(frame, LoginFrame)
                     frame.username = "jdoe"
                     frame.password = "secret"  # noqa: S105
 
-                    async def ok_login(_username, _password, _get_mfa_code):
-                        app.auth.credential_store.save(
-                            {
-                                "token": "tok",
-                                "sharepoint_storage_state": {"cookies": []},
-                            }
-                        )
+                    login_task = asyncio.create_task(frame.do_login())
+                    for _ in range(50):
+                        if frame.mfa_open:
+                            break
+                        await asyncio.sleep(0.01)
+                    assert frame.mfa_open
+                    frame.submit_mfa("123456")
+                    await login_task
 
-                    with patch.object(app.auth, "login", side_effect=ok_login):
-                        await frame.do_login()
-
-                    assert isinstance(app._frame, SyncFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                    assert isinstance(app.active_frame, SyncFrame)
                 finally:
                     app.loop.close()
 
@@ -1255,16 +1262,20 @@ class TestSyncFrame(unittest.TestCase):
                 .joinpath("index.html")
                 .read_text(encoding="utf-8")
             )
+            closing_handlers = []
             fake_window = MagicMock()
-            fake_window.events = MagicMock()
+            fake_window.events.closing.__iadd__.side_effect = lambda fn: (
+                closing_handlers.append(fn) or fake_window.events.closing
+            )
             loop_was_running = False
 
             def fake_start(**kwargs):
                 nonlocal loop_was_running
                 loop_was_running = app.loop.is_running()
                 assert kwargs.get("user_agent") == WEBVIEW_USER_AGENT
+                assert len(closing_handlers) == 1
                 # Triggering closing event closes frame without re-entrant destroy().
-                app._on_window_closing()  # noqa: SLF001  # pylint: disable=protected-access
+                closing_handlers[0]()
                 fake_window.destroy.assert_not_called()
 
             fake_webview = MagicMock()
@@ -1281,10 +1292,8 @@ class TestSyncFrame(unittest.TestCase):
             assert create_kwargs["html"] == expected_html
             js_api = create_kwargs["js_api"]
             assert js_api.get_state()["view"] == "login"
-            assert hasattr(js_api, "set_folder_path")
-            fake_webview.start.assert_called_once_with(
-                user_agent=WEBVIEW_USER_AGENT
-            )
+            assert not hasattr(js_api, "set_folder_path")
+            fake_webview.start.assert_called_once_with(user_agent=WEBVIEW_USER_AGENT)
 
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Cancel active load_idat_sync and do_sync tasks on SyncFrame.aclose."""

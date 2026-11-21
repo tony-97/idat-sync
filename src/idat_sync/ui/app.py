@@ -7,12 +7,14 @@ import contextlib
 import importlib
 import importlib.resources
 import json
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from idat_sync.bootstrap import WEBVIEW_USER_AGENT, create_auth_service, is_android
-from idat_sync.ui.base import AppFrame, FolderSelection
+from idat_sync.bootstrap import create_auth_service
+from idat_sync.config import WEBVIEW_USER_AGENT, is_android
+from idat_sync.ui.base import AppFrame
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
 
@@ -80,11 +82,6 @@ class _JsApi:
         """Cancel an open MFA prompt."""
         if frame := self._login_frame():
             self._call_on_loop(frame.cancel_mfa)
-
-    def set_folder_path(self, path: str) -> None:
-        """Set the target local sync directory path on SyncFrame."""
-        if frame := self._sync_frame():
-            frame.set_folder_path(path)
 
     def browse_folder(self) -> str:
         """Open a folder picker or apply the Android Downloads fallback."""
@@ -155,22 +152,25 @@ class MainApp:
         payload = json.dumps(self.get_state())
         self.window.evaluate_js(f"window.__onPythonState({payload})")
 
-    def pick_folder(self) -> FolderSelection:
-        """Open a desktop folder dialog when available."""
+    def pick_folder(self) -> str:
+        """Open a desktop folder dialog or return the Android Downloads fallback."""
         if (
             is_android()
             or self.window is None
             or not hasattr(self.window, "create_file_dialog")
         ):
-            return FolderSelection(available=False)
+            return str(
+                Path(os.environ.get("EXTERNAL_STORAGE", "/storage/emulated/0"))
+                / "Download"
+                / "idat-sync"
+            )
         selected = self.window.create_file_dialog(
             _folder_dialog_type(),
             directory=str(Path.home()),
         )
         if not selected:
-            return FolderSelection(available=True)
-        path = selected[0] if isinstance(selected, (list, tuple)) else str(selected)
-        return FolderSelection(available=True, path=path)
+            return ""
+        return selected[0] if isinstance(selected, (list, tuple)) else str(selected)
 
     def switch_to_sync(self) -> None:
         """Switch the active view to SyncFrame when Credentials exist."""

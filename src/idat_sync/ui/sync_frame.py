@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from idat_sync.application.events import (
@@ -27,6 +25,7 @@ from idat_sync.ui.course_tree import CourseTree, RowStatus
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from idat_sync.application.sync_service import IDATSync
     from idat_sync.config import SyncConfig
@@ -86,21 +85,11 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         self._notify()
 
     def browse_folder(self) -> str:
-        """Choose a sync directory via desktop dialog or Android Downloads fallback."""
-        selection = self.app.pick_folder()
-        if selection.available:
-            if selection.path:
-                self.set_folder_path(selection.path)
-                return selection.path
-            return self.folder_path
-
-        default_dir = str(
-            Path(os.environ.get("EXTERNAL_STORAGE", "/storage/emulated/0"))
-            / "Download"
-            / "idat-sync"
-        )
-        self.set_folder_path(default_dir)
-        return default_dir
+        """Choose a sync directory via the host application's folder picker."""
+        if chosen := self.app.pick_folder():
+            self.set_folder_path(chosen)
+            return chosen
+        return self.folder_path
 
     def _refresh_selection(self) -> None:
         self.course_tree.refresh_selection(self.selected_course_ids)
