@@ -1,16 +1,13 @@
-"""Login frame handling Moodle/SharePoint credentials and MFA popup."""
+"""Pure-Python login component controller handling credentials and inline MFA."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import tkinter as tk
 from typing import TYPE_CHECKING, Any
-
-from async_tkinter_loop import async_handler
 
 from idat_sync.application.ports import CredentialStoreError, IDATSyncError
 from idat_sync.ui.base import AppFrame
-from idat_sync.ui.mfa_dialog import ask_mfa_code
 
 if TYPE_CHECKING:
     from idat_sync.application.auth_service import AuthService
@@ -18,91 +15,104 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-_WINDOW_WIDTH = 300
-_WINDOW_HEIGHT = 185
-_ENTRY_WIDTH = 30
-_ERROR_WRAP_LENGTH = 270
 
+class LoginFrame(AppFrame):
+    """Component controller for interactive user login and async MFA entry."""
 
-class LoginFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instance-attributes
-    """Tkinter frame for interactive user login and MFA entry."""
-
-    def __init__(
-        self,
-        master: MainApp,
-        auth: AuthService,
-        **kwargs: Any,  # noqa: ANN401
-    ) -> None:
-        """Initialize the login form widgets and input validation traces."""
-        super().__init__(master, **kwargs)
-        self.app = master
+    def __init__(self, app: MainApp, auth: AuthService) -> None:
+        """Initialize login state and clear any existing stored credentials."""
+        super().__init__()
+        self.app = app
         self.auth = auth
-        self.error_var = tk.StringVar(value="")
+        self.username = ""
+        self.password = ""
+        self.error = ""
+        self.is_login = False
+        self._mfa_future: asyncio.Future[str] | None = None
         try:
             self.auth.logout()
         except CredentialStoreError as exc:
-            self.error_var.set(str(exc))
-        self.app.center_window(_WINDOW_WIDTH, _WINDOW_HEIGHT)
-        self.app.title("IDAT Sync Login")
+            self.error = str(exc)
 
-        tk.Label(self, text="Username:").pack(pady=5)
-        self.user_var = tk.StringVar()
-        self.user_entry = tk.Entry(self, width=_ENTRY_WIDTH, textvariable=self.user_var)
-        self.user_entry.pack()
-        self.user_entry.focus()
+    def _notify(self) -> None:
+        if hasattr(self.app, "push_state"):
+            self.app.push_state()
 
-        tk.Label(self, text="Password:").pack(pady=5)
-        self.pass_var = tk.StringVar()
-        self.pass_entry = tk.Entry(
-            self, show="*", width=_ENTRY_WIDTH, textvariable=self.pass_var
-        )
-        self.pass_entry.pack()
-        self.pass_entry.bind("<Return>", async_handler(self.do_login))
+    def _set_is_login(self, value: bool) -> None:  # noqa: FBT001
+        self.is_login = value
+        self._notify()
 
-        tk.Label(
-            self, textvariable=self.error_var, fg="red", wraplength=_ERROR_WRAP_LENGTH
-        ).pack(pady=(5, 0))
+    @property
+    def can_login(self) -> bool:
+        """Return True only when trimmed username, password, and idle state hold."""
+        return bool(self.username.strip()) and bool(self.password) and not self.is_login
 
-        self.login_button = tk.Button(
-            self,
-            text="Login",
-            command=async_handler(self.do_login),
-            state="disabled",
-        )
-        self.is_login = tk.BooleanVar(value=False)
-        self.user_var.trace_add("write", self.validate_buttons)
-        self.pass_var.trace_add("write", self.validate_buttons)
-        self.is_login.trace_add("write", self.validate_buttons)
-        self.login_button.pack(pady=10)
+    @property
+    def mfa_open(self) -> bool:
+        """Return True while an MFA code prompt is awaiting user input."""
+        return self._mfa_future is not None and not self._mfa_future.done()
 
-    def validate_buttons(self, *_: object) -> None:
-        """Enable the login button only when inputs are present and idle."""
-        if not self.winfo_exists():
-            return
-        has_login_inputs = bool(self.user_var.get().strip()) and bool(
-            self.pass_var.get()
-        )
-        state = "normal" if not self.is_login.get() and has_login_inputs else "disabled"
-        self.login_button.config(state=state)
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize login state for the WebView frontend."""
+        return {
+            "view": "login",
+            "username": self.username,
+            "password": self.password,
+            "error": self.error,
+            "is_login": self.is_login,
+            "can_login": self.can_login,
+            "mfa_open": self.mfa_open,
+        }
 
     async def get_mfa_code(self) -> str:
-        """Display a modal MFA popup and await the submitted 6-digit code."""
-        return await ask_mfa_code(self.master)
+        """Open the inline MFA prompt and await the submitted code."""
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._mfa_future = future
+        self._notify()
+        try:
+            return await future
+        finally:
+            if self._mfa_future is future:
+                self._mfa_future = None
+            self._notify()
 
-    async def do_login(self, *_: object) -> None:
-        """Attempt login with current form inputs and switch to SyncFrame."""
+    def submit_mfa(self, code: str) -> None:
+        """Resolve the pending MFA prompt with ``code``."""
+        if self._mfa_future is not None and not self._mfa_future.done():
+            self._mfa_future.set_result(code)
+            self._notify()
+
+    def cancel_mfa(self) -> None:
+        """Dismiss the pending MFA prompt with an empty code."""
+        self.submit_mfa("")
+
+    async def aclose(self) -> None:
+        """Cancel active login task and dismiss any open MFA prompt."""
+        await super().aclose()
+        self.cancel_mfa()
+
+    async def do_login(
+        self,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> None:
+        """Attempt login with current inputs and switch to SyncFrame on success."""
+        if username is not None:
+            self.username = username
+        if password is not None:
+            self.password = password
         if (
-            self.is_login.get()
-            or not (user := self.user_var.get().strip())
-            or not (password := self.pass_var.get())
+            self.is_login
+            or not (user := self.username.strip())
+            or not (pwd := self.password)
         ):
             return
-        self.error_var.set("")
-        async with self._busy(self.is_login):
+        self.error = ""
+        async with self._busy(self._set_is_login):
             try:
-                await self.auth.login(user, password, self.get_mfa_code)
+                await self.auth.login(user, pwd, self.get_mfa_code)
             except IDATSyncError as exc:
                 _logger.error("Login error: %s", exc)  # noqa: TRY400
-                self.error_var.set(str(exc))
+                self.error = str(exc)
             else:
                 self.app.switch_to_sync()
