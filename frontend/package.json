@@ -1,0 +1,17 @@
+{
+  "name": "idat-sync-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && node -e \"const fs=require('fs');fs.mkdirSync('../src/idat_sync/ui',{recursive:true});fs.copyFileSync('dist/index.html','../src/idat_sync/ui/index.html');\"",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "astro": "^5.7.0",
+    "tailwindcss": "^4.1.0",
+    "vite-plugin-singlefile": "^2.2.0"
+  }
+}
