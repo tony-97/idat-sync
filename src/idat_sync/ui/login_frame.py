@@ -21,8 +21,7 @@ class LoginFrame(AppFrame):
 
     def __init__(self, app: MainApp, auth: AuthService) -> None:
         """Initialize login state and clear any existing stored credentials."""
-        super().__init__()
-        self.app = app
+        super().__init__(app)
         self.auth = auth
         self.username = ""
         self.password = ""

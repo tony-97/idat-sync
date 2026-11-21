@@ -1,6 +1,7 @@
 """Composition root wiring application services, adapters, and logging."""
 
 import logging
+import os
 from pathlib import Path
 
 from idat_sync.application.auth_service import AuthService
@@ -22,8 +23,26 @@ from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAd
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
-from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
+from idat_sync.infrastructure.sharepoint_auth import (
+    _GALAXY_A55_UA as WEBVIEW_USER_AGENT,
+)
+from idat_sync.infrastructure.sharepoint_auth import (
+    AndroidWebViewDriver,
+    PyWebviewDriver,
+    SharepointBrowserAuth,
+    WebViewDriver,
+)
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
+
+
+def is_android() -> bool:
+    """Return True when running inside the Android Python runtime."""
+    return "ANDROID_ARGUMENT" in os.environ or "ANDROID_BOOTLOGO" in os.environ
+
+
+def create_webview_driver() -> WebViewDriver:
+    """Instantiate the platform WebViewDriver adapter."""
+    return AndroidWebViewDriver() if is_android() else PyWebviewDriver()
 
 
 def configure_logging(log_file: Path) -> logging.Logger:
@@ -126,9 +145,17 @@ def create_auth_service(config: SyncConfig) -> AuthService:
             sharepoint_host=config.sharepoint_host,
             sharepoint_personal_host=config.sharepoint_personal_host,
             email_domain=config.email_domain,
+            driver_factory=create_webview_driver,
         ),
         credential_store=JsonCredentialStore(config.session_file),
     )
 
 
-__all__ = ["configure_logging", "create_auth_service", "create_sync_service"]
+__all__ = [
+    "WEBVIEW_USER_AGENT",
+    "configure_logging",
+    "create_auth_service",
+    "create_sync_service",
+    "create_webview_driver",
+    "is_android",
+]

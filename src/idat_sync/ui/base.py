@@ -4,23 +4,35 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
 
-class AppFrame:  # pylint: disable=too-few-public-methods
+@dataclass(frozen=True)
+class FolderSelection:
+    """Outcome of a desktop folder picker request."""
+
+    available: bool
+    path: str = ""
+
+
+class AppFrame:
     """Base component controller tracking a single active async task."""
 
-    app: Any = None
-
-    def __init__(self) -> None:
-        """Initialize the frame with no active async task."""
+    def __init__(self, app: Any = None) -> None:  # noqa: ANN401
+        """Initialize the frame with an optional host and no active async task."""
+        self.app: Any = app
         self._active_task: asyncio.Task[Any] | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize frame state for the frontend."""
+        return {}
+
     def _notify(self) -> None:
-        if hasattr(self.app, "push_state"):
+        if self.app is not None:
             self.app.push_state()
 
     @contextlib.asynccontextmanager

@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
+import io
+import json
 import os
+import threading
 import types
 import unittest
+import weakref
 from http.cookies import SimpleCookie
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,12 +19,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from idat_sync.application.ports import AuthenticationError, CookieData
+from idat_sync.bootstrap import WEBVIEW_USER_AGENT, create_webview_driver
 from idat_sync.infrastructure.sharepoint_auth import (
     _GALAXY_A55_UA,
     AndroidWebViewDriver,
     PyWebviewDriver,
     SharepointBrowserAuth,
-    _create_default_driver,
+    _js_is_visible,
+    _run_standalone_worker,
 )
 
 
@@ -274,14 +281,21 @@ class TestSharepointBrowserAuth(unittest.TestCase):
 class TestDriverSelectionAndAdapters(unittest.TestCase):
     """Tests for default driver selection, PyWebviewDriver, and AndroidWebViewDriver."""
 
-    def test_create_default_driver_selects_platform_adapter(self) -> None:
+    def test_create_webview_driver_selects_platform_adapter(self) -> None:
         """Select AndroidWebViewDriver on Android env markers, PyWebviewDriver else."""
+        assert WEBVIEW_USER_AGENT == _GALAXY_A55_UA
         with patch.dict(os.environ, {}, clear=True):
-            assert isinstance(_create_default_driver(), PyWebviewDriver)
+            assert isinstance(create_webview_driver(), PyWebviewDriver)
         with patch.dict(os.environ, {"ANDROID_ARGUMENT": "1"}, clear=True):
-            assert isinstance(_create_default_driver(), AndroidWebViewDriver)
+            assert isinstance(create_webview_driver(), AndroidWebViewDriver)
         with patch.dict(os.environ, {"ANDROID_BOOTLOGO": "1"}, clear=True):
-            assert isinstance(_create_default_driver(), AndroidWebViewDriver)
+            assert isinstance(create_webview_driver(), AndroidWebViewDriver)
+
+    def test_js_is_visible_checks_all_matching_elements(self) -> None:
+        """Multi-selector visibility checks iterate querySelectorAll for any match."""
+        script = _js_is_visible("#skipMfaRegistrationLink, #KmsiCheckboxField")
+        assert "document.querySelectorAll(" in script
+        assert "document.querySelector(" not in script
 
     def test_pywebview_driver_lifecycle_and_cookie_conversion(self) -> None:
         """Create hidden window, call hide(), convert SimpleCookie, and destroy."""
@@ -360,51 +374,129 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
             },
         ]
 
-    def test_pywebview_driver_standalone_mode_starts_webview_with_user_agent(
+    def test_pywebview_driver_standalone_mode_uses_subprocess_worker(
         self,
     ) -> None:
-        """Start standalone pywebview with user_agent when no GUI windows exist."""
-        mock_window = MagicMock()
-        start_calls: list[dict[str, Any]] = []
-
-        def _fake_start(func: Any = None, **kwargs: Any) -> None:
-            start_calls.append(kwargs)
-            if callable(func):
-                func()
-
-        fake_webview = types.SimpleNamespace(
-            windows=[],
-            create_window=MagicMock(return_value=mock_window),
-            start=MagicMock(side_effect=_fake_start),
+        """Spawn a standalone subprocess worker when no GUI windows exist."""
+        responses = io.StringIO(
+            json.dumps({"ok": True})
+            + "\n"
+            + json.dumps({"ok": True, "result": "https://contoso.sharepoint.com/"})
+            + "\n"
+            + json.dumps({"ok": True, "result": True})
+            + "\n"
+            + json.dumps({"ok": True, "result": []})
+            + "\n"
         )
+        sent = io.StringIO()
+        fake_proc = MagicMock()
+        fake_proc.stdin = sent
+        fake_proc.stdout = responses
+        fake_proc.wait = MagicMock(return_value=0)
+        fake_webview = types.SimpleNamespace(windows=[])
 
         async def _exercise() -> None:
             driver = PyWebviewDriver()
             await driver.goto(
                 "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx"
             )
+            assert await driver.get_url() == "https://contoso.sharepoint.com/"
+            assert await driver.evaluate_js("1 + 1") is True
+            assert await driver.get_cookies() == []
             await driver.aclose()
+
+        with (
+            patch(
+                "idat_sync.infrastructure.sharepoint_auth.subprocess.Popen",
+                return_value=fake_proc,
+            ) as mock_popen,
+            patch.dict("sys.modules", {"webview": fake_webview}),
+        ):
+            asyncio.run(_exercise())
+
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args.args[0]
+        assert cmd[1:3] == ["-m", "idat_sync.infrastructure.sharepoint_auth"]
+        assert cmd[3] == "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx"
+        fake_proc.wait.assert_called_once()
+
+    def test_standalone_worker_runs_start_on_main_thread_and_hides_window(
+        self,
+    ) -> None:
+        """Run webview.start on the main thread, hide the window, and serve RPCs."""
+        mock_window = MagicMock()
+        mock_window.get_current_url.return_value = (
+            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx"
+        )
+        mock_window.evaluate_js.return_value = True
+        cookie = SimpleCookie()
+        cookie["FedAuth"] = "val"
+        mock_window.get_cookies.return_value = [cookie]
+
+        start_calls: list[tuple[bool, dict[str, Any]]] = []
+
+        def _fake_start(func: Any, *args: Any, **kwargs: Any) -> None:
+            start_calls.append(
+                (threading.current_thread() is threading.main_thread(), kwargs)
+            )
+            if callable(func):
+                func(*args)
+
+        fake_webview = types.SimpleNamespace(
+            create_window=MagicMock(return_value=mock_window),
+            start=MagicMock(side_effect=_fake_start),
+        )
+        stdin = io.StringIO(
+            "\n".join(
+                [
+                    json.dumps({"cmd": "get_url"}),
+                    json.dumps({"cmd": "evaluate_js", "script": "true"}),
+                    json.dumps({"cmd": "get_cookies"}),
+                    json.dumps({"cmd": "close"}),
+                ]
+            )
+            + "\n"
+        )
+        stdout = io.StringIO()
 
         with patch(
             "idat_sync.infrastructure.sharepoint_auth.importlib.import_module",
             return_value=fake_webview,
         ):
-            asyncio.run(_exercise())
+            _run_standalone_worker(
+                "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+                stdin,
+                stdout,
+            )
 
-        fake_webview.create_window.assert_called_once_with(
-            "",
-            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-            hidden=True,
+        assert start_calls == [(True, {"user_agent": WEBVIEW_USER_AGENT})]
+        mock_window.hide.assert_called_once_with()
+        mock_window.destroy.assert_called_once_with()
+        lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        assert lines[0] == {"ok": True}
+        assert lines[1]["result"] == (
+            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx"
         )
-        assert "user_agent" not in fake_webview.create_window.call_args.kwargs
-        fake_webview.start.assert_called_once()
-        assert start_calls == [{"user_agent": _GALAXY_A55_UA}]
-        mock_window.hide.assert_not_called()
-        mock_window.destroy.assert_called_once()
+        assert lines[2]["result"] is True
+        assert lines[3]["result"][0]["name"] == "FedAuth"
 
     def test_android_webview_driver_lifecycle_and_cookie_manager(self) -> None:
         """Configure 1x1 INVISIBLE WebView, read CookieManager, and destroy."""
         mocks, fake_import = _make_fake_android_env()
+        cb_weakref: list[weakref.ReferenceType[Any]] = []
+
+        def _delayed_eval(_script: str, cb: Any) -> None:
+            cb_weakref.append(weakref.ref(cb))
+
+            def _deliver() -> None:
+                gc.collect()
+                target = cb_weakref[0]()
+                assert target is not None, "Android ValueCallback was garbage-collected"
+                target.onReceiveValue("true")
+
+            threading.Timer(0.01, _deliver).start()
+
+        mocks.wv.evaluateJavascript.side_effect = _delayed_eval
 
         async def _exercise() -> list[CookieData]:
             driver = AndroidWebViewDriver()
@@ -424,7 +516,9 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
 
         assert mocks.settings.setJavaScriptEnabled.call_args.args == (True,)
         assert mocks.settings.setDomStorageEnabled.call_args.args == (True,)
-        mocks.settings.setUserAgentString.assert_called_once_with(_GALAXY_A55_UA)
+        mocks.settings.setUserAgentString.assert_called_once_with(
+            WEBVIEW_USER_AGENT
+        )
         mocks.wv.setWebViewClient.assert_called_once_with(mocks.client_cls.return_value)
         mocks.wv.setVisibility.assert_called_once_with(4)
         mocks.params_cls.assert_called_once_with(1, 1)

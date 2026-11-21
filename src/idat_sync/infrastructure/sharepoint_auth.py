@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import importlib
 import json
 import logging
-import os
-import threading
+import subprocess
+import sys
 import time
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TextIO
 from urllib.parse import urlparse
 
 from idat_sync.application.ports import (
@@ -19,14 +20,16 @@ from idat_sync.application.ports import (
     CookieData,
     StorageStateData,
 )
-from idat_sync.config import MOBILE_WEBVIEW_USER_AGENT
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
 
-_GALAXY_A55_UA = MOBILE_WEBVIEW_USER_AGENT
+_GALAXY_A55_UA = (
+    "Mozilla/5.0 (Linux; Android 14; SM-A556E) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+)
 _POLL_INTERVAL_S = 0.15
 _TIMEOUT_S = 180.0
 _SETTLE_SLEEP_S = 3
@@ -77,83 +80,227 @@ def _parse_simple_cookies(
     return result
 
 
+def _cookies_for_url(raw_cookies: list[Any], url: str) -> list[CookieData]:
+    return _parse_simple_cookies(raw_cookies, urlparse(url).hostname or "")
+
+
+def _dispatch_worker_cmd(window: Any, req: dict[str, Any]) -> object:  # noqa: ANN401
+    cmd = req.get("cmd")
+    if cmd == "goto":
+        window.load_url(req["url"])
+        return None
+    if cmd == "get_url":
+        return str(window.get_current_url() or "")
+    if cmd == "evaluate_js":
+        return window.evaluate_js(req["script"])
+    if cmd == "get_cookies":
+        return _cookies_for_url(
+            window.get_cookies() or [], str(window.get_current_url() or "")
+        )
+    raise ValueError(f"Unknown standalone worker command: {cmd!r}")
+
+
+def _run_standalone_worker(initial_url: str, stdin: TextIO, stdout: TextIO) -> None:
+    """Run a hidden pywebview window on the main thread controlled via JSON lines."""
+    webview = importlib.import_module("webview")
+    window = webview.create_window("", initial_url, hidden=True)
+
+    def _serve(win: Any) -> None:  # noqa: ANN401
+        try:
+            win.hide()
+            stdout.write(json.dumps({"ok": True}) + "\n")
+            stdout.flush()
+            for raw_line in stdin:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                req = json.loads(line)
+                if req.get("cmd") == "close":
+                    stdout.write(json.dumps({"ok": True}) + "\n")
+                    stdout.flush()
+                    break
+                try:
+                    result = _dispatch_worker_cmd(win, req)
+                    resp: dict[str, Any] = {"ok": True, "result": result}
+                except Exception as exc:
+                    resp = {"ok": False, "error": str(exc)}
+                stdout.write(json.dumps(resp) + "\n")
+                stdout.flush()
+        finally:
+            win.destroy()
+
+    webview.start(_serve, window, user_agent=_GALAXY_A55_UA)
+
+
+class _WindowBackend(Protocol):
+    """Sync backend protocol for in-process vs subprocess pywebview control."""
+
+    def goto(self, url: str) -> None:
+        """Navigate to ``url``."""
+        ...
+
+    def get_url(self) -> str:
+        """Return the current URL."""
+        ...
+
+    def evaluate_js(self, script: str) -> object:
+        """Evaluate ``script`` and return its result."""
+        ...
+
+    def get_cookies(self) -> list[CookieData]:
+        """Return cookies for the current URL."""
+        ...
+
+    def close(self) -> None:
+        """Release the underlying window or worker."""
+        ...
+
+
+class _InProcessWindow:
+    """Controls a hidden secondary window inside an active pywebview GUI loop."""
+
+    def __init__(self, window: Any) -> None:  # noqa: ANN401
+        self._window = window
+
+    def goto(self, url: str) -> None:
+        """Load ``url`` in the secondary window."""
+        self._window.load_url(url)
+
+    def get_url(self) -> str:
+        """Return the current URL of the secondary window."""
+        return str(self._window.get_current_url() or "")
+
+    def evaluate_js(self, script: str) -> object:
+        """Evaluate JavaScript in the secondary window."""
+        return self._window.evaluate_js(script)
+
+    def get_cookies(self) -> list[CookieData]:
+        """Return cookies for the secondary window's current URL."""
+        return _cookies_for_url(self._window.get_cookies() or [], self.get_url())
+
+    def close(self) -> None:
+        """Destroy the secondary window."""
+        self._window.destroy()
+
+
+class _SubprocessWorker:
+    """Controls a standalone pywebview worker subprocess via JSON lines."""
+
+    def __init__(self, initial_url: str) -> None:
+        # pywebview.start() requires the main thread; isolate standalone CLI auth
+        # in a child process so asyncio.run() can remain on the caller's main thread.
+        self._proc = subprocess.Popen(  # noqa: S603  # pylint: disable=consider-using-with
+            [sys.executable, "-m", __name__, initial_url],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self._read_response()
+
+    def _read_response(self) -> Any:  # noqa: ANN401
+        if self._proc.stdout is None:
+            raise RuntimeError("Standalone pywebview worker is not running")
+        line = self._proc.stdout.readline()
+        if not line:
+            raise RuntimeError("Standalone pywebview worker exited unexpectedly")
+        resp = json.loads(line)
+        if not resp.get("ok"):
+            raise RuntimeError(resp.get("error", "Standalone pywebview worker failed"))
+        return resp.get("result")
+
+    def _rpc(self, payload: dict[str, Any]) -> Any:  # noqa: ANN401
+        if self._proc.stdin is None:
+            raise RuntimeError("Standalone pywebview worker is not running")
+        self._proc.stdin.write(json.dumps(payload) + "\n")
+        self._proc.stdin.flush()
+        return self._read_response()
+
+    def goto(self, url: str) -> None:
+        """Load ``url`` in the worker process."""
+        self._rpc({"cmd": "goto", "url": url})
+
+    def get_url(self) -> str:
+        """Return the current URL from the worker process."""
+        return str(self._rpc({"cmd": "get_url"}) or "")
+
+    def evaluate_js(self, script: str) -> object:
+        """Evaluate JavaScript in the worker process."""
+        return self._rpc({"cmd": "evaluate_js", "script": script})
+
+    def get_cookies(self) -> list[CookieData]:
+        """Return cookies from the worker process."""
+        return self._rpc({"cmd": "get_cookies"})
+
+    def close(self) -> None:
+        """Stop the standalone worker subprocess cleanly."""
+        proc = self._proc
+        try:
+            if proc.stdin is not None and not proc.stdin.closed:
+                with contextlib.suppress(OSError):
+                    proc.stdin.write(json.dumps({"cmd": "close"}) + "\n")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+            if proc.stdout is not None and not proc.stdout.closed:
+                with contextlib.suppress(OSError):
+                    proc.stdout.close()
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+
+
 class PyWebviewDriver:
     """Desktop WebViewDriver backed by a hidden pywebview window."""
 
     def __init__(self) -> None:
         """Initialize the desktop driver with no active window."""
-        self._window: Any | None = None
+        self._backend: _WindowBackend | None = None
         self._current_url = ""
-        self._standalone_thread: threading.Thread | None = None
 
-    def _ensure_window(self, url: str) -> object:
+    def _ensure_backend(self, url: str) -> None:
+        if self._backend is not None:
+            self._backend.goto(url)
+            return
         webview = importlib.import_module("webview")
-        if self._window is not None:
-            self._window.load_url(url)
-            return self._window
-
-        has_gui = bool(getattr(webview, "windows", None))
-        self._window = webview.create_window("", url, hidden=True)
-        if has_gui:
+        if getattr(webview, "windows", None):
+            window = webview.create_window("", url, hidden=True)
             # Linux GTK dynamic secondary windows ignore hidden=True once running.
-            self._window.hide()
-            return self._window
-
-        ready = threading.Event()
-        errors: list[Exception] = []
-
-        def _run_standalone() -> None:
-            try:
-                webview.start(ready.set, user_agent=_GALAXY_A55_UA)
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                errors.append(exc)
-            finally:
-                ready.set()
-
-        self._standalone_thread = threading.Thread(target=_run_standalone, daemon=True)
-        self._standalone_thread.start()
-        ready.wait(timeout=_TIMEOUT_S)
-        if errors:
-            raise errors[0]
-        return self._window
+            window.hide()
+            self._backend = _InProcessWindow(window)
+            return
+        self._backend = _SubprocessWorker(url)
 
     async def goto(self, url: str) -> None:
         """Open or navigate the hidden pywebview window to ``url``."""
         self._current_url = url
-        await asyncio.to_thread(self._ensure_window, url)
+        await asyncio.to_thread(self._ensure_backend, url)
 
     async def get_url(self) -> str:
         """Return the current URL of the pywebview window."""
-        if self._window is None:
+        if self._backend is None:
             return self._current_url
-        url = await asyncio.to_thread(self._window.get_current_url)
+        url = await asyncio.to_thread(self._backend.get_url)
         if url:
-            self._current_url = str(url)
+            self._current_url = url
         return self._current_url
 
     async def evaluate_js(self, script: str) -> object:
         """Evaluate JavaScript in the hidden pywebview window."""
-        if self._window is None:
+        if self._backend is None:
             return None
-        return await asyncio.to_thread(self._window.evaluate_js, script)
+        return await asyncio.to_thread(self._backend.evaluate_js, script)
 
     async def get_cookies(self) -> list[CookieData]:
         """Return cookies for the current URL from pywebview."""
-        if self._window is None:
+        if self._backend is None:
             return []
-        current_url = await self.get_url()
-        fallback_domain = urlparse(current_url).hostname or ""
-        raw_cookies = await asyncio.to_thread(self._window.get_cookies)
-        return _parse_simple_cookies(raw_cookies or [], fallback_domain)
+        return await asyncio.to_thread(self._backend.get_cookies)
 
     async def aclose(self) -> None:
-        """Destroy the hidden pywebview window if it was created."""
-        window, self._window = self._window, None
-        thread, self._standalone_thread = self._standalone_thread, None
-        if window is not None:
-            await asyncio.to_thread(window.destroy)
-        if thread is not None and thread.is_alive():
-            await asyncio.to_thread(thread.join, 5.0)
+        """Destroy the hidden pywebview window or stop the standalone worker."""
+        backend, self._backend = self._backend, None
+        if backend is not None:
+            await asyncio.to_thread(backend.close)
 
 
 def _parse_cookie_header(header: str, domain: str) -> list[CookieData]:
@@ -246,6 +393,8 @@ class AndroidWebViewDriver:
             return None
         wv = self._webview
         result_future: Future[object] = Future()
+        # Hold a strong reference so pyjnius cannot GC the Java proxy before callback.
+        callback_ref: list[object] = []
 
         def _eval() -> None:
             jnius = importlib.import_module("jnius")
@@ -261,10 +410,13 @@ class AndroidWebViewDriver:
                     if not result_future.done():
                         result_future.set_result(value)
 
-            wv.evaluateJavascript(script, _Callback())
+            callback = _Callback()
+            callback_ref.append(callback)
+            wv.evaluateJavascript(script, callback)
 
         await asyncio.to_thread(self._run_on_ui_thread, _eval)
         raw = await asyncio.to_thread(result_future.result, _TIMEOUT_S)
+        callback_ref.clear()
         if raw is None or raw in {"null", "undefined"}:
             return None
         try:
@@ -303,23 +455,18 @@ class AndroidWebViewDriver:
         await asyncio.to_thread(self._run_on_ui_thread, _destroy)
 
 
-def _create_default_driver() -> WebViewDriver:
-    """Select AndroidWebViewDriver on Android and PyWebviewDriver on desktop."""
-    if "ANDROID_ARGUMENT" in os.environ or "ANDROID_BOOTLOGO" in os.environ:
-        return AndroidWebViewDriver()
-    return PyWebviewDriver()
-
-
 def _js_visible_el(selector: str, body: str) -> str:
     sel_json = json.dumps(selector)
     return (
         f"(() => {{"
-        f"const el = document.querySelector({sel_json});"
-        f"if (!el) return false;"
+        f"for (const el of document.querySelectorAll({sel_json})) {{"
         f"const r = el.getBoundingClientRect();"
-        f"if (r.width <= 0 || r.height <= 0) return false;"
+        f"if (r.width > 0 && r.height > 0) {{"
         f"{body}"
         f"return true;"
+        f"}}"
+        f"}}"
+        f"return false;"
         f"}})()"
     )
 
@@ -419,13 +566,13 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
         sharepoint_host: str,
         sharepoint_personal_host: str,
         email_domain: str,
-        driver_factory: Callable[[], WebViewDriver] | None = None,
+        driver_factory: Callable[[], WebViewDriver],
     ) -> None:
         """Initialize the authenticator with SharePoint hosts and email domain."""
         self.sharepoint_host = sharepoint_host
         self.sharepoint_personal_host = sharepoint_personal_host
         self.email_domain = email_domain
-        self._driver_factory = driver_factory or _create_default_driver
+        self._driver_factory = driver_factory
 
     async def _complete_login(
         self,
@@ -507,3 +654,7 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
             raise AuthenticationError(
                 "SharePoint browser authentication failed"
             ) from exc
+
+
+if __name__ == "__main__" and len(sys.argv) > 1:
+    _run_standalone_worker(sys.argv[1], sys.stdin, sys.stdout)

@@ -9,6 +9,7 @@ import json
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -40,10 +41,13 @@ from idat_sync.application.ports import (
     SharepointAuthPort,
     StorageStateData,
 )
+from idat_sync.application.sync_service import IDATSync
+from idat_sync.bootstrap import WEBVIEW_USER_AGENT
 from idat_sync.config import SyncConfig
 from idat_sync.domain.course import Course, CourseSection
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.ui.app import AppFrame, MainApp
+from idat_sync.ui.base import FolderSelection
 from idat_sync.ui.course_tree import CourseTree, RowStatus
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
@@ -751,6 +755,8 @@ class TestLoginFrame(unittest.TestCase):
         assert not hasattr(AppFrame, "exit")
         assert "LoadingDialog" not in ui_pkg.__all__
         assert not hasattr(ui_pkg, "LoadingDialog")
+        assert "Icons" not in ui_pkg.__all__
+        assert not hasattr(ui_pkg, "Icons")
         ui_dir = Path(ui_pkg.__file__).resolve().parent
         assert not (ui_dir / "dialogs.py").exists()
         assert not (ui_dir / "icons.py").exists()
@@ -806,6 +812,10 @@ class _SyncStubMaster:
         """Count state pushes."""
         self.push_count += 1
 
+    def pick_folder(self) -> FolderSelection:
+        """Simulate an unavailable desktop dialog."""
+        return FolderSelection(available=False)
+
 
 class TestSyncFrame(unittest.TestCase):
     """Tests for pure-Python SyncFrame selection, sync progress, and cancellation."""
@@ -838,7 +848,7 @@ class TestSyncFrame(unittest.TestCase):
                 assert not hasattr(frame, "progress_queue")
                 assert not hasattr(frame, "update_progress")
                 assert not hasattr(frame, "exit")
-                mock_sync = MagicMock()
+                mock_sync = MagicMock(spec=IDATSync)
                 mock_sync.aclose = AsyncMock()
                 mock_sync.list_courses = AsyncMock(
                     return_value=[past_course, current_course]
@@ -980,29 +990,37 @@ class TestSyncFrame(unittest.TestCase):
 
             mock_window = MagicMock()
             mock_window.create_file_dialog.return_value = ("/chosen/sync/dir",)
+            fake_webview = types.SimpleNamespace(
+                FileDialog=types.SimpleNamespace(FOLDER=20)
+            )
             desktop_app = MainApp(config=config, window=mock_window)
             frame = SyncFrame(desktop_app, creds, config)
-            with patch.dict("os.environ", {}, clear=False):
-                chosen = frame.browse_folder()
-            assert chosen == "/chosen/sync/dir"
+            with (
+                patch.dict("os.environ", {}, clear=False),
+                patch.dict(sys.modules, {"webview": fake_webview}),
+            ):
+                assert frame.browse_folder() == "/chosen/sync/dir"
             assert frame.folder_path == "/chosen/sync/dir"
 
             mock_window.create_file_dialog.return_value = None
-            with patch.dict("os.environ", {}, clear=False):
-                cancelled = frame.browse_folder()
-            assert cancelled == "/chosen/sync/dir"
+            with (
+                patch.dict("os.environ", {}, clear=False),
+                patch.dict(sys.modules, {"webview": fake_webview}),
+            ):
+                assert frame.browse_folder() == "/chosen/sync/dir"
             assert frame.folder_path == "/chosen/sync/dir"
 
-            android_app = MainApp(config=config, window=None)
-            android_frame = SyncFrame(android_app, creds, config)
+            android_frame = SyncFrame(
+                MainApp(config=config, window=None), creds, config
+            )
             with patch.dict(
                 "os.environ",
                 {"ANDROID_ARGUMENT": "1", "EXTERNAL_STORAGE": "/sdcard"},
                 clear=False,
             ):
-                fallback = android_frame.browse_folder()
-            assert fallback == str(Path("/sdcard") / "Download" / "idat-sync")
-            assert android_frame.folder_path == fallback
+                expected = str(Path("/sdcard") / "Download" / "idat-sync")
+                assert android_frame.browse_folder() == expected
+            assert android_frame.folder_path == expected
 
     def test_sync_frame_closes_partial_service_and_logout_switches_on_aclose_error(
         self,
@@ -1020,7 +1038,7 @@ class TestSyncFrame(unittest.TestCase):
             async def exercise() -> None:
                 master = _SyncStubMaster()
                 frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
-                partial_sync = MagicMock()
+                partial_sync = MagicMock(spec=IDATSync)
                 partial_sync.aclose = AsyncMock()
                 partial_sync.list_courses = AsyncMock(
                     side_effect=RemoteServiceError("list failed")
@@ -1043,7 +1061,7 @@ class TestSyncFrame(unittest.TestCase):
                     await frame.load_idat_sync(creds)
                 assert "Sync service failed to initialize" in frame.status
 
-                failing_sync = MagicMock()
+                failing_sync = MagicMock(spec=IDATSync)
                 failing_sync.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
                 frame.idat_sync = failing_sync
                 with pytest.raises(RuntimeError, match="close boom"):
@@ -1244,7 +1262,10 @@ class TestSyncFrame(unittest.TestCase):
             def fake_start(**kwargs):
                 nonlocal loop_was_running
                 loop_was_running = app.loop.is_running()
-                assert kwargs.get("user_agent") == app_module._GALAXY_A55_UA  # noqa: SLF001  # pylint: disable=protected-access
+                assert kwargs.get("user_agent") == WEBVIEW_USER_AGENT
+                # Triggering closing event closes frame without re-entrant destroy().
+                app._on_window_closing()  # noqa: SLF001  # pylint: disable=protected-access
+                fake_window.destroy.assert_not_called()
 
             fake_webview = MagicMock()
             fake_webview.create_window.return_value = fake_window
@@ -1258,9 +1279,11 @@ class TestSyncFrame(unittest.TestCase):
             fake_webview.create_window.assert_called_once()
             create_kwargs = fake_webview.create_window.call_args.kwargs
             assert create_kwargs["html"] == expected_html
-            assert create_kwargs["js_api"].get_state()["view"] == "login"
+            js_api = create_kwargs["js_api"]
+            assert js_api.get_state()["view"] == "login"
+            assert hasattr(js_api, "set_folder_path")
             fake_webview.start.assert_called_once_with(
-                user_agent=app_module._GALAXY_A55_UA  # noqa: SLF001  # pylint: disable=protected-access
+                user_agent=WEBVIEW_USER_AGENT
             )
 
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
@@ -1319,7 +1342,7 @@ class TestSyncFrame(unittest.TestCase):
                         raise
                     yield  # pragma: no cover
 
-                mock_service = MagicMock()
+                mock_service = MagicMock(spec=IDATSync)
                 mock_service.sync_courses = slow_sync_courses
                 mock_service.aclose = AsyncMock()
                 frame.idat_sync = mock_service
@@ -1486,6 +1509,29 @@ class TestCourseTree(unittest.TestCase):
             "100%",
         )
 
+    def test_folder_nodes_track_aggregate_status_and_progress(self):
+        """Folder rows report aggregate status and 0%-100% progress."""
+        ct = CourseTree()
+        c_past = Course(id=1, name="Past")
+        c_cur = Course(id=2, name="Current")
+        ordered = ct.set_courses([c_past, c_cur], selected={2}, in_progress={2})
+        assert [c.id for c in ordered] == [2, 1]
+        assert [row["id"] for row in ct.to_dict()] == [2, 1]
+
+        c_dir = Path("Current")
+        synced_p = c_dir / "S1" / "done.pdf"
+        pending_p = c_dir / "S1" / "todo.pdf"
+        ct.show_files(2, c_dir, (synced_p,), (pending_p,))
+        s1 = ct.to_dict()[0]["children"][0]
+        assert (s1["status"], s1["progress"]) == (RowStatus.PENDING, "50%")
+
+        ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
+        assert ct.to_dict()[0]["children"][0]["status"] == RowStatus.DOWNLOADING
+
+        ct.set_file_status(pending_p, RowStatus.COMPLETED)
+        s1 = ct.to_dict()[0]["children"][0]
+        assert (s1["status"], s1["progress"]) == (RowStatus.COMPLETED, "100%")
+
     def test_folder_nodes_emit_unique_ids_across_courses(self):
         """Folder nodes emit unique IDs so collapsing one does not toggle others."""
         ct = CourseTree()
@@ -1526,6 +1572,16 @@ class TestCourseTree(unittest.TestCase):
         ct.set_course_status(1, RowStatus.FETCHING)
         ct.show_files(1, c_dir, (), (c_dir / "new.pdf",))
         assert ct.to_dict()[0]["progress"] == "0%"
+
+    def test_failed_course_before_file_discovery_shows_zero_percent(self):
+        """A course failing during FETCHING before show_files stays at 0%."""
+        ct = CourseTree()
+        ct.set_courses([Course(id=1, name="Course One")], selected={1})
+        ct.set_course_status(1, RowStatus.FETCHING)
+        ct.set_course_status(1, RowStatus.FAILED)
+        row = ct.to_dict()[0]
+        assert row["status"] == RowStatus.FAILED
+        assert row["progress"] == "0%"
 
 
 if __name__ == "__main__":

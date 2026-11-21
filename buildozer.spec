@@ -10,6 +10,7 @@ orientation = portrait
 fullscreen = 0
 
 android.permissions = INTERNET,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
+# Build pywebview-android.jar from r0x0r/pywebview interop/android before packaging:
 android.add_jars = pywebview-android.jar
 android.api = 34
 android.minapi = 24

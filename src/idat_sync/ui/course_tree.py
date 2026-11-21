@@ -45,7 +45,12 @@ class _FileNode:
 
     name: str
     status: RowStatus
-    progress: str
+
+    @property
+    def progress(self) -> Progress:
+        """Return 1/1 when synced or completed, else 0/1."""
+        done = 1 if self.status in {RowStatus.SYNCED, RowStatus.COMPLETED} else 0
+        return Progress(done=done, total=1)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize file node for frontend rendering."""
@@ -53,8 +58,29 @@ class _FileNode:
             "type": "file",
             "name": self.name,
             "status": str(self.status),
-            "progress": self.progress,
+            "progress": str(self.progress),
         }
+
+
+def _aggregate_folder_state(
+    files: list[_FileNode],
+) -> tuple[RowStatus, Progress]:
+    """Compute aggregate status and progress across a folder's descendant files."""
+    total = len(files)
+    done = sum(f.progress.done for f in files)
+    progress = Progress(done=done, total=total)
+    statuses = {f.status for f in files}
+    if RowStatus.DOWNLOADING in statuses:
+        status = RowStatus.DOWNLOADING
+    elif RowStatus.FAILED in statuses:
+        status = RowStatus.FAILED
+    elif total and statuses == {RowStatus.SYNCED}:
+        status = RowStatus.SYNCED
+    elif done == total:
+        status = RowStatus.COMPLETED
+    else:
+        status = RowStatus.PENDING
+    return status, progress
 
 
 @dataclass
@@ -66,8 +92,15 @@ class _FolderNode:
     folders: dict[str, _FolderNode] = field(default_factory=dict)
     files: dict[str, _FileNode] = field(default_factory=dict)
 
+    def _iter_files(self) -> list[_FileNode]:
+        descendants = list(self.files.values())
+        for folder in self.folders.values():
+            descendants.extend(folder._iter_files())  # noqa: SLF001  # pylint: disable=protected-access
+        return descendants
+
     def to_dict(self) -> dict[str, Any]:
-        """Serialize folder node and its children for frontend rendering."""
+        """Serialize folder node, aggregate progress/status, and children."""
+        status, progress = _aggregate_folder_state(self._iter_files())
         children = [f.to_dict() for f in self.folders.values()] + [
             f.to_dict() for f in self.files.values()
         ]
@@ -75,6 +108,8 @@ class _FolderNode:
             "id": self.id,
             "type": "folder",
             "name": self.name,
+            "status": str(status),
+            "progress": str(progress),
             "open": True,
             "children": children,
         }
@@ -119,16 +154,28 @@ class CourseTree:
         self._nodes: dict[int, _CourseNode] = {}
         self._file_to_course: dict[Path, tuple[int, _FileNode]] = {}
 
-    def set_courses(self, courses: Sequence[Course], selected: set[int]) -> None:
-        """Replace all course rows with ``courses`` and apply initial ``selected``."""
+    def set_courses(
+        self,
+        courses: Sequence[Course],
+        selected: set[int],
+        in_progress: set[int] | None = None,
+    ) -> list[Course]:
+        """Replace course rows, ordering ``in_progress`` first when given."""
+        ordered = (
+            [c for c in courses if c.id in in_progress]
+            + [c for c in courses if c.id not in in_progress]
+            if in_progress is not None
+            else list(courses)
+        )
         self._nodes.clear()
         self._file_to_course.clear()
-        for course in courses:
+        for course in ordered:
             self._nodes[course.id] = _CourseNode(
                 course_id=course.id,
                 name=course.name,
                 checked=course.id in selected,
             )
+        return ordered
 
     def refresh_selection(self, selected: set[int]) -> None:
         """Update checked state for all loaded course rows."""
@@ -157,11 +204,9 @@ class CourseTree:
         if (node := self._nodes.get(course_id)) is None:
             return
         for path in synced:
-            self._insert_file(node, course_dir, path, RowStatus.SYNCED, "100%")
+            self._insert_file(node, course_dir, path, RowStatus.SYNCED)
         for path in pending:
-            file_node = self._insert_file(
-                node, course_dir, path, RowStatus.PENDING, "0%"
-            )
+            file_node = self._insert_file(node, course_dir, path, RowStatus.PENDING)
             node.file_paths.add(path)
             self._file_to_course[path] = (course_id, file_node)
 
@@ -179,7 +224,6 @@ class CourseTree:
             return
         course_id, file_node = entry
         file_node.status = status
-        file_node.progress = "100%" if status is RowStatus.COMPLETED else "0%"
         if (
             status is RowStatus.COMPLETED
             and (node := self._nodes.get(course_id)) is not None
@@ -197,7 +241,11 @@ class CourseTree:
             node.progress = Progress()
         if status is RowStatus.COMPLETED:
             pct = "100%"
-        elif status is RowStatus.FAILED and node.progress is not None:
+        elif (
+            status is RowStatus.FAILED
+            and node.progress is not None
+            and node.progress.total
+        ):
             pct = str(node.progress)
         else:
             pct = "0%"
@@ -221,11 +269,10 @@ class CourseTree:
         course_dir: Path,
         path: Path,
         status: RowStatus,
-        progress: str,
     ) -> _FileNode:
         rel = path.relative_to(course_dir) if path.is_relative_to(course_dir) else path
         folder_parts = rel.parts[:-1]
-        file_node = _FileNode(name=rel.name, status=status, progress=progress)
+        file_node = _FileNode(name=rel.name, status=status)
         if not folder_parts:
             node.root_files[rel.name] = file_node
             return file_node

@@ -43,8 +43,7 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         config: SyncConfig,
     ) -> None:
         """Initialize sync state and empty course tree."""
-        super().__init__()
-        self.app = app
+        super().__init__(app)
         self.credentials = credentials
         self.config = config
         self.idat_sync: IDATSync | None = None
@@ -88,11 +87,11 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
 
     def browse_folder(self) -> str:
         """Choose a sync directory via desktop dialog or Android Downloads fallback."""
-        pick_folder = getattr(self.app, "pick_folder", None)
-        if callable(pick_folder) and (chosen := pick_folder()) is not None:
-            if chosen:
-                self.set_folder_path(chosen)
-                return chosen
+        selection = self.app.pick_folder()
+        if selection.available:
+            if selection.path:
+                self.set_folder_path(selection.path)
+                return selection.path
             return self.folder_path
 
         default_dir = str(
@@ -109,12 +108,11 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
 
     def _populate_courses(self, courses: Sequence[Course]) -> None:
         self.in_progress_ids = get_in_progress_course_ids(courses)
-        self.courses = [c for c in courses if c.id in self.in_progress_ids] + [
-            c for c in courses if c.id not in self.in_progress_ids
-        ]
         self.selected_course_ids = set(self.in_progress_ids)
+        self.courses = self.course_tree.set_courses(
+            courses, self.selected_course_ids, in_progress=self.in_progress_ids
+        )
         self.courses_loaded = True
-        self.course_tree.set_courses(self.courses, self.selected_course_ids)
         self.status = f"Loaded {len(self.courses)} courses."
         self._notify()
 
