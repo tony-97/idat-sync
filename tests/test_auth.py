@@ -970,32 +970,39 @@ class TestSyncFrame(unittest.TestCase):
             asyncio.run(exercise())
 
     def test_sync_frame_browse_folder_desktop_and_android_fallback(self):
-        """Use desktop window folder dialog when available, else Android Downloads."""
+        """Use MainApp desktop folder dialog when available, else Android Downloads."""
         creds: Credentials = {
             "token": "t",
             "sharepoint_storage_state": {"cookies": []},
         }
-        config = SyncConfig()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = SyncConfig(session_file=Path(tmpdir) / "missing_credentials.json")
 
-        mock_window = MagicMock()
-        mock_window.create_file_dialog.return_value = ("/chosen/sync/dir",)
-        desktop_app = _SyncStubMaster(window=mock_window)
-        frame = SyncFrame(desktop_app, creds, config)  # type: ignore[arg-type]
-        with patch.dict("os.environ", {}, clear=False):
-            chosen = frame.browse_folder()
-        assert chosen == "/chosen/sync/dir"
-        assert frame.folder_path == "/chosen/sync/dir"
+            mock_window = MagicMock()
+            mock_window.create_file_dialog.return_value = ("/chosen/sync/dir",)
+            desktop_app = MainApp(config=config, window=mock_window)
+            frame = SyncFrame(desktop_app, creds, config)
+            with patch.dict("os.environ", {}, clear=False):
+                chosen = frame.browse_folder()
+            assert chosen == "/chosen/sync/dir"
+            assert frame.folder_path == "/chosen/sync/dir"
 
-        android_app = _SyncStubMaster(window=None)
-        android_frame = SyncFrame(android_app, creds, config)  # type: ignore[arg-type]
-        with patch.dict(
-            "os.environ",
-            {"ANDROID_ARGUMENT": "1", "EXTERNAL_STORAGE": "/sdcard"},
-            clear=False,
-        ):
-            fallback = android_frame.browse_folder()
-        assert fallback == str(Path("/sdcard") / "Download" / "idat-sync")
-        assert android_frame.folder_path == fallback
+            mock_window.create_file_dialog.return_value = None
+            with patch.dict("os.environ", {}, clear=False):
+                cancelled = frame.browse_folder()
+            assert cancelled == "/chosen/sync/dir"
+            assert frame.folder_path == "/chosen/sync/dir"
+
+            android_app = MainApp(config=config, window=None)
+            android_frame = SyncFrame(android_app, creds, config)
+            with patch.dict(
+                "os.environ",
+                {"ANDROID_ARGUMENT": "1", "EXTERNAL_STORAGE": "/sdcard"},
+                clear=False,
+            ):
+                fallback = android_frame.browse_folder()
+            assert fallback == str(Path("/sdcard") / "Download" / "idat-sync")
+            assert android_frame.folder_path == fallback
 
     def test_sync_frame_closes_partial_service_and_logout_switches_on_aclose_error(
         self,
@@ -1101,9 +1108,9 @@ class TestSyncFrame(unittest.TestCase):
         asyncio.run(exercise())
 
     def test_main_app_initial_frame_switching_and_state_push(self):
-        """Select initial frame from auth state, switch views, and push JSON state."""
+        """Select initial frame from credentials, switch views, and push JSON state."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            creds_path = Path(tmpdir) / "session.json"
+            creds_path = Path(tmpdir) / "credentials.json"
             cfg = SyncConfig(session_file=creds_path)
             mock_window = MagicMock()
             app = MainApp(config=cfg, window=mock_window)
@@ -1157,7 +1164,7 @@ class TestSyncFrame(unittest.TestCase):
 
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
-                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                cfg = SyncConfig(session_file=Path(tmpdir) / "credentials.json")
                 mock_window = MagicMock()
                 app = MainApp(config=cfg, window=mock_window)
                 try:
@@ -1194,7 +1201,7 @@ class TestSyncFrame(unittest.TestCase):
 
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
-                creds_path = Path(tmpdir) / "session.json"
+                creds_path = Path(tmpdir) / "credentials.json"
                 cfg = SyncConfig(session_file=creds_path)
                 app = MainApp(config=cfg, window=MagicMock())
                 try:
@@ -1223,7 +1230,7 @@ class TestSyncFrame(unittest.TestCase):
     def test_main_app_run_starts_webview_with_bundled_html_and_ua(self):
         """Load bundled index.html via importlib.resources and start webview."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = SyncConfig(session_file=Path(tmpdir) / "missing_session.json")
+            cfg = SyncConfig(session_file=Path(tmpdir) / "missing_credentials.json")
             app = MainApp(config=cfg)
             expected_html = (
                 importlib.resources.files("idat_sync.ui")
@@ -1478,6 +1485,47 @@ class TestCourseTree(unittest.TestCase):
             RowStatus.COMPLETED,
             "100%",
         )
+
+    def test_folder_nodes_emit_unique_ids_across_courses(self):
+        """Folder nodes emit unique IDs so collapsing one does not toggle others."""
+        ct = CourseTree()
+        ct.set_courses(
+            [Course(id=1, name="Course One"), Course(id=2, name="Course Two")],
+            selected={1, 2},
+        )
+        ct.show_files(
+            1,
+            Path("Course One"),
+            (Path("Course One/S1/Sub/a.pdf"),),
+            (),
+        )
+        ct.show_files(
+            2,
+            Path("Course Two"),
+            (Path("Course Two/S1/b.pdf"),),
+            (),
+        )
+
+        rows = ct.to_dict()
+        c1_s1 = rows[0]["children"][0]
+        c1_sub = c1_s1["children"][0]
+        c2_s1 = rows[1]["children"][0]
+        assert c1_s1["id"]
+        assert c1_sub["id"]
+        assert c2_s1["id"]
+        assert len({c1_s1["id"], c1_sub["id"], c2_s1["id"]}) == 3
+
+    def test_fetching_status_initializes_progress_without_stale_counts(self):
+        """Transitioning to FETCHING resets Progress even without reset_for_sync."""
+        ct = CourseTree()
+        ct.set_courses([Course(id=1, name="Course One")], selected={1})
+        c_dir = Path("Course One")
+        ct.show_files(1, c_dir, (c_dir / "old.pdf",), ())
+        assert ct.to_dict()[0]["progress"] == "100%"
+
+        ct.set_course_status(1, RowStatus.FETCHING)
+        ct.show_files(1, c_dir, (), (c_dir / "new.pdf",))
+        assert ct.to_dict()[0]["progress"] == "0%"
 
 
 if __name__ == "__main__":

@@ -32,23 +32,6 @@ if TYPE_CHECKING:
     from idat_sync.config import SyncConfig
     from idat_sync.ui.app import MainApp
 
-_FALLBACK_FOLDER_DIALOG = 20
-
-
-def _is_android() -> bool:
-    return "ANDROID_ARGUMENT" in os.environ or "ANDROID_BOOTLOGO" in os.environ
-
-
-def _folder_dialog_type() -> Any:  # noqa: ANN401
-    try:
-        import webview  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return _FALLBACK_FOLDER_DIALOG
-    file_dialog = getattr(webview, "FileDialog", None)
-    if file_dialog is not None and hasattr(file_dialog, "FOLDER"):
-        return file_dialog.FOLDER
-    return getattr(webview, "FOLDER_DIALOG", _FALLBACK_FOLDER_DIALOG)
-
 
 class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
     """Component controller for selecting courses and monitoring sync progress."""
@@ -105,22 +88,9 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
 
     def browse_folder(self) -> str:
         """Choose a sync directory via desktop dialog or Android Downloads fallback."""
-        window = getattr(self.app, "window", None)
-        if (
-            not _is_android()
-            and window is not None
-            and hasattr(window, "create_file_dialog")
-        ):
-            selected = window.create_file_dialog(
-                _folder_dialog_type(),
-                directory=str(Path.home()),
-            )
-            if selected:
-                chosen = (
-                    selected[0]
-                    if isinstance(selected, (list, tuple))
-                    else str(selected)
-                )
+        pick_folder = getattr(self.app, "pick_folder", None)
+        if callable(pick_folder) and (chosen := pick_folder()) is not None:
+            if chosen:
                 self.set_folder_path(chosen)
                 return chosen
             return self.folder_path

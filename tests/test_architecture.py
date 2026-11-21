@@ -20,8 +20,22 @@ FORBIDDEN_INNER_LAYER_IMPORTS: tuple[str, ...] = (
 )
 
 
+def _dynamic_import_target(node: ast.AST) -> str | None:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "import_module"
+        and node.args
+    ):
+        return None
+    arg = node.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
 def iter_module_imports(py_file: Path) -> list[tuple[int, str]]:
-    """Return (lineno, module_name) pairs from AST Import and ImportFrom nodes."""
+    """Return (lineno, module_name) pairs from static and import_module() imports."""
     tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
     imports: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -29,6 +43,8 @@ def iter_module_imports(py_file: Path) -> list[tuple[int, str]]:
             imports.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.append((node.lineno, node.module))
+        elif (target := _dynamic_import_target(node)) is not None:
+            imports.append((node.lineno, target))
     return imports
 
 
@@ -142,6 +158,19 @@ class TestArchitectureBoundaries(unittest.TestCase):
             if matches_prefix(name, ("idat_sync.infrastructure",))
         ]
         assert violations == [], f"Forbidden infrastructure imports in ui: {violations}"
+
+    def test_webview_isolated_to_app_and_sharepoint_auth(self):
+        """Ensure webview imports are confined to ui/app.py and sharepoint_auth.py."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        allowed = {"ui/app.py", "infrastructure/sharepoint_auth.py"}
+        violations = [
+            f"{py_file.relative_to(src_root).as_posix()}:{lineno} imports {name}"
+            for py_file in src_root.rglob("*.py")
+            if py_file.relative_to(src_root).as_posix() not in allowed
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, ("webview",))
+        ]
+        assert not violations, f"webview imported outside allowed modules: {violations}"
 
 
 if __name__ == "__main__":

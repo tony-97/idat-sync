@@ -53,10 +53,8 @@ class LoginFrame(AppFrame):
         return {
             "view": "login",
             "username": self.username,
-            "password": self.password,
             "error": self.error,
             "is_login": self.is_login,
-            "can_login": self.can_login,
             "mfa_open": self.mfa_open,
         }
 

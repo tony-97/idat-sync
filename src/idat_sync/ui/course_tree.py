@@ -61,6 +61,7 @@ class _FileNode:
 class _FolderNode:
     """Nested folder node containing child folders and leaf files."""
 
+    id: str
     name: str
     folders: dict[str, _FolderNode] = field(default_factory=dict)
     files: dict[str, _FileNode] = field(default_factory=dict)
@@ -71,6 +72,7 @@ class _FolderNode:
             f.to_dict() for f in self.files.values()
         ]
         return {
+            "id": self.id,
             "type": "folder",
             "name": self.name,
             "open": True,
@@ -191,6 +193,8 @@ class CourseTree:
         """Update a course row's status and percentage."""
         if (node := self._nodes.get(course_id)) is None:
             return
+        if status is RowStatus.FETCHING:
+            node.progress = Progress()
         if status is RowStatus.COMPLETED:
             pct = "100%"
         elif status is RowStatus.FAILED and node.progress is not None:
@@ -225,11 +229,17 @@ class CourseTree:
         if not folder_parts:
             node.root_files[rel.name] = file_node
             return file_node
+        prefix = folder_parts[0]
         current = node.root_folders.setdefault(
-            folder_parts[0], _FolderNode(name=folder_parts[0])
+            prefix,
+            _FolderNode(id=f"folder:{node.course_id}:{prefix}", name=prefix),
         )
         for part in folder_parts[1:]:
-            current = current.folders.setdefault(part, _FolderNode(name=part))
+            prefix = f"{prefix}/{part}"
+            current = current.folders.setdefault(
+                part,
+                _FolderNode(id=f"folder:{node.course_id}:{prefix}", name=part),
+            )
         current.files[rel.name] = file_node
         return file_node
 

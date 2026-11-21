@@ -19,16 +19,14 @@ from idat_sync.application.ports import (
     CookieData,
     StorageStateData,
 )
+from idat_sync.config import MOBILE_WEBVIEW_USER_AGENT
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
 
-_GALAXY_A55_UA = (
-    "Mozilla/5.0 (Linux; Android 14; SM-A556E) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-)
+_GALAXY_A55_UA = MOBILE_WEBVIEW_USER_AGENT
 _POLL_INTERVAL_S = 0.15
 _TIMEOUT_S = 180.0
 _SETTLE_SLEEP_S = 3
@@ -312,49 +310,38 @@ def _create_default_driver() -> WebViewDriver:
     return PyWebviewDriver()
 
 
-def _js_is_visible(selector: str) -> str:
+def _js_visible_el(selector: str, body: str) -> str:
     sel_json = json.dumps(selector)
-    return (
-        f"(() => {{"
-        f"const el = document.querySelector({sel_json});"
-        f"if (!el) return false;"
-        f"const r = el.getBoundingClientRect();"
-        f"return r.width > 0 && r.height > 0;"
-        f"}})()"
-    )
-
-
-def _js_fill(selector: str, value: str) -> str:
-    sel_json = json.dumps(selector)
-    val_json = json.dumps(value)
     return (
         f"(() => {{"
         f"const el = document.querySelector({sel_json});"
         f"if (!el) return false;"
         f"const r = el.getBoundingClientRect();"
         f"if (r.width <= 0 || r.height <= 0) return false;"
+        f"{body}"
+        f"return true;"
+        f"}})()"
+    )
+
+
+def _js_is_visible(selector: str) -> str:
+    return _js_visible_el(selector, "")
+
+
+def _js_fill(selector: str, value: str) -> str:
+    val_json = json.dumps(value)
+    return _js_visible_el(
+        selector,
         f"const setter = Object.getOwnPropertyDescriptor("
         f"window.HTMLInputElement.prototype, 'value').set;"
         f"setter.call(el, {val_json});"
         f"el.dispatchEvent(new Event('input', {{ bubbles: true }}));"
-        f"el.dispatchEvent(new Event('change', {{ bubbles: true }}));"
-        f"return true;"
-        f"}})()"
+        f"el.dispatchEvent(new Event('change', {{ bubbles: true }}));",
     )
 
 
 def _js_click(selector: str) -> str:
-    sel_json = json.dumps(selector)
-    return (
-        f"(() => {{"
-        f"const el = document.querySelector({sel_json});"
-        f"if (!el) return false;"
-        f"const r = el.getBoundingClientRect();"
-        f"if (r.width <= 0 || r.height <= 0) return false;"
-        f"el.click();"
-        f"return true;"
-        f"}})()"
-    )
+    return _js_visible_el(selector, "el.click();")
 
 
 def _url_matches(url: str, pattern: str) -> bool:

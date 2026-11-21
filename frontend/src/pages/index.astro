@@ -137,7 +137,6 @@ import ActionFooter from "../components/ActionFooter.astro";
             toggle.setAttribute("aria-label", open ? "Collapse" : "Expand");
             toggle.addEventListener("click", () => {
               openOverrides.set(node.id, !open);
-              callApi("toggle_node", node.id);
               renderTree(currentState.courses || [], Boolean(currentState.is_syncing));
             });
             left.appendChild(toggle);

@@ -7,10 +7,13 @@ import contextlib
 import importlib
 import importlib.resources
 import json
+import os
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from idat_sync.bootstrap import create_auth_service
+from idat_sync.config import MOBILE_WEBVIEW_USER_AGENT
 from idat_sync.ui.base import AppFrame
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
@@ -20,10 +23,23 @@ if TYPE_CHECKING:
 
     from idat_sync.config import SyncConfig
 
-_GALAXY_A55_UA = (
-    "Mozilla/5.0 (Linux; Android 14; SM-A556E) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-)
+_GALAXY_A55_UA = MOBILE_WEBVIEW_USER_AGENT
+_FALLBACK_FOLDER_DIALOG = 20
+
+
+def _is_android() -> bool:
+    return "ANDROID_ARGUMENT" in os.environ or "ANDROID_BOOTLOGO" in os.environ
+
+
+def _folder_dialog_type() -> Any:  # noqa: ANN401
+    try:
+        webview = importlib.import_module("webview")
+    except ImportError:
+        return _FALLBACK_FOLDER_DIALOG
+    file_dialog = getattr(webview, "FileDialog", None)
+    if file_dialog is not None and hasattr(file_dialog, "FOLDER"):
+        return file_dialog.FOLDER
+    return getattr(webview, "FOLDER_DIALOG", _FALLBACK_FOLDER_DIALOG)
 
 
 def load_ui_html() -> str:
@@ -142,6 +158,22 @@ class MainApp:
             return
         payload = json.dumps(self.get_state())
         self.window.evaluate_js(f"window.__onPythonState({payload})")
+
+    def pick_folder(self) -> str | None:
+        """Open a desktop folder dialog; return '' on cancel or None if unavailable."""
+        if (
+            _is_android()
+            or self.window is None
+            or not hasattr(self.window, "create_file_dialog")
+        ):
+            return None
+        selected = self.window.create_file_dialog(
+            _folder_dialog_type(),
+            directory=str(Path.home()),
+        )
+        if not selected:
+            return ""
+        return selected[0] if isinstance(selected, (list, tuple)) else str(selected)
 
     def switch_to_sync(self) -> None:
         """Switch the active view to SyncFrame when Credentials exist."""
