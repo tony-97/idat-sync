@@ -34,10 +34,6 @@ class LoginFrame(AppFrame):
         except CredentialStoreError as exc:
             self.error = str(exc)
 
-    def _notify(self) -> None:
-        if hasattr(self.app, "push_state"):
-            self.app.push_state()
-
     def _set_is_login(self, value: bool) -> None:  # noqa: FBT001
         self.is_login = value
         self._notify()

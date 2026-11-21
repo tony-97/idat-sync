@@ -74,10 +74,6 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         self.is_syncing = False
         self.course_tree = CourseTree()
 
-    def _notify(self) -> None:
-        if hasattr(self.app, "push_state"):
-            self.app.push_state()
-
     def _set_is_syncing(self, value: bool) -> None:  # noqa: FBT001
         self.is_syncing = value
         self._notify()

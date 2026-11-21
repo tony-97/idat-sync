@@ -8,6 +8,7 @@ import importlib
 import json
 import logging
 import os
+import threading
 import time
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
@@ -85,20 +86,37 @@ class PyWebviewDriver:
         """Initialize the desktop driver with no active window."""
         self._window: Any | None = None
         self._current_url = ""
+        self._standalone_thread: threading.Thread | None = None
 
     def _ensure_window(self, url: str) -> object:
         webview = importlib.import_module("webview")
-        if self._window is None:
-            self._window = webview.create_window(
-                "",
-                url,
-                hidden=True,
-                user_agent=_GALAXY_A55_UA,
-            )
+        if self._window is not None:
+            self._window.load_url(url)
+            return self._window
+
+        has_gui = bool(getattr(webview, "windows", None))
+        self._window = webview.create_window("", url, hidden=True)
+        if has_gui:
             # Linux GTK dynamic secondary windows ignore hidden=True once running.
             self._window.hide()
             return self._window
-        self._window.load_url(url)
+
+        ready = threading.Event()
+        errors: list[Exception] = []
+
+        def _run_standalone() -> None:
+            try:
+                webview.start(ready.set, user_agent=_GALAXY_A55_UA)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                errors.append(exc)
+            finally:
+                ready.set()
+
+        self._standalone_thread = threading.Thread(target=_run_standalone, daemon=True)
+        self._standalone_thread.start()
+        ready.wait(timeout=_TIMEOUT_S)
+        if errors:
+            raise errors[0]
         return self._window
 
     async def goto(self, url: str) -> None:
@@ -132,10 +150,12 @@ class PyWebviewDriver:
 
     async def aclose(self) -> None:
         """Destroy the hidden pywebview window if it was created."""
-        window = self._window
-        self._window = None
+        window, self._window = self._window, None
+        thread, self._standalone_thread = self._standalone_thread, None
         if window is not None:
             await asyncio.to_thread(window.destroy)
+        if thread is not None and thread.is_alive():
+            await asyncio.to_thread(thread.join, 5.0)
 
 
 def _parse_cookie_header(header: str, domain: str) -> list[CookieData]:

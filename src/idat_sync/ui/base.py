@@ -13,9 +13,15 @@ if TYPE_CHECKING:
 class AppFrame:  # pylint: disable=too-few-public-methods
     """Base component controller tracking a single active async task."""
 
+    app: Any = None
+
     def __init__(self) -> None:
         """Initialize the frame with no active async task."""
         self._active_task: asyncio.Task[Any] | None = None
+
+    def _notify(self) -> None:
+        if hasattr(self.app, "push_state"):
+            self.app.push_state()
 
     @contextlib.asynccontextmanager
     async def _busy(self, set_flag: Callable[[bool], None]) -> AsyncIterator[None]:

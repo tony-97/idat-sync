@@ -306,7 +306,9 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
         ]
 
         fake_webview = types.SimpleNamespace(
-            create_window=MagicMock(return_value=mock_window)
+            windows=[MagicMock()],
+            create_window=MagicMock(return_value=mock_window),
+            start=MagicMock(),
         )
 
         async def _exercise() -> list[CookieData]:
@@ -333,8 +335,9 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
             "",
             "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
             hidden=True,
-            user_agent=_GALAXY_A55_UA,
         )
+        assert "user_agent" not in fake_webview.create_window.call_args.kwargs
+        fake_webview.start.assert_not_called()
         mock_window.hide.assert_called_once()
         mock_window.load_url.assert_called_once_with(
             "https://contoso-my.sharepoint.com/shared"
@@ -356,6 +359,48 @@ class TestDriverSelectionAndAdapters(unittest.TestCase):
                 "secure": False,
             },
         ]
+
+    def test_pywebview_driver_standalone_mode_starts_webview_with_user_agent(
+        self,
+    ) -> None:
+        """Start standalone pywebview with user_agent when no GUI windows exist."""
+        mock_window = MagicMock()
+        start_calls: list[dict[str, Any]] = []
+
+        def _fake_start(func: Any = None, **kwargs: Any) -> None:
+            start_calls.append(kwargs)
+            if callable(func):
+                func()
+
+        fake_webview = types.SimpleNamespace(
+            windows=[],
+            create_window=MagicMock(return_value=mock_window),
+            start=MagicMock(side_effect=_fake_start),
+        )
+
+        async def _exercise() -> None:
+            driver = PyWebviewDriver()
+            await driver.goto(
+                "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx"
+            )
+            await driver.aclose()
+
+        with patch(
+            "idat_sync.infrastructure.sharepoint_auth.importlib.import_module",
+            return_value=fake_webview,
+        ):
+            asyncio.run(_exercise())
+
+        fake_webview.create_window.assert_called_once_with(
+            "",
+            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
+            hidden=True,
+        )
+        assert "user_agent" not in fake_webview.create_window.call_args.kwargs
+        fake_webview.start.assert_called_once()
+        assert start_calls == [{"user_agent": _GALAXY_A55_UA}]
+        mock_window.hide.assert_not_called()
+        mock_window.destroy.assert_called_once()
 
     def test_android_webview_driver_lifecycle_and_cookie_manager(self) -> None:
         """Configure 1x1 INVISIBLE WebView, read CookieManager, and destroy."""
