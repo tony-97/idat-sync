@@ -53,15 +53,10 @@ Al ser una aplicación sin firmar, macOS bloqueará su ejecución por defecto. S
    ```shell
    pip install git+https://github.com/tony-97/idat-sync
    ```
-3. **Instalar el navegador para Playwright (solo en Linux / macOS):**
-   - Para Linux:
-     ```shell
-     playwright install chromium
-     ```
-   - Para macOS:
-     ```shell
-     playwright install webkit
-     ```
+3. **Instalar dependencias del sistema para WebKitGTK (solo en Linux):**
+   ```shell
+   sudo apt install python3-gi gir1.2-webkit2-4.1
+   ```
 
 ## Cómo usar
 
@@ -100,7 +95,7 @@ Si no quieres instalar nada localmente, puedes ejecutar **idat-sync** directamen
 ### Pasos
 
 1. **Abre el notebook** haciendo clic en el badge _Open In Colab_ de arriba.
-2. **Ejecuta la primera celda** para instalar las dependencias (`idat-sync`, `moviepy`, `playwright`, `weasyprint`).
+2. **Ejecuta la primera celda** para instalar las dependencias (`idat-sync`, `moviepy`, WebKitGTK/`xvfb`, `weasyprint`).
 3. **Autoriza el acceso a Google Drive** cuando se te solicite.
 4. **Ingresa tu código MFA** en la consola de Colab cuando el script lo pida.
 5. **Selecciona el curso** de la lista que aparecerá en la salida.
