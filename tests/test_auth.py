@@ -3,18 +3,17 @@
 
 import ast
 import asyncio
-import contextlib
+import importlib.resources
 import inspect
+import json
 import sys
 import tempfile
 import threading
-import tkinter as tk
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import idat_sync.main as main_module
 import idat_sync.ui as ui_pkg
@@ -44,7 +43,6 @@ from idat_sync.application.ports import (
 from idat_sync.config import SyncConfig
 from idat_sync.domain.course import Course, CourseSection
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
-from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.course_tree import CourseTree, RowStatus
 from idat_sync.ui.login_frame import LoginFrame
@@ -575,365 +573,6 @@ class TestJsonCredentialStore(unittest.TestCase):
             assert not part_path.exists()
 
 
-def _make_mock_playwright():
-    mock_page = MagicMock()
-    mock_page.goto = AsyncMock()
-    mock_page.wait_for_load_state = AsyncMock()
-    mock_page.wait_for_url = AsyncMock()
-    mock_page.wait_for_selector = AsyncMock()
-    mock_page.is_visible = AsyncMock(return_value=False)
-    mock_page.fill = AsyncMock()
-    mock_page.click = AsyncMock()
-
-    mock_context = MagicMock()
-    mock_context.new_page = AsyncMock(return_value=mock_page)
-    mock_context.storage_state = AsyncMock(
-        return_value={
-            "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
-        }
-    )
-    mock_context.close = AsyncMock()
-
-    mock_browser = MagicMock()
-    mock_browser.new_context = AsyncMock(return_value=mock_context)
-    mock_browser.close = AsyncMock()
-
-    mock_pw = MagicMock()
-    mock_pw.devices = {"Galaxy A55 landscape": {}}
-    mock_pw.chromium.launch = AsyncMock(return_value=mock_browser)
-
-    mock_pw_cm = MagicMock()
-    mock_pw_cm.__aenter__ = AsyncMock(return_value=mock_pw)
-    mock_pw_cm.__aexit__ = AsyncMock(return_value=False)
-    return mock_pw_cm, mock_browser, mock_context, mock_page
-
-
-class TestSharepointBrowserAuth(unittest.TestCase):
-    """Tests for SharepointBrowserAuth Playwright SSO and MFA flow."""
-
-    def test_requires_tenant_hosts_and_omits_login_flow_ended(self):
-        """Require tenant host args and omit login_flow_ended parameter."""
-        with pytest.raises(TypeError, match="sharepoint_host"):
-            SharepointBrowserAuth()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
-
-        sig = inspect.signature(SharepointBrowserAuth.fetch_storage_state)
-        assert "login_flow_ended" not in sig.parameters
-        assert list(sig.parameters) == ["self", "username", "password", "get_mfa_code"]
-
-    def _run_sso_case(  # pylint: disable=too-many-locals
-        self,
-        auth: SharepointBrowserAuth,
-        input_user: str,
-        expected_email: str,
-        *,
-        skip_visible: bool,
-    ) -> None:
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-        events: list[tuple[str, object]] = []
-        mock_page.wait_for_url = AsyncMock(
-            side_effect=lambda url, **kw: events.append(
-                ("wait_for_url", (url, kw.get("timeout")))
-            )
-        )
-        mock_page.wait_for_selector = AsyncMock(
-            side_effect=lambda sel, **kw: events.append(
-                ("wait_for_selector", (sel, kw.get("timeout")))
-            )
-        )
-
-        async def _is_visible(sel: str) -> bool:
-            events.append(("is_visible", sel))
-            return skip_visible
-
-        mock_page.is_visible = AsyncMock(side_effect=_is_visible)
-        mock_page.click = AsyncMock(
-            side_effect=lambda sel, **_kw: events.append(("click", sel))
-        )
-        with (
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                return_value=mock_pw_cm,
-            ),
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                new=AsyncMock(),
-            ),
-        ):
-            state = asyncio.run(auth.fetch_storage_state(input_user, "pw", _mfa_code))
-
-        assert state == {
-            "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
-        }
-        mock_launch = mock_pw_cm.__aenter__.return_value.chromium.launch
-        mock_launch.assert_awaited_once()
-        assert mock_launch.call_args.kwargs.get("headless") is False
-        assert [call.args[0] for call in mock_page.goto.call_args_list] == [
-            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-            "https://contoso-my.sharepoint.com/shared",
-        ]
-        mock_page.fill.assert_any_call("#i0116", expected_email, force=True)
-        mock_page.fill.assert_any_call("#i0118", "pw")
-        mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
-        expected_post_mfa = [
-            ("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"),
-            ("click", "#idChkBx_SAOTCC_TD"),
-            ("click", "#idSubmit_SAOTCC_Continue"),
-            (
-                "wait_for_url",
-                (
-                    "https://login.microsoftonline.com/common/SAS/ProcessAuth",
-                    60000 * 3,
-                ),
-            ),
-            (
-                "wait_for_selector",
-                ("#skipMfaRegistrationLink, #KmsiCheckboxField", 60000 * 3),
-            ),
-            ("is_visible", "#skipMfaRegistrationLink"),
-            *([("click", "#skipMfaRegistrationLink")] if skip_visible else []),
-            ("click", "#KmsiCheckboxField"),
-            ("click", "#idSIButton9"),
-            (
-                "wait_for_url",
-                (
-                    "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-                    60000 * 3,
-                ),
-            ),
-        ]
-        mfa_start = events.index(("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"))
-        assert events[mfa_start:] == expected_post_mfa
-        mock_context.close.assert_awaited_once()
-        mock_browser.close.assert_awaited_once()
-
-    def test_fetch_storage_state_runs_playwright_sso_and_mfa_flow(self):
-        """Drive Playwright SSO/MFA steps and close context and browser."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-        for input_user, expected_email, skip_visible in [
-            ("jdoe", "jdoe@example.edu", True),
-            ("jdoe@other.edu", "jdoe@other.edu", False),
-        ]:
-            with self.subTest(input_user=input_user, skip_visible=skip_visible):
-                self._run_sso_case(
-                    auth, input_user, expected_email, skip_visible=skip_visible
-                )
-
-    def test_fetch_storage_state_errors_and_cancellation(self):
-        """Wrap Playwright errors in AuthenticationError and propagate cancellation."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-
-        def run_failure_case(
-            configure_mocks,
-            *,
-            expected_exception: type[BaseException] | None = None,
-            expected_auth: tuple[str, type[BaseException]] | None = None,
-            expect_context_close: bool = False,
-            expect_browser_close: bool = False,
-        ) -> None:
-            mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-            configure_mocks(mock_pw_cm, mock_browser, mock_context, mock_page)
-            with (
-                patch(
-                    "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                    return_value=mock_pw_cm,
-                ),
-                patch(
-                    "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                    new=AsyncMock(),
-                ),
-            ):
-                if expected_exception is not None:
-                    with pytest.raises(expected_exception):
-                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                else:
-                    with (
-                        self.assertLogs(
-                            "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
-                        ) as log_cm,
-                        pytest.raises(
-                            AuthenticationError,
-                            match=expected_auth[0] if expected_auth else None,
-                        ) as auth_ctx,
-                    ):
-                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                    assert any(r.exc_info is not None for r in log_cm.records)
-                    if expected_auth is not None:
-                        assert isinstance(auth_ctx.value.__cause__, expected_auth[1])
-            if expect_context_close:
-                mock_context.close.assert_awaited_once()
-            else:
-                mock_context.close.assert_not_awaited()
-            if expect_browser_close:
-                mock_browser.close.assert_awaited_once()
-            else:
-                mock_browser.close.assert_not_awaited()
-
-        # Startup failure in async_playwright().__aenter__
-        run_failure_case(
-            lambda cm, _b, _c, _p: setattr(
-                cm, "__aenter__", AsyncMock(side_effect=RuntimeError("driver failed"))
-            ),
-            expected_auth=("SharePoint browser authentication failed", RuntimeError),
-        )
-
-        # Playwright timeout failure translates to distinct timeout message
-        run_failure_case(
-            lambda _cm, _b, _c, p: setattr(
-                p,
-                "wait_for_url",
-                AsyncMock(side_effect=PlaywrightTimeoutError("timed out")),
-            ),
-            expected_auth=(r"SharePoint sign-in timed out\.", PlaywrightTimeoutError),
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Launch failure
-        run_failure_case(
-            lambda cm, _b, _c, _p: setattr(
-                cm.__aenter__.return_value.chromium,
-                "launch",
-                AsyncMock(side_effect=RuntimeError("launch failed")),
-            ),
-        )
-
-        # Context creation failure must still close launched browser
-        run_failure_case(
-            lambda _cm, b, _c, _p: setattr(
-                b, "new_context", AsyncMock(side_effect=RuntimeError("context failed"))
-            ),
-            expect_browser_close=True,
-        )
-
-        # Page navigation failure closes context and browser
-        run_failure_case(
-            lambda _cm, _b, _c, p: setattr(
-                p, "goto", AsyncMock(side_effect=RuntimeError("network timeout"))
-            ),
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Context cleanup failure still closes browser
-        run_failure_case(
-            lambda _cm, _b, c, _p: setattr(
-                c, "close", AsyncMock(side_effect=RuntimeError("context close failed"))
-            ),
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Cancellation closes context and browser and propagates CancelledError
-        run_failure_case(
-            lambda _cm, _b, _c, p: setattr(
-                p, "goto", AsyncMock(side_effect=asyncio.CancelledError())
-            ),
-            expected_exception=asyncio.CancelledError,
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Cancellation still propagates if context.close() raises during cleanup
-        def cancel_with_close_failure(_cm, _b, c, p) -> None:
-            p.goto = AsyncMock(side_effect=asyncio.CancelledError())
-            c.close = AsyncMock(side_effect=RuntimeError("context close failed"))
-
-        run_failure_case(
-            cancel_with_close_failure,
-            expected_exception=asyncio.CancelledError,
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-    def test_fetch_storage_state_launches_webkit_on_darwin_and_aborts_on_blank_mfa(
-        self,
-    ):
-        """Launch WebKit on macOS, Edge on Windows, and abort on blank MFA code."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-
-        for os_name, expected_engine, expected_kwargs in [
-            ("Darwin", "webkit", {"headless": False}),
-            ("Windows", "chromium", {"headless": False, "channel": "msedge"}),
-            ("Linux", "chromium", {"headless": False, "channel": "chromium"}),
-        ]:
-            with self.subTest(os_name=os_name):
-                mock_pw_cm, mock_browser, _, _ = _make_mock_playwright()
-                mock_pw = mock_pw_cm.__aenter__.return_value
-                mock_pw.webkit = MagicMock()
-                mock_pw.webkit.launch = AsyncMock(return_value=mock_browser)
-                with (
-                    patch(
-                        "idat_sync.infrastructure.sharepoint_auth.platform.system",
-                        return_value=os_name,
-                    ),
-                    patch(
-                        "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                        return_value=mock_pw_cm,
-                    ),
-                    patch(
-                        "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                        new=AsyncMock(),
-                    ),
-                ):
-                    state = asyncio.run(
-                        auth.fetch_storage_state("jdoe", "pw", _mfa_code)
-                    )
-
-                assert state is not None
-                getattr(mock_pw, expected_engine).launch.assert_awaited_once_with(
-                    **expected_kwargs
-                )
-                other_engine = "chromium" if expected_engine == "webkit" else "webkit"
-                getattr(mock_pw, other_engine).launch.assert_not_awaited()
-
-    def test_fetch_storage_state_aborts_on_blank_mfa(self):
-        """Abort before OTP entry and close browser on blank MFA code."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-
-        async def _blank_mfa() -> str:
-            return "   "
-
-        with (
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.platform.system",
-                return_value="Linux",
-            ),
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                return_value=mock_pw_cm,
-            ),
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                new=AsyncMock(),
-            ),
-            pytest.raises(AuthenticationError),
-        ):
-            asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
-
-        assert "#idTxtBx_SAOTCC_OTC" not in [
-            call.args[0] for call in mock_page.fill.call_args_list
-        ]
-        mock_context.close.assert_awaited_once()
-        mock_browser.close.assert_awaited_once()
-
-
 class TestLoginFrame(unittest.TestCase):
     """Tests for pure-Python LoginFrame validation, inline MFA, and login."""
 
@@ -1436,15 +1075,14 @@ class TestSyncFrame(unittest.TestCase):
             assert sys.stderr is orig_stderr
 
     def test_app_frame_aclose_and_main_app_on_close_closes_frame_before_destroy(self):
-        """Close active AppFrame before destroying MainApp."""
+        """Close active AppFrame before destroying MainApp window idempotently."""
 
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "missing_session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
+                mock_window = MagicMock()
+                app = MainApp(config=cfg, window=mock_window)
                 try:
-                    assert bool(app.protocol("WM_DELETE_WINDOW"))
                     base_frame = AppFrame()
                     await base_frame.aclose()
 
@@ -1454,85 +1092,102 @@ class TestSyncFrame(unittest.TestCase):
                     )
                     app._frame = active_frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
-                    with patch.object(
-                        app, "destroy", wraps=app.destroy
-                    ) as mock_destroy:
-                        with pytest.raises(RuntimeError, match="close error"):
-                            await app.on_close()
+                    with pytest.raises(RuntimeError, match="close error"):
                         await app.on_close()
+                    await app.on_close()
 
                     active_frame.aclose.assert_awaited_once_with()
-                    mock_destroy.assert_called_once_with()
+                    mock_window.destroy.assert_called_once_with()
                 finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
                     app.loop.close()
 
         asyncio.run(exercise())
 
-    def test_login_frame_return_binding_mfa_cancel_and_on_close(self):  # pylint: disable=too-many-statements
-        """Verify <Return> submit, MFA cancellation, and on_close cleanup."""
+    def test_main_app_initial_frame_switching_and_state_push(self):
+        """Select initial frame from auth state, switch views, and push JSON state."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds_path = Path(tmpdir) / "session.json"
+            cfg = SyncConfig(session_file=creds_path)
+            mock_window = MagicMock()
+            app = MainApp(config=cfg, window=mock_window)
+            try:
+                assert isinstance(app._frame, LoginFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert app.get_state()["view"] == "login"
 
-        async def exercise() -> None:  # pylint: disable=too-many-statements
+                mock_window.evaluate_js.reset_mock()
+                app.push_state()
+                mock_window.evaluate_js.assert_called_once()
+                js_call = mock_window.evaluate_js.call_args.args[0]
+                assert js_call.startswith("window.__onPythonState(")
+                assert js_call.endswith(")")
+                payload = json.loads(
+                    js_call.removeprefix("window.__onPythonState(").removesuffix(")")
+                )
+                assert payload["view"] == "login"
+
+                app.auth.credential_store.save(
+                    {
+                        "token": "tok-saved",
+                        "sharepoint_storage_state": {"cookies": []},
+                    }
+                )
+                app.switch_to_sync()
+                assert isinstance(app._frame, SyncFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert app.get_state()["view"] == "sync"
+
+                app.switch_to_login()
+                assert isinstance(app._frame, LoginFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert app.get_state()["view"] == "login"
+            finally:
+                app.loop.close()
+
+            # Authenticated startup lands directly on SyncFrame
+            JsonCredentialStore(credentials_file=creds_path).save(
+                {
+                    "token": "tok-saved",
+                    "sharepoint_storage_state": {"cookies": []},
+                }
+            )
+            app_authed = MainApp(config=cfg, window=MagicMock())
+            try:
+                assert isinstance(app_authed._frame, SyncFrame)  # noqa: SLF001  # pylint: disable=protected-access
+                assert app_authed.get_state()["view"] == "sync"
+            finally:
+                app_authed.loop.close()
+
+    def test_main_app_on_close_cancels_active_login_and_mfa(self):
+        """Verify on_close cancels active login task and dismisses open MFA prompt."""
+
+        async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
+                mock_window = MagicMock()
+                app = MainApp(config=cfg, window=mock_window)
                 try:
                     frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     assert isinstance(frame, LoginFrame)
+                    frame.username = "jdoe"
+                    frame.password = "secret"  # noqa: S105
 
-                    frame.user_var.set("jdoe")
-                    frame.pass_var.set("secret")
-                    login_started = asyncio.Event()
                     mfa_ready = asyncio.Event()
 
                     async def slow_login(_username, _password, get_mfa_code):
-                        login_started.set()
                         mfa_task = asyncio.create_task(get_mfa_code())
                         await asyncio.sleep(0)
                         mfa_ready.set()
                         await mfa_task
 
                     with patch.object(app.auth, "login", side_effect=slow_login):
-                        assert frame.pass_entry.bind("<Return>")
-                        app.deiconify()
-                        app.update()
-                        frame.pass_entry.focus_force()
-                        frame.pass_entry.event_generate("<Return>")
-                        app.update()
-                        app.withdraw()
-                        await asyncio.wait_for(login_started.wait(), timeout=2.0)
+                        login_task = asyncio.create_task(frame.do_login())
                         await asyncio.wait_for(mfa_ready.wait(), timeout=2.0)
+                        assert frame.mfa_open
 
-                        popups = [
-                            w
-                            for w in app.winfo_children()
-                            if isinstance(w, tk.Toplevel)
-                        ]
-                        assert len(popups) == 1
-
-                        mfa_only_task = asyncio.create_task(frame.get_mfa_code())
-                        await asyncio.sleep(0)
-                        extra_popups = [
-                            w
-                            for w in app.winfo_children()
-                            if isinstance(w, tk.Toplevel) and w not in popups
-                        ]
-                        assert len(extra_popups) == 1
-                        mfa_only_task.cancel()
+                        await app.on_close()
+                        assert not frame.mfa_open
+                        mock_window.destroy.assert_called_once_with()
                         with pytest.raises(asyncio.CancelledError):
-                            await mfa_only_task
-                        assert not extra_popups[0].winfo_exists()
-
-                        with patch.object(
-                            popups[0], "destroy", wraps=popups[0].destroy
-                        ) as mock_popup_destroy:
-                            await app.on_close()
-                            mock_popup_destroy.assert_called()
+                            await login_task
                 finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
                     app.loop.close()
 
         asyncio.run(exercise())
@@ -1544,13 +1199,12 @@ class TestSyncFrame(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmpdir:
                 creds_path = Path(tmpdir) / "session.json"
                 cfg = SyncConfig(session_file=creds_path)
-                app = MainApp(config=cfg)
-                app.withdraw()
+                app = MainApp(config=cfg, window=MagicMock())
                 try:
                     frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
                     assert isinstance(frame, LoginFrame)
-                    frame.user_var.set("jdoe")
-                    frame.pass_var.set("secret")
+                    frame.username = "jdoe"
+                    frame.password = "secret"  # noqa: S105
 
                     async def ok_login(_username, _password, _get_mfa_code):
                         app.auth.credential_store.save(
@@ -1560,22 +1214,50 @@ class TestSyncFrame(unittest.TestCase):
                             }
                         )
 
-                    with (
-                        patch.object(app.auth, "login", side_effect=ok_login),
-                        patch(
-                            "idat_sync.ui.sync_frame.SyncFrame.load_idat_sync",
-                            new=AsyncMock(),
-                        ),
-                    ):
+                    with patch.object(app.auth, "login", side_effect=ok_login):
                         await frame.do_login()
 
-                    assert not frame.winfo_exists()
+                    assert isinstance(app._frame, SyncFrame)  # noqa: SLF001  # pylint: disable=protected-access
                 finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
                     app.loop.close()
 
         asyncio.run(exercise())
+
+    def test_main_app_run_starts_webview_with_bundled_html_and_ua(self):
+        """Load bundled index.html via importlib.resources and start webview."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SyncConfig(session_file=Path(tmpdir) / "missing_session.json")
+            app = MainApp(config=cfg)
+            expected_html = (
+                importlib.resources.files("idat_sync.ui")
+                .joinpath("index.html")
+                .read_text(encoding="utf-8")
+            )
+            fake_window = MagicMock()
+            fake_window.events = MagicMock()
+            loop_was_running = False
+
+            def fake_start(**kwargs):
+                nonlocal loop_was_running
+                loop_was_running = app.loop.is_running()
+                assert kwargs.get("user_agent") == app_module._GALAXY_A55_UA  # noqa: SLF001  # pylint: disable=protected-access
+
+            fake_webview = MagicMock()
+            fake_webview.create_window.return_value = fake_window
+            fake_webview.start.side_effect = fake_start
+
+            with patch.dict(sys.modules, {"webview": fake_webview}):
+                app.run()
+
+            assert loop_was_running
+            assert app.loop.is_closed()
+            fake_webview.create_window.assert_called_once()
+            create_kwargs = fake_webview.create_window.call_args.kwargs
+            assert create_kwargs["html"] == expected_html
+            assert create_kwargs["js_api"].get_state()["view"] == "login"
+            fake_webview.start.assert_called_once_with(
+                user_agent=app_module._GALAXY_A55_UA  # noqa: SLF001  # pylint: disable=protected-access
+            )
 
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Cancel active load_idat_sync and do_sync tasks on SyncFrame.aclose."""
@@ -1693,7 +1375,7 @@ class TestAppFrameBusy(unittest.TestCase):
 
     def test_busy_sets_active_task_resets_flag_and_aclose_cancels(self):
         """Track _active_task, reset flag on exit/error, and cancel in aclose."""
-        assert not issubclass(AppFrame, tk.Frame)
+        assert AppFrame.__bases__ == (object,)
         assert not hasattr(AppFrame, "exit")
 
         async def exercise() -> None:
