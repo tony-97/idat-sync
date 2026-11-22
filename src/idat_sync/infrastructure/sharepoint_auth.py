@@ -31,6 +31,7 @@ _logger = logging.getLogger(__name__)
 _POLL_INTERVAL_S = 0.15
 _TIMEOUT_S = 180.0
 _SETTLE_SLEEP_S = 3
+_HOST_AUTH_COOKIES = frozenset({"FedAuth", "SPOIDCRL"})
 _GWL_EXSTYLE = -20
 _WS_EX_APPWINDOW = 0x00040000
 _WS_EX_TOOLWINDOW = 0x00000080
@@ -546,6 +547,29 @@ def _url_matches(url: str, pattern: str) -> bool:
     return fnmatch.fnmatch(url, glob) or fnmatch.fnmatch(base_url, glob)
 
 
+def _has_host_auth_cookie(cookies: list[CookieData], host: str) -> bool:
+    target = host.lower()
+    return any(
+        c.get("name") in _HOST_AUTH_COOKIES
+        and c.get("value")
+        and c.get("domain", "").lstrip(".").lower() == target
+        for c in cookies
+    )
+
+
+async def _wait_for_host_cookies(driver: WebViewDriver, host: str) -> list[CookieData]:
+    target = host.lower()
+
+    async def _ready() -> bool:
+        if (urlparse(await driver.get_url()).hostname or "").lower() != target:
+            return False
+        return _has_host_auth_cookie(await driver.get_cookies(), target)
+
+    await _poll_until(_ready, f"auth cookies for {host}")
+    await asyncio.sleep(_SETTLE_SLEEP_S)
+    return await driver.get_cookies()
+
+
 def _merge_cookies(
     academic: list[CookieData], personal: list[CookieData]
 ) -> list[CookieData]:
@@ -656,12 +680,12 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
         await _click(driver, "#idSIButton9")
 
         await _wait_for_url(driver, site_url)
-        await asyncio.sleep(_SETTLE_SLEEP_S)
-        academic_cookies = await driver.get_cookies()
+        academic_cookies = await _wait_for_host_cookies(driver, self.sharepoint_host)
 
         await driver.goto(f"https://{self.sharepoint_personal_host}/shared")
-        await asyncio.sleep(_SETTLE_SLEEP_S)
-        personal_cookies = await driver.get_cookies()
+        personal_cookies = await _wait_for_host_cookies(
+            driver, self.sharepoint_personal_host
+        )
         return {"cookies": _merge_cookies(academic_cookies, personal_cookies)}
 
     async def fetch_storage_state(

@@ -202,6 +202,76 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                     "value"
                 ] == ("pers-spo")
 
+    def test_waits_for_personal_host_sso_redirect_and_host_auth_cookie(self) -> None:
+        """Poll past personal-host SSO redirect until host auth cookie is set."""
+
+        class _RedirectingPersonalDriver(FakeWebViewDriver):
+            def __init__(self) -> None:
+                super().__init__()
+                self._personal_polls = 0
+
+            async def goto(self, url: str) -> None:
+                await super().goto(url)
+                if "contoso-my.sharepoint.com" in url:
+                    self._personal_polls = 1
+
+            async def get_url(self) -> str:
+                if self._personal_polls == 2:
+                    self._personal_polls = 3
+                    return "https://login.microsoftonline.com/tenant/oauth2/authorize"
+                if self._personal_polls >= 3:
+                    return "https://contoso-my.sharepoint.com/personal/jdoe"
+                return self.url
+
+            async def get_cookies(self) -> list[CookieData]:
+                if self._personal_polls == 1:
+                    self._personal_polls = 2
+                    return [
+                        {
+                            "name": "rtFa",
+                            "value": "shared-old",
+                            "domain": ".sharepoint.com",
+                            "path": "/",
+                            "secure": True,
+                        }
+                    ]
+                if self._personal_polls >= 3:
+                    return [
+                        {
+                            "name": "FedAuth",
+                            "value": "pers-fed",
+                            "domain": "contoso-my.sharepoint.com",
+                            "path": "/",
+                            "secure": True,
+                        },
+                        {
+                            "name": "rtFa",
+                            "value": "shared-new",
+                            "domain": ".sharepoint.com",
+                            "path": "/",
+                            "secure": True,
+                        },
+                    ]
+                return await super().get_cookies()
+
+        driver = _RedirectingPersonalDriver()
+        auth = SharepointBrowserAuth(
+            sharepoint_host="contoso.sharepoint.com",
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            email_domain="example.edu",
+            driver=driver,
+        )
+        with patch(
+            "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+            new=AsyncMock(),
+        ):
+            state = asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+
+        by_key = {(c["domain"], c["path"], c["name"]): c for c in state["cookies"]}
+        assert by_key[("contoso-my.sharepoint.com", "/", "FedAuth")]["value"] == (
+            "pers-fed"
+        )
+
     def test_dom_actions_require_visible_opaque_enabled_elements(self) -> None:
         """Gate fill/click JS on visibility, opacity > 0, and enabled state."""
         driver = FakeWebViewDriver()
