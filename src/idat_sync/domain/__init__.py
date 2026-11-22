@@ -13,8 +13,12 @@ from idat_sync.domain.course import (
     CourseSection,
     ModuleContent,
 )
-from idat_sync.domain.path_utils import WINDOWS_RESERVED, safe_filename
-from idat_sync.domain.sync import SyncDiff, SyncEntry, SyncStatus
+from idat_sync.domain.path_utils import (
+    WINDOWS_RESERVED,
+    PathDisambiguator,
+    safe_filename,
+)
+from idat_sync.domain.sync import is_content_pending
 
 __all__ = [
     "WINDOWS_RESERVED",
@@ -24,11 +28,10 @@ __all__ = [
     "CourseSection",
     "ModuleContent",
     "MoodleContent",
+    "PathDisambiguator",
     "RecordingContent",
     "SharepointContent",
     "StringContent",
-    "SyncDiff",
-    "SyncEntry",
-    "SyncStatus",
+    "is_content_pending",
     "safe_filename",
 ]

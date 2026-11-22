@@ -23,7 +23,8 @@ import idat_sync.ui.sync_frame as sync_frame_mod
 from idat_sync.application import exceptions, ports
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.events import (
-    CourseFilesDiscovered,
+    CourseDiscoveryCompleted,
+    CourseFileDiscovered,
     CourseSyncCompleted,
     CourseSyncStarted,
     TaskDownloadCompleted,
@@ -870,15 +871,15 @@ class TestSyncFrame(unittest.TestCase):
                     synced_p = c_dir / "S1" / "already.pdf"
                     ok_p = c_dir / "S1" / "new.pdf"
                     err_p = c_dir / "S1" / "broken.pdf"
-                    yield CourseSyncStarted(current_course)
-                    yield CourseFilesDiscovered(
-                        current_course,
-                        c_dir,
-                        (synced_p,),
-                        (ok_p, err_p),
+                    yield CourseSyncStarted(current_course, c_dir)
+                    yield CourseFileDiscovered(
+                        current_course, synced_p, is_pending=False
                     )
+                    yield CourseFileDiscovered(current_course, ok_p, is_pending=True)
                     yield TaskDownloadStarted(ok_p)
                     yield TaskDownloadCompleted(ok_p)
+                    yield CourseFileDiscovered(current_course, err_p, is_pending=True)
+                    yield CourseDiscoveryCompleted(current_course, 1, 2)
                     yield TaskDownloadStarted(err_p)
                     yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
                     yield CourseSyncCompleted(
@@ -1459,10 +1460,10 @@ class TestAppFrameBusy(unittest.TestCase):
 
 
 class TestCourseTree(unittest.TestCase):
-    """Tests for pure-Python CourseTree selection, additive discovery, and progress."""
+    """Tests for pure-Python CourseTree selection, streaming discovery, and progress."""
 
-    def test_course_tree_lifecycle_and_progress(self):
-        """Manage course rows, nested folders, additive batches, and to_dict."""
+    def test_course_tree_lifecycle_and_progress(self):  # pylint: disable=too-many-statements
+        """Manage course rows, nested folders, streaming discovery, and to_dict."""
         ct = CourseTree()
         c1 = Course(id=1, name="Course One")
         c2 = Course(id=2, name="Course Two")
@@ -1479,7 +1480,10 @@ class TestCourseTree(unittest.TestCase):
         assert rows[0]["checked"] is False
         assert rows[1]["checked"] is True
 
-        ct.reset_for_sync([1])
+        assert not hasattr(ct, "show_files")
+        assert RowStatus.FETCHING_AND_SYNCING == "Fetching & Syncing"
+
+        ct.reset_for_sync([1, 2])
         assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
             RowStatus.QUEUED,
             "0%",
@@ -1488,25 +1492,56 @@ class TestCourseTree(unittest.TestCase):
         c_dir = Path("Course One")
         synced_p = c_dir / "S1" / "done.pdf"
         pending_p = c_dir / "S1" / "todo.pdf"
-        extra_p = c_dir / "S2" / "extra.pdf"
-        ct.show_files(1, c_dir, (synced_p,), (pending_p,))
+        late_p = c_dir / "S2" / "late.pdf"
+
+        ct.start_course(1, c_dir)
         assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
-            RowStatus.SYNCING,
-            "50%",
+            RowStatus.FETCHING,
+            "...",
         )
 
-        # Second batch appends additively without clearing S1
-        ct.show_files(1, c_dir, (), (extra_p,))
-        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
-            RowStatus.SYNCING,
-            "33%",
+        ct.add_file(1, synced_p, is_pending=False)
+        row = ct.to_dict()[0]
+        assert row["open"] is True
+        assert (row["status"], row["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "1/1+",
         )
-        folder_names = [child["name"] for child in ct.to_dict()[0]["children"]]
-        assert folder_names == ["S1", "S2"]
+
+        ct.add_file(1, pending_p, is_pending=True)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "1/2+",
+        )
 
         ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
         ct.set_file_status(pending_p, RowStatus.COMPLETED)
-        ct.set_file_status(extra_p, RowStatus.COMPLETED)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "2/2+",
+        )
+
+        ct.add_file(1, late_p, is_pending=True)
+        row = ct.to_dict()[0]
+        assert (row["status"], row["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "2/3+",
+        )
+        assert [child["name"] for child in row["children"]] == ["S1", "S2"]
+
+        ct.finish_discovery(1)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.SYNCING,
+            "66%",
+        )
+
+        ct.set_course_status(1, RowStatus.FAILED)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FAILED,
+            "66%",
+        )
+
+        ct.set_file_status(late_p, RowStatus.COMPLETED)
         assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
             RowStatus.SYNCING,
             "100%",
@@ -1515,6 +1550,18 @@ class TestCourseTree(unittest.TestCase):
         ct.set_course_status(1, RowStatus.COMPLETED)
         assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
             RowStatus.COMPLETED,
+            "100%",
+        )
+
+        # Empty course transitions to 100% on finish_discovery
+        ct.start_course(2, Path("Course Two"))
+        assert (ct.to_dict()[1]["status"], ct.to_dict()[1]["progress"]) == (
+            RowStatus.FETCHING,
+            "...",
+        )
+        ct.finish_discovery(2)
+        assert (ct.to_dict()[1]["status"], ct.to_dict()[1]["progress"]) == (
+            RowStatus.SYNCING,
             "100%",
         )
 
@@ -1530,7 +1577,9 @@ class TestCourseTree(unittest.TestCase):
         c_dir = Path("Current")
         synced_p = c_dir / "S1" / "done.pdf"
         pending_p = c_dir / "S1" / "todo.pdf"
-        ct.show_files(2, c_dir, (synced_p,), (pending_p,))
+        ct.start_course(2, c_dir)
+        ct.add_file(2, synced_p, is_pending=False)
+        ct.add_file(2, pending_p, is_pending=True)
         s1 = ct.to_dict()[0]["children"][0]
         assert (s1["status"], s1["progress"]) == (RowStatus.PENDING, "50%")
 
@@ -1548,18 +1597,10 @@ class TestCourseTree(unittest.TestCase):
             [Course(id=1, name="Course One"), Course(id=2, name="Course Two")],
             selected={1, 2},
         )
-        ct.show_files(
-            1,
-            Path("Course One"),
-            (Path("Course One/S1/Sub/a.pdf"),),
-            (),
-        )
-        ct.show_files(
-            2,
-            Path("Course Two"),
-            (Path("Course Two/S1/b.pdf"),),
-            (),
-        )
+        ct.start_course(1, Path("Course One"))
+        ct.add_file(1, Path("Course One/S1/Sub/a.pdf"), is_pending=False)
+        ct.start_course(2, Path("Course Two"))
+        ct.add_file(2, Path("Course Two/S1/b.pdf"), is_pending=False)
 
         rows = ct.to_dict()
         c1_s1 = rows[0]["children"][0]
@@ -1570,27 +1611,32 @@ class TestCourseTree(unittest.TestCase):
         assert c2_s1["id"]
         assert len({c1_s1["id"], c1_sub["id"], c2_s1["id"]}) == 3
 
-    def test_fetching_status_initializes_progress_without_stale_counts(self):
-        """Transitioning to FETCHING resets Progress even without reset_for_sync."""
+    def test_start_course_resets_children_and_stale_counts(self):
+        """Starting a course clears prior children and resets Progress counts."""
         ct = CourseTree()
         ct.set_courses([Course(id=1, name="Course One")], selected={1})
         c_dir = Path("Course One")
-        ct.show_files(1, c_dir, (c_dir / "old.pdf",), ())
+        ct.start_course(1, c_dir)
+        ct.add_file(1, c_dir / "old.pdf", is_pending=False)
+        ct.finish_discovery(1)
         assert ct.to_dict()[0]["progress"] == "100%"
 
-        ct.set_course_status(1, RowStatus.FETCHING)
-        ct.show_files(1, c_dir, (), (c_dir / "new.pdf",))
-        assert ct.to_dict()[0]["progress"] == "0%"
+        ct.start_course(1, c_dir)
+        ct.add_file(1, c_dir / "new.pdf", is_pending=True)
+        ct.finish_discovery(1)
+        row = ct.to_dict()[0]
+        assert row["progress"] == "0%"
+        assert [child["name"] for child in row["children"]] == ["new.pdf"]
 
-    def test_failed_course_before_file_discovery_shows_zero_percent(self):
-        """A course failing during FETCHING before show_files stays at 0%."""
+    def test_failed_course_before_file_discovery_preserves_progress(self):
+        """A course failing during FETCHING before add_file preserves '...'."""
         ct = CourseTree()
         ct.set_courses([Course(id=1, name="Course One")], selected={1})
-        ct.set_course_status(1, RowStatus.FETCHING)
+        ct.start_course(1, Path("Course One"))
         ct.set_course_status(1, RowStatus.FAILED)
         row = ct.to_dict()[0]
         assert row["status"] == RowStatus.FAILED
-        assert row["progress"] == "0%"
+        assert row["progress"] == "..."
 
 
 if __name__ == "__main__":

@@ -26,7 +26,8 @@ from idat_sync.application.auth_service import AuthService
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.events import (
-    CourseFilesDiscovered,
+    CourseDiscoveryCompleted,
+    CourseFileDiscovered,
     CourseSyncCompleted,
     CourseSyncStarted,
     SyncEvent,
@@ -68,11 +69,12 @@ from idat_sync.domain.course import (
 )
 from idat_sync.domain.path_utils import (
     WINDOWS_RESERVED,
+    PathDisambiguator,
     safe_filename,
     safe_path_segment,
     safe_suffixed_segment,
 )
-from idat_sync.domain.sync import SyncDiff, SyncStatus
+from idat_sync.domain.sync import is_content_pending
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import (
     MoodleDownloader,
@@ -172,7 +174,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         self.manager = DownloadManager(self.downloaders, file_system=self.fs)
         self.orchestrator = TaskOrchestrator(self.groups)
 
-    def test_prepare_download_tasks_maps_contents_without_filesystem_calls(self):
+    def test_create_download_task_maps_contents_without_filesystem_calls(self):  # pylint: disable=too-many-locals
         """Map Contents to DownloadTasks without touching FileSystemPort."""
         mock_fs = MagicMock(spec=FileSystemPort)
         manager = DownloadManager(self.downloaders, file_system=mock_fs)
@@ -180,9 +182,6 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             existing_file = tmp_path / "already_synced.pdf"
-            existing_file.write_bytes(b"data")
-            os.utime(existing_file, (2000000000, 2000000000))
-
             missing_file = tmp_path / "new_file.pdf"
             empty_summary = tmp_path / "empty.html"
             valid_summary = tmp_path / "summary.html"
@@ -194,28 +193,37 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 StringContent(valid_summary, 0, ["<p>Hello</p>"]),
             ]
 
-            tasks = manager.prepare_download_tasks(contents)
+            tasks = [
+                task
+                for content in contents
+                if (task := manager.create_download_task(content)) is not None
+            ]
 
             task_paths = [Path(t.path) for t in tasks]
             assert task_paths == [existing_file, missing_file, valid_summary]
             assert empty_summary not in task_paths
             mock_fs.assert_not_called()
             assert not hasattr(DownloadManager, "should_download")
+            assert not hasattr(DownloadManager, "diff_trees")
+            assert not hasattr(DownloadManager, "prepare_download_tasks")
             assert not hasattr(tasks[0], "last_modified")
-            with pytest.raises(TypeError, match="root_dir"):
-                manager.prepare_download_tasks(contents, root_dir=tmp_path)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
     async def test_task_orchestrator_runs_groups_and_writes_string_tasks(self):
-        """Run orchestrator coroutines and write StringContent to disk."""
+        """Run channel workers and write StringContent to disk."""
         with tempfile.TemporaryDirectory() as tmpdir:
             target_html = Path(tmpdir) / "Semana 01" / "resumen.html"
             content = StringContent(target_html, 0, ["<h1>Week 1</h1>"])
 
-            tasks = self.manager.prepare_download_tasks([content])
-            coros = self.orchestrator.create_coroutines(
-                tasks, lambda task: task.download()
-            )
-            await asyncio.gather(*coros)
+            task = self.manager.create_download_task(content)
+            assert task is not None
+            channel = self.orchestrator.create_channel()
+            workers = [
+                asyncio.create_task(coro)
+                for coro in channel.create_workers(lambda t: t.download())
+            ]
+            channel.enqueue(task)
+            channel.close()
+            await asyncio.gather(*workers)
 
             assert target_html.exists()
             assert target_html.read_text(encoding="utf-8") == "<h1>Week 1</h1>"
@@ -227,10 +235,10 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             1700000000,
             "https://idat628-my.sharepoint.com/:v:/r/personal/video.mp4",
         )
-        tasks = self.manager.prepare_download_tasks([rec])
-        assert len(tasks) == 1
-        assert tasks[0].downloader is self.recording_downloader
-        assert tasks[0].content is rec
+        task = self.manager.create_download_task(rec)
+        assert task is not None
+        assert task.downloader is self.recording_downloader
+        assert task.content is rec
 
     async def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(
         self,
@@ -291,75 +299,27 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             1700000000,
             "https://youtube.com/watch?v=123",
         )
-        tasks = manager.prepare_download_tasks([yt_rec])
-        assert len(tasks) == 1
-        assert tasks[0].downloader is yt_downloader
+        task = manager.create_download_task(yt_rec)
+        assert task is not None
+        assert task.downloader is yt_downloader
 
-        await asyncio.gather(
-            *orchestrator.create_coroutines(tasks, lambda task: task.download())
-        )
+        channel = orchestrator.create_channel()
+        channel.enqueue(task)
+        channel.close()
+        await asyncio.gather(*channel.create_workers())
         assert downloaded == [yt_rec]
-
-    def test_diff_trees_uses_python_sets_for_sync_status(self):
-        """Classify remote vs. local paths into SyncStatus buckets."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-
-            synced_file = tmp_path / "Semana 01" / "synced.pdf"
-            synced_file.parent.mkdir(parents=True, exist_ok=True)
-            synced_file.write_bytes(b"ok")
-            os.utime(synced_file, (2000000000, 2000000000))
-
-            outdated_file = tmp_path / "Semana 01" / "outdated.pdf"
-            outdated_file.write_bytes(b"old")
-            os.utime(outdated_file, (1500000000, 1500000000))
-
-            local_only_file = tmp_path / "Semana 01" / "my_notes.txt"
-            local_only_file.write_text("personal notes", encoding="utf-8")
-
-            missing_file = tmp_path / "Semana 02" / "new_slides.pdf"
-
-            remote_contents = [
-                MoodleContent(synced_file, 1900000000, "https://aulavirtual/1"),
-                MoodleContent(outdated_file, 1800000000, "https://aulavirtual/2"),
-                SharepointContent(missing_file, 1800000000, MagicMock()),
-            ]
-
-            diff = self.manager.diff_trees(tmp_path, remote_contents)
-
-            assert diff.missing_paths == {missing_file}
-            assert diff.outdated_paths == {outdated_file}
-            assert diff.synced_paths == {synced_file}
-            assert diff.local_only_paths == {local_only_file}
-            assert diff.to_download_paths == {missing_file, outdated_file}
-            assert len(diff.pending_contents) == 2
-
-            status_by_path = {e.path: e.status for e in diff.entries}
-            assert status_by_path[synced_file] == SyncStatus.SYNCED
-            assert status_by_path[outdated_file] == SyncStatus.OUTDATED
-            assert status_by_path[missing_file] == SyncStatus.MISSING
-            assert status_by_path[local_only_file] == SyncStatus.LOCAL_ONLY
 
     def test_safe_filename_at_domain_path_utils_seam(self):
         """Sanitize accents, Windows reserved names, and length in safe_filename."""
         assert "CON" in WINDOWS_RESERVED
         assert "NUL" in WINDOWS_RESERVED
 
-        # Accents normalized and forbidden chars replaced
         sanitized = safe_filename("Lección 1: Diseño & Programación?*")
         assert sanitized == "Leccion 1 Diseno & Programacion"
-
-        # Windows reserved device names prefixed
         assert safe_filename("con") == "_con"
         assert safe_filename("NUL") == "_NUL"
-
-        # Default fallback for empty/whitespace
         assert safe_filename("   ") == "untitled"
-
-        # Max length enforcement
         assert safe_filename("very_long_file_name", max_len=9) == "very_long"
-
-        # Reserved stem with extension and trailing dots exposed by truncation
         assert safe_filename("CON.txt") == "_CON.txt"
         assert safe_filename("a" * 98 + "...b", max_len=100) == "a" * 98
         assert safe_filename("." * 105, max_len=100) == "untitled"
@@ -390,59 +350,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         )
         assert wrapped.path == Path("/tmp/Course/file.pdf")  # noqa: S108
 
-    def test_sync_diff_from_trees_pure_in_memory(self):
-        """Compute SyncDiff from in-memory remote contents and local mtimes."""
-        p_missing = Path("semana1/missing.pdf")
-        p_outdated = Path("semana1/outdated.pdf")
-        p_synced = Path("semana1/synced.pdf")
-        p_local_only = Path("semana1/notes.txt")
-
-        c_missing = MoodleContent(p_missing, 1800000000, "http://a/missing")
-        c_outdated = MoodleContent(p_outdated, 1900000000, "http://a/outdated")
-        c_synced = MoodleContent(p_synced, 1700000000, "http://a/synced")
-
-        remote_contents = [c_synced, c_missing, c_outdated]
-        local_mtimes = {
-            p_outdated: 1850000000,
-            p_synced: 1750000000,
-            p_local_only: 1600000000,
-        }
-
-        diff = SyncDiff.from_trees(remote_contents, local_mtimes)
-
-        assert diff.missing_paths == {p_missing}
-        assert diff.outdated_paths == {p_outdated}
-        assert diff.synced_paths == {p_synced}
-        assert diff.local_only_paths == {p_local_only}
-        assert diff.to_download_paths == {p_missing, p_outdated}
-        assert diff.pending_contents == [c_missing, c_outdated]
-        assert [e.path for e in diff.entries] == sorted(
-            [p_missing, p_outdated, p_synced, p_local_only]
-        )
-
-        override_diff = SyncDiff.from_trees(
-            remote_contents,
-            local_mtimes,
-            outdated_paths={p_synced, p_local_only},
-        )
-        assert override_diff.outdated_paths == {p_outdated, p_synced}
-        assert override_diff.synced_paths == set()
-        assert override_diff.local_only_paths == {p_local_only}
-
-    def test_sync_diff_from_trees_rejects_duplicate_remote_paths(self):
-        """Raise ValueError when remote_contents contains duplicate paths."""
-        dup_path = Path("semana1/Carpeta-[1]/guia.pdf")
-        with pytest.raises(ValueError, match=r"guia\.pdf"):
-            SyncDiff.from_trees(
-                [
-                    MoodleContent(dup_path, 100, "http://a/1"),
-                    MoodleContent(dup_path, 200, "http://a/2"),
-                ],
-                {},
-            )
-
     def test_local_filesystem_adapter_and_download_manager_seam(self):  # pylint: disable=too-many-locals
-        """Verify LocalFileSystemAdapter and DownloadManager diff_trees behavior."""
+        """Verify LocalFileSystemAdapter and DownloadManager is_pending behavior."""
         fs = LocalFileSystemAdapter()
         assert not hasattr(FileSystemPort, "exists")
         assert not hasattr(FileSystemPort, "get_mtime")
@@ -469,8 +378,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             mgr = DownloadManager(self.downloaders, file_system=fs)
             content = MoodleContent(test_file, 1234567890, "http://a")
-            diff = mgr.diff_trees(tmp_path, [content])
-            assert diff.synced_paths == {test_file}
+            assert not mgr.is_pending(content, mtimes)
 
             unchanged_html = tmp_path / "info.html"
             unchanged_html.write_text("<p>Same</p>", encoding="utf-8")
@@ -479,16 +387,16 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             empty_html = tmp_path / "empty.html"
             empty_html.write_text("<p>Kept</p>", encoding="utf-8")
 
-            html_diff = mgr.diff_trees(
-                tmp_path,
-                [
-                    StringContent(unchanged_html, 0, ["  <p>Same</p>  "]),
-                    StringContent(changed_html, 0, ["<p>New</p>"]),
-                    StringContent(empty_html, 0, ["   "]),
-                ],
+            html_mtimes = fs.scan_mtimes(tmp_path)
+            assert not mgr.is_pending(
+                StringContent(unchanged_html, 0, ["  <p>Same</p>  "]), html_mtimes
             )
-            assert html_diff.synced_paths == {unchanged_html, empty_html}
-            assert html_diff.outdated_paths == {changed_html}
+            assert mgr.is_pending(
+                StringContent(changed_html, 0, ["<p>New</p>"]), html_mtimes
+            )
+            assert not mgr.is_pending(
+                StringContent(empty_html, 0, ["   "]), html_mtimes
+            )
 
     def test_local_filesystem_adapter_translates_os_errors(self):
         """Translate OSError in scan_mtimes and ensure_dir while keeping read_bytes."""
@@ -519,43 +427,36 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
     async def test_idat_sync_orchestration_with_injected_collaborators(self):
         """Verify IDATSync orchestration events and directory creation."""
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_mgr = MagicMock(spec=DownloadManager)
-        mock_orch = MagicMock(spec=TaskOrchestrator)
-        mock_orch.create_coroutines.return_value = []
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
         mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
 
         sync = IDATSync(
-            course_repository=mock_repo,
-            download_manager=mock_mgr,
-            task_orchestrator=mock_orch,
+            course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
+            download_manager=DownloadManager([], mock_fs),
+            task_orchestrator=TaskOrchestrator([]),
             file_system=mock_fs,
             recordings_folder_name="Grabaciones",
         )
+        assert not hasattr(sync, "get_course_remote_tree")
+        assert not hasattr(sync, "check_course_sync")
 
         course = Course(id=1, name="Algorithms")
-        mock_repo.get_course_content.return_value = []
-        mock_repo.get_recordings.return_value = []
-        fake_diff = MagicMock()
-        fake_diff.synced_paths = set()
-        fake_diff.pending_contents = []
-        mock_mgr.diff_trees.return_value = fake_diff
-        mock_mgr.prepare_download_tasks.return_value = []
-
         events = [event async for event in sync.sync_course(course, Path("target_dir"))]
 
         assert events == [
-            CourseSyncStarted(course),
-            CourseFilesDiscovered(course, Path("target_dir"), (), ()),
+            CourseSyncStarted(course, Path("target_dir")),
+            CourseDiscoveryCompleted(course, 0, 0),
             CourseSyncCompleted(course, None),
         ]
         mock_fs.ensure_dir.assert_any_call(Path("target_dir"))
         mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Grabaciones")
-        mock_orch.create_coroutines.assert_called_once()
-        assert mock_orch.create_coroutines.call_args.args[0] == []
 
         # sync_courses & list_courses
-        mock_repo.list_courses.return_value = [course]
+        mock_course_gw.list_courses = AsyncMock(return_value=[course])
         assert await sync.list_courses() == [course]
         _ = [event async for event in sync.sync_courses(Path("root_folder"), [course])]
         mock_fs.ensure_dir.assert_any_call(Path("root_folder") / "Algorithms")
@@ -744,37 +645,46 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
     async def test_idat_sync_uses_injected_recordings_folder_name(self):
         """Use configured recordings_folder_name when syncing a course."""
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_mgr = MagicMock(spec=DownloadManager)
-        mock_orch = MagicMock(spec=TaskOrchestrator)
-        mock_orch.create_coroutines.return_value = []
+
+        class StubRecordingDownloader(Downloader[RecordingContent]):
+            """No-op recording downloader."""
+
+            content_type = RecordingContent
+
+            async def download(self, _content: RecordingContent) -> None:
+                """No-op download."""
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(
+            return_value=[RecordingContent(Path("rec.mp4"), 1, "https://rec/1")]
+        )
         mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+        rec_dl = StubRecordingDownloader()
 
         sync = IDATSync(
-            course_repository=mock_repo,
-            download_manager=mock_mgr,
-            task_orchestrator=mock_orch,
+            course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
+            download_manager=DownloadManager([rec_dl], mock_fs),
+            task_orchestrator=TaskOrchestrator([[rec_dl]]),
             file_system=mock_fs,
             recordings_folder_name="Videos",
         )
 
         course = Course(id=1, name="Algorithms")
-        mock_repo.get_course_content.return_value = []
-        mock_repo.get_recordings.return_value = []
-        fake_diff = MagicMock()
-        fake_diff.synced_paths = set()
-        fake_diff.pending_contents = []
-        mock_mgr.diff_trees.return_value = fake_diff
-        mock_mgr.prepare_download_tasks.return_value = []
-
-        _ = [event async for event in sync.sync_course(course, Path("target_dir"))]
+        events = [event async for event in sync.sync_course(course, Path("target_dir"))]
 
         mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Videos")
-        mock_repo.get_recordings.assert_called_once_with(
-            "Algorithms", Path("target_dir") / "Videos"
+        mock_rec_gw.fetch_recordings.assert_called_once_with("Algorithms")
+        assert (
+            CourseFileDiscovered(
+                course, Path("target_dir") / "Videos" / "rec.mp4", is_pending=True
+            )
+            in events
         )
 
-    async def test_create_sync_service_wires_sync_config(self):  # pylint: disable=too-many-locals,too-many-statements
+    async def test_create_sync_service_wires_sync_config(self):  # noqa: PLR0915  # pylint: disable=too-many-locals,too-many-statements
         """Wire SyncConfig values through create_sync_service to adapters."""
         custom_config = SyncConfig(
             semester_start=date(2026, 3, 16),
@@ -816,6 +726,11 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             ) as mock_sleep,
         ):
             service = await create_sync_service(credentials, config=custom_config)  # type: ignore[arg-type]
+            sp_adapter = service.course_repository.recording_gateway
+            assert isinstance(sp_adapter, SharepointApiAdapter)
+            sp_adapter.sp_client.get_client_from_url(
+                "https://contoso.sharepoint.com/other"
+            )
 
         called_urls = [call.args[0] for call in mock_ctx_cls.call_args_list]
         assert "https://contoso.sharepoint.com/sites/ACAD" in called_urls
@@ -995,54 +910,90 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 await dl.download(content)
             assert isinstance(fs_ctx.value.__cause__, OSError)
 
-    async def test_task_orchestrator_create_coroutines_groups_and_skips_empty_groups(
+    async def test_task_orchestrator_channel_fifo_concurrency_errors_and_imports(  # pylint: disable=too-many-locals,too-many-statements
         self,
     ):
-        """Group DownloadTasks by downloader group and skip empty groups."""
+        """Verify TaskChannel FIFO, concurrency, idempotent close, and errors."""
         executed: list[str] = []
+        g1_started = asyncio.Event()
+        g2_started = asyncio.Event()
 
         class StubDownloader(Downloader[StringContent]):
-            """Stub downloader appending downloaded filenames."""
+            """Stub downloader recording execution and coordinating overlap."""
 
             content_type = StringContent
 
-            def __init__(self, label: str):
-                """Initialize stub with a group label."""
+            def __init__(self, label: str, *, gate: bool = False):
                 self.label = label
+                self.gate = gate
 
             async def download(self, content: StringContent) -> None:
-                """Record download in ``executed``."""
+                if content.path.name == "fail.txt":
+                    raise CredentialsExpiredError("401 expired")
+                if self.gate:
+                    if self.label == "g1a":
+                        g1_started.set()
+                        await g2_started.wait()
+                    elif self.label == "g2":
+                        g2_started.set()
+                        await g1_started.wait()
                 executed.append(f"{self.label}:{content.path.name}")
 
-        d1 = StubDownloader("g1a")
+        d1 = StubDownloader("g1a", gate=True)
         d2 = StubDownloader("g1b")
-        d_empty = StubDownloader("empty")
-        d3 = StubDownloader("g2")
-        orch = TaskOrchestrator([[d1, d2], [d_empty], [d3]])
+        d3 = StubDownloader("g2", gate=True)
+        unregistered = StubDownloader("unknown")
+        orch = TaskOrchestrator([[d1, d2], [d3]])
+        assert not hasattr(orch, "create_coroutines")
 
-        assert not orch.create_coroutines([], lambda t: t.download())
+        channel = orch.create_channel()
+        with pytest.raises(ValueError, match="Unregistered downloader"):
+            channel.enqueue(
+                DownloadTask(StringContent(Path("x.txt"), 0, ["x"]), unregistered)
+            )
 
-        tasks = [
-            DownloadTask(StringContent(Path("a.txt"), 0, ["x"]), d1),
-            DownloadTask(StringContent(Path("b.txt"), 0, ["x"]), d2),
-            DownloadTask(StringContent(Path("c.txt"), 0, ["x"]), d3),
+        workers = [asyncio.create_task(c) for c in channel.create_workers()]
+        channel.enqueue(DownloadTask(StringContent(Path("a.txt"), 0, ["x"]), d1))
+        channel.enqueue(DownloadTask(StringContent(Path("b.txt"), 0, ["x"]), d2))
+        channel.enqueue(DownloadTask(StringContent(Path("c.txt"), 0, ["x"]), d3))
+        channel.close()
+        channel.close()  # idempotent
+        await asyncio.gather(*workers)
+
+        assert g1_started.is_set()
+        assert g2_started.is_set()
+        assert [x for x in executed if x.startswith("g1")] == [
+            "g1a:a.txt",
+            "g1b:b.txt",
         ]
+        assert "g2:c.txt" in executed
 
-        async def _run_task(task: DownloadTask) -> None:
-            await task.download()
-
-        coros = orch.create_coroutines(tasks, _run_task)
-        assert len(coros) == 2
-        await asyncio.gather(*coros)
-        assert executed == ["g1a:a.txt", "g1b:b.txt", "g2:c.txt"]
-
+        # Unhandled worker exception stops subsequent tasks in that group
         executed.clear()
-        default_coros = orch.create_coroutines(tasks)
-        assert len(default_coros) == 2
-        await asyncio.gather(*default_coros)
-        assert executed == ["g1a:a.txt", "g1b:b.txt", "g2:c.txt"]
+        err_channel = orch.create_channel()
+        err_channel.enqueue(DownloadTask(StringContent(Path("fail.txt"), 0, ["x"]), d2))
+        err_channel.enqueue(
+            DownloadTask(StringContent(Path("after.txt"), 0, ["x"]), d2)
+        )
+        err_channel.close()
+        with pytest.raises(CredentialsExpiredError):
+            await asyncio.gather(*err_channel.create_workers())
+        assert "g1b:after.txt" not in executed
 
-    async def test_idat_sync_courses_isolates_errors_and_aborts_on_auth_expired(  # pylint: disable=too-many-locals
+        orch_file = (
+            Path(__file__).parent.parent
+            / "src"
+            / "idat_sync"
+            / "application"
+            / "task_orchestrator.py"
+        )
+        imported = [name for _, name in iter_module_imports(orch_file)]
+        assert not any(
+            matches_prefix(name, ("idat_sync.application.events", "threading"))
+            for name in imported
+        )
+
+    async def test_idat_sync_courses_isolates_errors_and_aborts_on_auth_expired(  # pylint: disable=too-many-locals,too-many-statements
         self,
     ):
         """Isolate single-course failures and abort on CredentialsExpiredError."""
@@ -1114,11 +1065,16 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            events: list[SyncEvent] = [
-                event async for event in sync.sync_courses(tmpdir, [c1, c2])
-            ]
+            with self.assertLogs("idat_sync", level="ERROR") as err_logs:
+                events: list[SyncEvent] = [
+                    event async for event in sync.sync_courses(tmpdir, [c1, c2])
+                ]
             assert mock_rec_gw.fetch_recordings.call_count == 2
-            assert str_dl.downloaded == [Path(tmpdir) / "Course Two" / "S2" / "c2.html"]
+            assert str_dl.downloaded == [
+                Path(tmpdir) / "Course One" / "S1" / "c1.html",
+                Path(tmpdir) / "Course Two" / "S2" / "c2.html",
+            ]
+            assert any("course 1 transient failure" in m for m in err_logs.output)
             completed_courses = [
                 (e.course.id, e.error)
                 for e in events
@@ -1139,7 +1095,6 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             with pytest.raises(CredentialsExpiredError):
                 await _consume_events(sync.sync_courses(tmpdir, [c1, c2]), events)
             assert mock_rec_gw.fetch_recordings.call_count == 1
-            assert not str_dl.downloaded
             aborted_courses = [e for e in events if isinstance(e, CourseSyncCompleted)]
             assert len(aborted_courses) == 1
             assert aborted_courses[0].course.id == 1
@@ -1222,8 +1177,10 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             _ = [e async for e in sync.sync_course(bug_course, Path("out2"))]
         assert [str(exc) for exc in eg_ctx.value.exceptions] == ["internal bug"]
 
-    async def test_idat_sync_cancels_sibling_group_tasks_on_credentials_expired(self):  # pylint: disable=too-many-locals
+    async def test_idat_sync_cancels_sibling_group_tasks_on_credentials_expired(self):  # pylint: disable=too-many-locals,too-many-statements
         """Cancel sibling groups when a task raises CredentialsExpiredError."""
+        sibling_started = asyncio.Event()
+        discovery_started = asyncio.Event()
 
         class FailingDownloader(Downloader[StringContent]):
             """Stub downloader raising CredentialsExpiredError."""
@@ -1235,8 +1192,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 return content.path.name == "auth.html"
 
             async def download(self, _content: StringContent) -> None:
-                """Raise CredentialsExpiredError."""
-                await asyncio.sleep(0)
+                """Wait for sibling + discovery, then raise CredentialsExpiredError."""
+                await sibling_started.wait()
+                await discovery_started.wait()
                 raise CredentialsExpiredError("401 expired")
 
         class SiblingDownloader(Downloader[MoodleContent]):
@@ -1250,6 +1208,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             async def download(self, _content: MoodleContent) -> None:
                 """Sleep until cancelled."""
+                sibling_started.set()
                 try:
                     await asyncio.sleep(5)
                     self.finished = True
@@ -1257,15 +1216,21 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     self.cancelled = True
                     raise
 
-        class StubFileSystem:
-            """No-op FileSystemPort stub."""
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
 
-            def ensure_dir(self, _path: Path) -> None:
-                """No-op directory creation."""
+        class StubMoodleStrategy(UrlContentStrategy):
+            """Stub strategy resolving Moodle links without network I/O."""
 
-            def scan_mtimes(self, _root: Path) -> dict[Path, int]:
-                """Return empty mtime map."""
-                return {}
+            def can_handle(self, url: str) -> bool:
+                """Accept moodle URLs."""
+                return url.startswith("https://moodle/")
+
+            async def list_url_content(
+                self, url: str, filename: str, last_modified: int
+            ) -> list[MoodleContent]:
+                """Return a single MoodleContent item."""
+                return [MoodleContent(Path(filename), last_modified, url)]
 
         c1 = Course(
             id=1,
@@ -1275,35 +1240,41 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     id=1,
                     name="S1",
                     inline_contents=[StringContent(Path("auth.html"), 1, ["a"])],
-                    modules=[],
+                    modules=[
+                        CourseModule(
+                            id=1,
+                            name="M1",
+                            contents=[
+                                ModuleContent("sib.pdf", "https://moodle/sib.pdf", 1)
+                            ],
+                        )
+                    ],
                 )
             ],
         )
+        discovery_cancelled = False
+
+        async def _slow_recordings(_course_name: str) -> list[RecordingContent]:
+            nonlocal discovery_cancelled
+            discovery_started.set()
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                discovery_cancelled = True
+                raise
+            return []
+
         mock_course_gw = MagicMock(spec=CourseGateway)
         mock_rec_gw = MagicMock(spec=RecordingGateway)
-        mock_rec_gw.fetch_recordings.return_value = [
-            RecordingContent(Path("r.mp4"), 1, "https://example.com/r.mp4")
-        ]
+        mock_rec_gw.fetch_recordings.side_effect = _slow_recordings
 
-        # Use MoodleContent via a stubbed repo method for the sibling group
         failing_dl = FailingDownloader()
         sibling_dl = SiblingDownloader()
-        repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
+        repo = CourseRepository(mock_course_gw, mock_rec_gw, [StubMoodleStrategy()])
 
-        async def _fake_course_content(_course, course_dir):
-            return [
-                StringContent(Path(course_dir) / "auth.html", 1, ["a"]),
-                MoodleContent(
-                    Path(course_dir) / "sib.pdf", 1, "https://moodle/sib.pdf"
-                ),
-            ]
-
-        repo.get_course_content = _fake_course_content  # type: ignore[method-assign]
-        mock_rec_gw.fetch_recordings.return_value = []
-
-        dm = DownloadManager([failing_dl, sibling_dl], StubFileSystem())  # type: ignore[arg-type]
+        dm = DownloadManager([failing_dl, sibling_dl], mock_fs)
         orch = TaskOrchestrator([[failing_dl], [sibling_dl]])
-        sync = IDATSync(repo, dm, orch, StubFileSystem(), "Grabaciones")  # type: ignore[arg-type]
+        sync = IDATSync(repo, dm, orch, mock_fs, "Grabaciones")
 
         events: list[SyncEvent] = []
 
@@ -1312,10 +1283,102 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         assert sibling_dl.cancelled
         assert not sibling_dl.finished
+        assert discovery_cancelled
         assert any(isinstance(e, TaskDownloadFailed) for e in events)
         assert isinstance(events[-1], CourseSyncCompleted)
+        assert isinstance(events[-1].error, CredentialsExpiredError)
+
+    async def test_idat_sync_cancels_active_worker_on_discovery_credentials_expired(
+        self,
+    ):
+        """Cancel active download workers on discovery CredentialsExpiredError."""
+        worker_started = asyncio.Event()
+        worker_cancelled = False
+
+        class SlowStringDownloader(Downloader[StringContent]):
+            """Stub downloader that blocks until cancelled."""
+
+            content_type = StringContent
+
+            async def download(self, _content: StringContent) -> None:
+                """Signal start and sleep until cancelled."""
+                nonlocal worker_cancelled
+                worker_started.set()
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    worker_cancelled = True
+                    raise
+
+        async def _failing_recordings(_course_name: str) -> list[RecordingContent]:
+            await worker_started.wait()
+            raise CredentialsExpiredError("401 discovery expired")
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings.side_effect = _failing_recordings
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+
+        dl = SlowStringDownloader()
+        sync = IDATSync(
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
+            DownloadManager([dl], mock_fs),
+            TaskOrchestrator([[dl]]),
+            mock_fs,
+            "Grabaciones",
+        )
+        course = Course(
+            id=1,
+            name="Discovery Auth Fail",
+            sections=[
+                CourseSection(
+                    id=1,
+                    name="S1",
+                    inline_contents=[StringContent(Path("slow.html"), 1, ["a"])],
+                )
+            ],
+        )
+        events: list[SyncEvent] = []
+        with pytest.raises(CredentialsExpiredError, match="401 discovery expired"):
+            await _consume_events(sync.sync_course(course, Path("out")), events)
+
+        assert worker_cancelled
         assert isinstance(events[-1], CourseSyncCompleted)
         assert isinstance(events[-1].error, CredentialsExpiredError)
+
+    async def test_idat_sync_courses_isolates_pre_stream_error(self):
+        """Isolate pre-stream IDATSyncError on course 1 and still sync course 2."""
+        c1 = Course(id=1, name="Course One")
+        c2 = Course(
+            id=2,
+            name="Course Two",
+            sections=[CourseSection(id=2, name="S2")],
+        )
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(
+            side_effect=RemoteServiceError("pre-stream 503")
+        )
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+
+        sync = IDATSync(
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
+            DownloadManager([], mock_fs),
+            TaskOrchestrator([]),
+            mock_fs,
+            "Grabaciones",
+        )
+
+        events = [event async for event in sync.sync_courses(Path("root"), [c1, c2])]
+        completed = [
+            (e.course.id, e.error) for e in events if isinstance(e, CourseSyncCompleted)
+        ]
+        assert completed[0][0] == 1
+        assert isinstance(completed[0][1], RemoteServiceError)
+        assert completed[1] == (2, None)
 
     async def test_idat_sync_list_courses_lazy_populate_and_filtering(self):  # pylint: disable=too-many-locals
         """Lazily populate sections and filter already-synced or empty artifacts."""
@@ -1364,15 +1427,22 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             mock_course_gw.populate_course_sections.assert_called_once_with(c_lazy)
             missing_file = course_dir / "S1" / "missing.html"
-            assert events == [
-                CourseSyncStarted(c_lazy),
-                CourseFilesDiscovered(
-                    c_lazy, course_dir, (synced_file,), (missing_file,)
-                ),
-                TaskDownloadStarted(missing_file),
-                TaskDownloadCompleted(missing_file),
-                CourseSyncCompleted(c_lazy, None),
-            ]
+            assert events[0] == CourseSyncStarted(c_lazy, course_dir)
+            assert events[-1] == CourseSyncCompleted(c_lazy, None)
+            assert CourseFileDiscovered(c_lazy, synced_file, is_pending=False) in events
+            assert CourseFileDiscovered(c_lazy, missing_file, is_pending=True) in events
+            assert CourseDiscoveryCompleted(c_lazy, 1, 1) in events
+            assert TaskDownloadStarted(missing_file) in events
+            assert TaskDownloadCompleted(missing_file) in events
+            assert events.index(
+                CourseFileDiscovered(c_lazy, missing_file, is_pending=True)
+            ) < events.index(TaskDownloadStarted(missing_file))
+            assert all(
+                not (
+                    isinstance(e, CourseFileDiscovered) and e.path.name == "empty.html"
+                )
+                for e in events
+            )
             with pytest.raises(TypeError, match="progress_listener"):
                 sync.sync_course(c_lazy, course_dir, progress_listener=None)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
@@ -1380,16 +1450,24 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         """Verify SyncEvent immutability and log_sync_event log levels."""
         assert not hasattr(ports, "SyncProgressPort")
         assert hasattr(events_mod, "SyncEvent")
+        assert not hasattr(events_mod, "CourseFilesDiscovered")
         assert not hasattr(events_mod, "EventPublisher")
         assert not hasattr(events_mod, "noop_publisher")
 
         course = Course(id=1, name="Algebra")
-        started = events_mod.CourseSyncStarted(course=course)
-        discovered = events_mod.CourseFilesDiscovered(
+        started = events_mod.CourseSyncStarted(
             course=course,
             course_dir=Path("/tmp/Algebra"),  # noqa: S108
-            synced_paths=(Path("/tmp/Algebra/a.pdf"),),  # noqa: S108
-            pending_paths=(Path("/tmp/Algebra/b.pdf"),),  # noqa: S108
+        )
+        file_discovered = events_mod.CourseFileDiscovered(
+            course=course,
+            path=Path("/tmp/Algebra/b.pdf"),  # noqa: S108
+            is_pending=True,
+        )
+        discovery_done = events_mod.CourseDiscoveryCompleted(
+            course=course,
+            synced_count=1,
+            pending_count=1,
         )
         t_start = events_mod.TaskDownloadStarted(path=Path("/tmp/Algebra/b.pdf"))  # noqa: S108
         t_done = events_mod.TaskDownloadCompleted(path=Path("/tmp/Algebra/b.pdf"))  # noqa: S108
@@ -1404,14 +1482,24 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert isinstance(t_fail.error, IDATSyncError)
         assert isinstance(c_err.error, IDATSyncError)
 
-        for ev in (started, discovered, t_start, t_done, t_fail, c_ok, c_err):
+        for ev in (
+            started,
+            file_discovered,
+            discovery_done,
+            t_start,
+            t_done,
+            t_fail,
+            c_ok,
+            c_err,
+        ):
             assert dataclasses.is_dataclass(ev)
             with pytest.raises(dataclasses.FrozenInstanceError):
                 setattr(ev, "course" if hasattr(ev, "course") else "path", None)
 
-        with self.assertLogs("idat_sync", level="INFO") as cm:
+        with self.assertLogs("idat_sync", level="DEBUG") as cm:
             events_mod.log_sync_event(started)
-            events_mod.log_sync_event(discovered)
+            events_mod.log_sync_event(file_discovered)
+            events_mod.log_sync_event(discovery_done)
             events_mod.log_sync_event(t_start)
             events_mod.log_sync_event(t_done)
             events_mod.log_sync_event(c_ok)
@@ -1420,6 +1508,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         assert [r.levelname for r in cm.records] == [
             "INFO",
+            "DEBUG",
             "INFO",
             "INFO",
             "INFO",
@@ -1427,6 +1516,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             "ERROR",
             "ERROR",
         ]
+        assert any("Course 'Algebra': 1 synced, 1 pending." in msg for msg in cm.output)
 
     async def test_bootstrap_configure_logging_and_event_logging(self):
         """Configure logger handlers idempotently and avoid legacy publish attrs."""
@@ -1518,27 +1608,33 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
     async def test_idat_sync_sync_courses_invalidates_repository_cache_once(self):
         """Invalidate repository cache once before iterating courses."""
         call_order: list[str] = []
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_repo.invalidate_cache.side_effect = lambda: call_order.append("invalidate")
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.invalidate_cache.side_effect = lambda: call_order.append(
+            "invalidate"
+        )
 
         async def _populate(course: Course) -> Course:
             call_order.append(f"populate:{course.id}")
             return course
 
-        mock_repo.populate_course_sections = AsyncMock(side_effect=_populate)
-        mock_repo.get_course_content = AsyncMock(return_value=[])
-        mock_repo.get_recordings = AsyncMock(return_value=[])
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=_populate)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
 
         fs = LocalFileSystemAdapter()
-        dm = DownloadManager([], fs)
-        orch = TaskOrchestrator([])
-        sync = IDATSync(mock_repo, dm, orch, fs, "Grabaciones")
+        sync = IDATSync(
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
+            DownloadManager([], fs),
+            TaskOrchestrator([]),
+            fs,
+            "Grabaciones",
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             courses = [Course(id=1, name="C1"), Course(id=2, name="C2")]
             _ = [event async for event in sync.sync_courses(tmpdir, courses)]
 
-        mock_repo.invalidate_cache.assert_called_once_with()
+        mock_course_gw.invalidate_cache.assert_called_once_with()
         assert call_order == ["invalidate", "populate:1", "populate:2"]
 
     async def test_idat_sync_aclose_and_context_manager_run_all_closers_once(self):
@@ -1570,11 +1666,37 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert isinstance(ctx_sync, IDATSync)
         closer_c.assert_awaited_once_with()
 
-    async def test_idat_sync_get_course_remote_tree_disambiguates_collisions(  # pylint: disable=too-many-locals
+    async def test_idat_sync_streaming_overlap_disambiguation_and_fifo(  # pylint: disable=too-many-locals,too-many-statements
         self,
     ):
-        """Disambiguate case-insensitive path collisions in remote course tree."""
+        """Overlap discovery with downloads, disambiguate paths, and keep FIFO order."""
         long_name = f"{'L' * 96}.pdf"
+        release_recordings = asyncio.Event()
+        fast_downloaded_before_discovery_done = False
+
+        class TrackingDownloader(Downloader[MoodleContent]):
+            """Downloader tracking whether downloads finish before discovery ends."""
+
+            content_type = MoodleContent
+
+            def __init__(self) -> None:
+                self.downloaded: list[Path] = []
+
+            async def download(self, content: MoodleContent) -> None:
+                self.downloaded.append(content.path)
+                release_recordings.set()
+
+        class TrackingRecordingDownloader(Downloader[RecordingContent]):
+            """Downloader tracking recording paths."""
+
+            content_type = RecordingContent
+
+            def __init__(self) -> None:
+                self.downloaded: list[Path] = []
+
+            async def download(self, content: RecordingContent) -> None:
+                self.downloaded.append(content.path)
+
         course = Course(
             id=1,
             name="Course",
@@ -1599,15 +1721,6 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                             ],
                         ),
                         CourseModule(
-                            id=2,
-                            name="Mod",
-                            contents=[
-                                ModuleContent("file.pdf", "http://a/4", 40),
-                                ModuleContent("file (2).pdf", "http://a/5", 50),
-                                ModuleContent("file.pdf", "http://a/6", 60),
-                            ],
-                        ),
-                        CourseModule(
                             id=3,
                             name="Mod",
                             contents=[
@@ -1629,14 +1742,16 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         )
         course_dir = Path("Course")
 
-        mock_course_gw = MagicMock(spec=CourseGateway)
-        mock_recording_gw = MagicMock(spec=RecordingGateway)
-        mock_recording_gw.fetch_recordings = AsyncMock(
-            return_value=[
+        async def _slow_recordings(_name: str) -> list[RecordingContent]:
+            await release_recordings.wait()
+            return [
                 RecordingContent(Path("Semana 1/video.mp4"), 90, "http://v/1"),
                 RecordingContent(Path("Semana 1/video.mp4"), 95, "http://v/2"),
             ]
-        )
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_recording_gw = MagicMock(spec=RecordingGateway)
+        mock_recording_gw.fetch_recordings = AsyncMock(side_effect=_slow_recordings)
         mock_strategy = MagicMock(spec=UrlContentStrategy)
         mock_strategy.can_handle.return_value = True
         mock_strategy.list_url_content = AsyncMock(
@@ -1645,35 +1760,45 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             ]
         )
         repo = CourseRepository(mock_course_gw, mock_recording_gw, [mock_strategy])
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+        moodle_dl = TrackingDownloader()
+        rec_dl = TrackingRecordingDownloader()
+        sync = IDATSync(
+            repo,
+            DownloadManager([moodle_dl, rec_dl], mock_fs),
+            TaskOrchestrator([[moodle_dl], [rec_dl]]),
+            mock_fs,
+            "Grabaciones",
+        )
 
-        fs = LocalFileSystemAdapter()
-        dm = DownloadManager([], fs)
-        orch = TaskOrchestrator([])
-        sync = IDATSync(repo, dm, orch, fs, "Grabaciones")
+        events: list[SyncEvent] = []
+        async for ev in sync.sync_course(course, course_dir):
+            events.append(ev)
+            if isinstance(ev, TaskDownloadCompleted) and not any(
+                isinstance(e, CourseDiscoveryCompleted) for e in events
+            ):
+                fast_downloaded_before_discovery_done = True
 
-        items = await sync.get_course_remote_tree(course, course_dir)
-
-        expected_paths = [
-            Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf"),
-            Path("Course/Sec/Mod-[1]/parte 1/guia (2).pdf"),
-            Path("Course/Sec/Mod-[1]/Parte 1/guia (3).pdf"),
-            Path("Course/Sec/Mod-[2]/file.pdf"),
-            Path("Course/Sec/Mod-[2]/file (2).pdf"),
-            Path("Course/Sec/Mod-[2]/file (3).pdf"),
-            Path(f"Course/Sec/Mod-[3]/{long_name}"),
-            Path(f"Course/Sec/Mod-[3]/{'L' * 92} (2).pdf"),
-            Path(f"Course/Sec/Mod-[4]/1.{'x' * 98}"),
-            Path(f"Course/Sec/Mod-[4]/1.{'x' * 94} (2)"),
-            Path("Course/Grabaciones/Semana 1/video.mp4"),
-            Path("Course/Grabaciones/Semana 1/video (2).mp4"),
+        assert fast_downloaded_before_discovery_done
+        discovered_paths = [
+            e.path for e in events if isinstance(e, CourseFileDiscovered)
         ]
-        assert [item.path for item in items] == expected_paths
-        for item in items:
-            assert len(item.path.name) <= 100
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            diff = await sync.check_course_sync(course, Path(tmpdir))
-        assert len(diff.missing_paths) == 12
+        assert len(discovered_paths) == 9
+        assert len({p.as_posix().casefold() for p in discovered_paths}) == 9
+        for p in discovered_paths:
+            assert len(p.name) <= 100
+            assert events.index(
+                CourseFileDiscovered(course, p, is_pending=True)
+            ) < events.index(TaskDownloadStarted(p))
+        assert Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf") in discovered_paths
+        assert Path("Course/Sec/Mod-[1]/parte 1/guia (2).pdf") in discovered_paths
+        assert Path("Course/Sec/Mod-[1]/Parte 1/guia (3).pdf") in discovered_paths
+        assert Path(f"Course/Sec/Mod-[3]/{'L' * 92} (2).pdf") in discovered_paths
+        assert Path(f"Course/Sec/Mod-[4]/1.{'x' * 94} (2)") in discovered_paths
+        assert Path("Course/Grabaciones/Semana 1/video (2).mp4") in discovered_paths
+        assert CourseDiscoveryCompleted(course, 0, 9) in events
+        assert events[-1] == CourseSyncCompleted(course, None)
 
     async def test_windows_long_paths_work_across_filesystem_and_downloaders(self):  # pylint: disable=too-many-locals
         """Support >260 char Windows paths across filesystem and all downloaders."""
@@ -1809,14 +1934,14 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         course_refreshed = Course(
             id=2, name="Refreshed", sections=[CourseSection(id=20, name="Old")]
         )
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_repo.populate_course_sections = AsyncMock(side_effect=lambda c: c)
-        mock_repo.get_course_content = AsyncMock(return_value=[])
-        mock_repo.get_recordings = AsyncMock(return_value=[])
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
         fs = MagicMock(spec=FileSystemPort)
         fs.scan_mtimes.return_value = {}
         sync = IDATSync(
-            mock_repo,
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
             DownloadManager([], fs),
             TaskOrchestrator([]),
             fs,
@@ -1825,7 +1950,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _ = [e async for e in sync.sync_courses(tmpdir, [course_cached])]
-            mock_repo.populate_course_sections.assert_not_awaited()
+            mock_course_gw.populate_course_sections.assert_not_awaited()
             assert len(course_cached.sections) == 1
 
             _ = [
@@ -1834,10 +1959,140 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     tmpdir, [course_refreshed], refresh=True
                 )
             ]
-            mock_repo.populate_course_sections.assert_awaited_once_with(
+            mock_course_gw.populate_course_sections.assert_awaited_once_with(
                 course_refreshed
             )
             assert not course_refreshed.sections
+
+
+class TestPathDisambiguator(unittest.TestCase):
+    """Tests for streaming case-insensitive path disambiguation."""
+
+    def test_collisions_truncation_and_no_content_import(self):
+        """Disambiguate case-insensitive, long, and early-dot leaf collisions."""
+        disambiguator = PathDisambiguator()
+        assert disambiguator.disambiguate(
+            Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf")
+        ) == Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf")
+        assert disambiguator.disambiguate(
+            Path("Course/Sec/Mod-[1]/parte 1/guia.pdf")
+        ) == Path("Course/Sec/Mod-[1]/parte 1/guia (2).pdf")
+        assert disambiguator.disambiguate(
+            Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf")
+        ) == Path("Course/Sec/Mod-[1]/Parte 1/guia (3).pdf")
+
+        long_name = f"{'L' * 96}.pdf"
+        assert disambiguator.disambiguate(Path(f"Course/Sec/{long_name}")) == Path(
+            f"Course/Sec/{long_name}"
+        )
+        second_long = disambiguator.disambiguate(Path(f"Course/Sec/{long_name}"))
+        assert second_long == Path(f"Course/Sec/{'L' * 92} (2).pdf")
+        assert len(second_long.name) <= 100
+
+        early_dot = Path("Course/Sec") / ("1." + "x" * 98)
+        assert disambiguator.disambiguate(early_dot) == early_dot
+        second_early_dot = disambiguator.disambiguate(early_dot)
+        assert second_early_dot == Path("Course/Sec") / ("1." + "x" * 94 + " (2)")
+        assert len(second_early_dot.name) <= 100
+
+        path_utils_file = (
+            Path(__file__).resolve().parent.parent
+            / "src"
+            / "idat_sync"
+            / "domain"
+            / "path_utils.py"
+        )
+        imported = [name for _, name in iter_module_imports(path_utils_file)]
+        assert not any(
+            matches_prefix(name, ("idat_sync.domain.content",)) for name in imported
+        )
+
+
+class TestContentPendingClassification(unittest.TestCase):
+    """Tests for domain and DownloadManager pending-item classification."""
+
+    def test_is_content_pending_pure_in_memory(self):
+        """Classify missing, outdated, and synced Content items purely in memory."""
+        p_missing = Path("semana1/missing.pdf")
+        p_outdated = Path("semana1/outdated.pdf")
+        p_synced_equal = Path("semana1/synced_equal.pdf")
+        p_synced_newer = Path("semana1/synced_newer.pdf")
+        p_zero_mtime = Path("semana1/zero.html")
+
+        local_mtimes = {
+            p_outdated: 100,
+            p_synced_equal: 100,
+            p_synced_newer: 200,
+            p_zero_mtime: 50,
+        }
+
+        assert is_content_pending(
+            MoodleContent(p_missing, 100, "http://a/1"), local_mtimes
+        )
+        assert is_content_pending(
+            MoodleContent(p_outdated, 150, "http://a/2"), local_mtimes
+        )
+        assert not is_content_pending(
+            MoodleContent(p_synced_equal, 100, "http://a/3"), local_mtimes
+        )
+        assert not is_content_pending(
+            MoodleContent(p_synced_newer, 100, "http://a/4"), local_mtimes
+        )
+        assert not is_content_pending(
+            StringContent(p_zero_mtime, 0, ["<p>Hi</p>"]), local_mtimes
+        )
+
+    def test_download_manager_is_pending_delegates_to_filesystem_port(self):
+        """Classify pending Content items including StringContent byte comparison."""
+        mock_fs = MagicMock(spec=FileSystemPort)
+        manager = DownloadManager([], file_system=mock_fs)
+
+        p_missing = Path("missing.pdf")
+        p_outdated = Path("outdated.pdf")
+        p_synced = Path("synced.pdf")
+        p_same_html = Path("same.html")
+        p_changed_html = Path("changed.html")
+        p_unreadable_html = Path("unreadable.html")
+        p_empty_html = Path("empty.html")
+
+        local_mtimes = {
+            p_outdated: 100,
+            p_synced: 200,
+            p_same_html: 50,
+            p_changed_html: 50,
+            p_unreadable_html: 50,
+            p_empty_html: 50,
+        }
+        bytes_by_path: dict[Path, bytes | None] = {
+            p_same_html: b"<p>Same</p>",
+            p_changed_html: b"<p>Old</p>",
+            p_unreadable_html: None,
+        }
+        mock_fs.read_bytes.side_effect = bytes_by_path.get
+
+        assert manager.is_pending(
+            MoodleContent(p_missing, 100, "http://a/1"), local_mtimes
+        )
+        assert manager.is_pending(
+            MoodleContent(p_outdated, 150, "http://a/2"), local_mtimes
+        )
+        assert not manager.is_pending(
+            MoodleContent(p_synced, 150, "http://a/3"), local_mtimes
+        )
+        assert not manager.is_pending(
+            StringContent(p_same_html, 0, ["  <p>Same</p>  "]), local_mtimes
+        )
+        assert manager.is_pending(
+            StringContent(p_changed_html, 0, ["<p>New</p>"]), local_mtimes
+        )
+        assert manager.is_pending(
+            StringContent(p_unreadable_html, 0, ["<p>New</p>"]), local_mtimes
+        )
+        assert not manager.is_pending(
+            StringContent(p_empty_html, 0, ["   "]), local_mtimes
+        )
+        mock_fs.scan_mtimes.assert_not_called()
+        mock_fs.ensure_dir.assert_not_called()
 
 
 if __name__ == "__main__":

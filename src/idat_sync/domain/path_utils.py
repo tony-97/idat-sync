@@ -2,6 +2,7 @@
 
 import re
 import unicodedata
+from pathlib import Path
 
 WINDOWS_RESERVED = {
     "CON",
@@ -96,3 +97,26 @@ def safe_suffixed_segment(prefix: str, suffix: str, *, max_len: int = 100) -> st
         ascii_only=False,
         preserve_extension=False,
     )
+
+
+class PathDisambiguator:  # pylint: disable=too-few-public-methods
+    """Resolve case-insensitive path collisions by numbering duplicate leaf names."""
+
+    def __init__(self) -> None:
+        """Initialize an empty case-folded path registry."""
+        self._seen_keys: set[str] = set()
+
+    def disambiguate(self, path: Path) -> Path:
+        """Return ``path`` unchanged if unseen, or with a unique `` (N)`` leaf."""
+        candidate = path
+        key = candidate.as_posix().casefold()
+        if key in self._seen_keys:
+            stem, ext = split_extension(path.name)
+            counter = 2
+            while key in self._seen_keys:
+                new_name = safe_suffixed_segment(stem, f" ({counter}){ext}")
+                candidate = path.with_name(new_name)
+                key = candidate.as_posix().casefold()
+                counter += 1
+        self._seen_keys.add(key)
+        return candidate

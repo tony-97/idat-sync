@@ -1,15 +1,15 @@
-"""Download manager for tree diffing and downloader task creation."""
+"""Download manager for per-item pending checks and downloader task creation."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from idat_sync.application.ports import Downloader, DownloadTask, FileSystemPort
 from idat_sync.domain.content import Content, StringContent
-from idat_sync.domain.sync import SyncDiff
+from idat_sync.domain.sync import is_content_pending
 
 
 class DownloadManager:
-    """Matches Content items to Downloaders and diffs remote vs. local trees."""
+    """Matches Content items to Downloaders and checks whether items are pending."""
 
     def __init__(
         self,
@@ -27,35 +27,16 @@ class DownloadManager:
                 return task
         return None
 
-    def diff_trees(
-        self, root_dir: str | Path, remote_contents: Sequence[Content]
-    ) -> SyncDiff:
-        """Compare ``remote_contents`` against local files under ``root_dir``."""
-        local_map = dict(self.file_system.scan_mtimes(Path(root_dir)))
-        changed_paths: set[Path] = set()
-        for content in remote_contents:
-            if (
-                isinstance(content, StringContent)
-                and not content.last_modified
-                and content.path in local_map
-                and (rendered := content.rendered_bytes()) is not None
-                and self.file_system.read_bytes(content.path) != rendered
-            ):
-                changed_paths.add(content.path)
-        return SyncDiff.from_trees(
-            remote_contents, local_map, outdated_paths=changed_paths
+    def is_pending(self, content: Content, local_mtimes: Mapping[Path, int]) -> bool:
+        """Return True when ``content`` must be downloaded or rewritten."""
+        if is_content_pending(content, local_mtimes):
+            return True
+        return (
+            isinstance(content, StringContent)
+            and not content.last_modified
+            and (rendered := content.rendered_bytes()) is not None
+            and self.file_system.read_bytes(content.path) != rendered
         )
-
-    def prepare_download_tasks(
-        self,
-        contents: Sequence[Content],
-    ) -> list[DownloadTask]:
-        """Build DownloadTasks for all supported items in ``contents``."""
-        return [
-            task
-            for content in contents
-            if (task := self.create_download_task(content)) is not None
-        ]
 
 
 __all__ = ["DownloadManager"]

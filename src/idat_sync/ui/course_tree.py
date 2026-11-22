@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from idat_sync.domain.course import Course
 
@@ -19,6 +19,7 @@ class RowStatus(StrEnum):
     IDLE = "Idle"
     QUEUED = "Queued"
     FETCHING = "Fetching contents..."
+    FETCHING_AND_SYNCING = "Fetching & Syncing"
     SYNCING = "Syncing"
     SYNCED = "Synced"
     PENDING = "Pending"
@@ -125,6 +126,8 @@ class _CourseNode:  # pylint: disable=too-many-instance-attributes
     status: RowStatus = RowStatus.IDLE
     progress_text: str = "0%"
     open: bool = False
+    course_dir: Path | None = None
+    discovering: bool = False
     root_folders: dict[str, _FolderNode] = field(default_factory=dict)
     root_files: dict[str, _FileNode] = field(default_factory=dict)
     file_paths: set[Path] = field(default_factory=set)
@@ -153,6 +156,17 @@ class CourseTree:
         """Initialize an empty course tree."""
         self._nodes: dict[int, _CourseNode] = {}
         self._file_to_course: dict[Path, tuple[int, _FileNode]] = {}
+
+    @staticmethod
+    def _format_progress(node: _CourseNode) -> tuple[RowStatus, str]:
+        if node.progress is None:
+            return (RowStatus.IDLE, "0%")
+        if node.discovering:
+            return (
+                RowStatus.FETCHING_AND_SYNCING,
+                f"{node.progress.done}/{node.progress.total}+",
+            )
+        return (RowStatus.SYNCING, str(node.progress))
 
     def set_courses(
         self,
@@ -188,35 +202,52 @@ class CourseTree:
             if (node := self._nodes.get(course_id)) is None:
                 continue
             self._clear_course_children(node)
+            node.course_dir = None
+            node.discovering = False
             node.progress = None
             node.status = RowStatus.QUEUED
             node.progress_text = "0%"
             node.open = False
 
-    def show_files(
-        self,
-        course_id: int,
-        course_dir: Path,
-        synced: Sequence[Path],
-        pending: Sequence[Path],
-    ) -> None:
-        """Append synced and pending file nodes additively under ``course_id``."""
+    def start_course(self, course_id: int, course_dir: Path) -> None:
+        """Initialize incremental discovery state for ``course_id``."""
         if (node := self._nodes.get(course_id)) is None:
             return
-        for path in synced:
-            self._insert_file(node, course_dir, path, RowStatus.SYNCED)
-        for path in pending:
+        self._clear_course_children(node)
+        node.course_dir = course_dir
+        node.discovering = True
+        node.progress = Progress()
+        node.status = RowStatus.FETCHING
+        node.progress_text = "..."
+        node.open = False
+
+    def add_file(self, course_id: int, path: Path, *, is_pending: bool) -> None:
+        """Insert one discovered file under ``course_id`` and refresh progress."""
+        if (node := self._nodes.get(course_id)) is None:
+            return
+        course_dir = node.course_dir or Path()
+        if node.progress is None:
+            node.progress = Progress()
+        if is_pending:
             file_node = self._insert_file(node, course_dir, path, RowStatus.PENDING)
             node.file_paths.add(path)
             self._file_to_course[path] = (course_id, file_node)
+        else:
+            self._insert_file(node, course_dir, path, RowStatus.SYNCED)
+            node.progress.done += 1
+        node.progress.total += 1
+        node.status, node.progress_text = self._format_progress(node)
+        node.open = True
 
+    def finish_discovery(self, course_id: int) -> None:
+        """Transition ``course_id`` from discovering to percentage Syncing progress."""
+        if (node := self._nodes.get(course_id)) is None:
+            return
+        node.discovering = False
         if node.progress is None:
             node.progress = Progress()
-        node.progress.done += len(synced)
-        node.progress.total += len(synced) + len(pending)
         node.status = RowStatus.SYNCING
         node.progress_text = str(node.progress)
-        node.open = True
 
     def set_file_status(self, path: Path, status: RowStatus) -> None:
         """Update a pending file row and advance parent progress on completion."""
@@ -230,23 +261,16 @@ class CourseTree:
             and node.progress is not None
         ):
             node.progress.done += 1
-            node.status = RowStatus.SYNCING
-            node.progress_text = str(node.progress)
+            node.status, node.progress_text = self._format_progress(node)
 
     def set_course_status(self, course_id: int, status: RowStatus) -> None:
         """Update a course row's status and percentage."""
         if (node := self._nodes.get(course_id)) is None:
             return
-        if status is RowStatus.FETCHING:
-            node.progress = Progress()
         if status is RowStatus.COMPLETED:
             pct = "100%"
-        elif (
-            status is RowStatus.FAILED
-            and node.progress is not None
-            and node.progress.total
-        ):
-            pct = str(node.progress)
+        elif status is RowStatus.FAILED:
+            pct = node.progress_text
         else:
             pct = "0%"
         node.status = status

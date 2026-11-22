@@ -26,8 +26,12 @@ from idat_sync.domain.content import (
     StringContent,
 )
 from idat_sync.domain.course import get_in_progress_course_ids
-from idat_sync.domain.path_utils import safe_filename, safe_path_segment
-from idat_sync.domain.sync import SyncDiff
+from idat_sync.domain.path_utils import (
+    PathDisambiguator,
+    safe_filename,
+    safe_path_segment,
+)
+from idat_sync.domain.sync import is_content_pending
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import MoodleDownloader
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
@@ -391,8 +395,8 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
                 f"Missing introattachments: {expected_att_names - emitted_names}"
             )
 
-    async def test_moodle_adapter_and_repository_map_real_courses(self):
-        """Map real course JSON fixture through adapters, repository, and SyncDiff."""
+    async def test_moodle_adapter_and_repository_map_real_courses(self):  # pylint: disable=too-many-locals
+        """Map real course JSON fixture through adapters, streaming repo, and domain."""
         moodle_adapter = self._build_moodle_adapter()
         sp_adapter = self._build_sharepoint_adapter()
         repo = CourseRepository(
@@ -406,26 +410,27 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
         assert get_in_progress_course_ids(courses)
 
         all_remote_contents: list[Content] = []
+        disambiguator = PathDisambiguator()
+        unique_paths: set[str] = set()
         for course in courses:
             await repo.populate_course_sections(course)
             course_dir = Path(safe_filename(course.name))
-            items = await repo.get_course_content(course, course_dir)
-            for item in items:
+            async for item in repo.stream_course_content(course, course_dir):
                 assert isinstance(
                     item, (StringContent, MoodleContent, SharepointContent)
                 )
                 assert not item.path.is_absolute()
                 assert item.path.is_relative_to(course_dir)
-            all_remote_contents.extend(items)
+                resolved_path = disambiguator.disambiguate(item.path)
+                key = resolved_path.as_posix().casefold()
+                assert key not in unique_paths
+                unique_paths.add(key)
+                assert is_content_pending(item, {})
+                all_remote_contents.append(item)
 
         assert len(all_remote_contents) > 0
         self._assert_sharepoint_routing(sp_adapter)
         self._assert_assignments_mapped(all_remote_contents)
-
-        diff = SyncDiff.from_trees(all_remote_contents, {})
-        assert diff.missing_paths == {item.path for item in all_remote_contents}
-        assert diff.synced_paths == set()
-        assert diff.outdated_paths == set()
 
 
 @unittest.skipUnless(

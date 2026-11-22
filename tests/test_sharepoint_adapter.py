@@ -15,6 +15,8 @@ import httpx
 import pytest
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_runtime_context import ClientRuntimeContext
+from office365.runtime.http.http_method import HttpMethod
+from office365.runtime.http.request_options import RequestOptions
 from office365.runtime.paths.resource_path import ResourcePath
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
@@ -479,6 +481,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             rate_limiter=limiter,
         )
 
+        client.get_client_from_url("https://contoso.sharepoint.com/other")
         called_urls = [call.args[0] for call in mock_ctx_cls.call_args_list]
         assert "https://contoso.sharepoint.com/sites/ACAD" in called_urls
         assert "https://contoso-my.sharepoint.com" in called_urls
@@ -599,6 +602,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             "SPOIDCRL": "evil"
         }
 
+        client.get_client_from_url("https://contoso.sharepoint.com/other")
         acad_cb = next(
             cb
             for url, cb in captured_callbacks
@@ -637,25 +641,35 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         mock_sleep.reset_mock()
 
         mock_folder = MagicMock()
-        mock_ctx.web.get_folder_by_guest_url.return_value = mock_folder
+        mock_ctx.web.get_folder_by_guest_url_extended.return_value = mock_folder
         folder_url = "https://contoso.sharepoint.com/:f:/s/Course/folder"
         assert await client.fetch_folder_by_guest_url(folder_url) is mock_folder
-        mock_ctx.web.get_folder_by_guest_url.assert_called_once_with(folder_url)
-        mock_ctx.load.assert_called_with(mock_folder, client.properties_to_retrieve)
+        mock_ctx.web.get_folder_by_guest_url_extended.assert_called_once_with(
+            folder_url, ensure_access=True
+        )
+        mock_folder.select.assert_called_once_with(client.properties_to_retrieve)
 
-        mock_guest_file = MagicMock()
-        mock_ctx.web.get_file_by_guest_url.return_value = mock_guest_file
+        mock_guest_file = MagicMock(unique_id="uid-123")
+        mock_ctx.web.get_file_by_guest_url_extended.return_value = mock_guest_file
         file_url = "https://contoso.sharepoint.com/:b:/s/Course/file"
         assert await client.fetch_file_by_guest_url(file_url) is mock_guest_file
-        mock_ctx.web.get_file_by_guest_url.assert_called_once_with(file_url)
+        mock_ctx.web.get_file_by_guest_url_extended.assert_called_once_with(
+            file_url, ensure_access=True
+        )
+        mock_guest_file.select.assert_called_once_with(client.properties_to_retrieve)
+        mock_ctx.load.assert_not_called()
 
         mock_ctx.web.get_file_by_id.return_value = mock_guest_file
-        direct_url = (
-            "https://contoso.sharepoint.com/sites/Course/doc.aspx"
-            "?sourcedoc=%7BABC-123%7D"
+        assert (
+            await client.fetch_file_by_id(
+                "https://contoso.sharepoint.com/sites/Course/doc.aspx", "ABC-123"
+            )
+            is mock_guest_file
         )
-        assert await client.fetch_file_by_id(direct_url, "ABC-123") is mock_guest_file
         mock_ctx.web.get_file_by_id.assert_called_once_with("ABC-123")
+        mock_ctx.load.assert_called_once_with(
+            mock_guest_file, client.properties_to_retrieve
+        )
 
         mock_folder.get_files.return_value.select.return_value.execute_query_async = (
             AsyncMock(return_value=[mock_guest_file])
@@ -673,6 +687,9 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         dest = io.BytesIO()
         mock_guest_file.download_session_async = AsyncMock()
         await client.download_file(mock_guest_file, dest)
+        mock_guest_file.set_property.assert_called_once_with(
+            "Id", "uid-123", persist_changes=False
+        )
         mock_guest_file.download_session_async.assert_awaited_once_with(
             dest, use_path=False
         )
@@ -1032,9 +1049,9 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_called()
         mock_ctx.web.current_user.get_personal_site.assert_not_called()
         mock_transport_cls.assert_called_once_with()
-        assert mock_ctx.with_auto_retry.call_count == 2
+        assert mock_ctx.with_auto_retry.call_count == 1
         assert (
-            mock_ctx.pending_request.return_value.with_async_transport.call_count == 2
+            mock_ctx.pending_request.return_value.with_async_transport.call_count == 1
         )
         mock_ctx.pending_request.return_value.with_async_transport.assert_called_with(
             mock_transport_cls.return_value
@@ -1148,6 +1165,93 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             assert isinstance(client, SharepointClient)
 
         mock_transport_cls.return_value.aclose.assert_awaited_once_with()
+
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_get_client_from_url_returns_fresh_context_on_fallback(
+        self, mock_ctx_cls, mock_transport_cls
+    ):
+        """Return a fresh ClientContext on fallback wired with shared transport."""
+        created_ctxs: list[MagicMock] = []
+
+        def _build_ctx(_site_url):
+            ctx = MagicMock()
+            ctx.with_cookies.return_value = ctx
+            ctx.with_auto_retry.return_value = ctx
+            created_ctxs.append(ctx)
+            return ctx
+
+        mock_ctx_cls.side_effect = _build_ctx
+        client = SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic/",
+            rate_limiter=AsyncRateLimiter(0.0),
+        )
+        mock_ctx_cls.reset_mock()
+        created_ctxs.clear()
+
+        ctx_a = client.get_client_from_url("https://idat628.sharepoint.com/other/a")
+        ctx_b = client.get_client_from_url("https://idat628.sharepoint.com/other/b")
+
+        assert ctx_a is created_ctxs[0]
+        assert ctx_b is created_ctxs[1]
+        assert ctx_a is not ctx_b
+        assert [c.args[0] for c in mock_ctx_cls.call_args_list] == [
+            "https://idat628.sharepoint.com/sites/Academic",
+            "https://idat628.sharepoint.com/sites/Academic",
+        ]
+        for created in created_ctxs:
+            created.pending_request.return_value.with_async_transport.assert_called_once_with(
+                mock_transport_cls.return_value
+            )
+
+    def test_form_digest_skips_get_and_caches_per_site_for_post(self):
+        """Skip form digest on GET and cache ContextWebInformation per site on POST."""
+        site_url = "https://idat628.sharepoint.com/sites/Academic"
+        with patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport"):
+            client = SharepointClient(
+                cookies=[
+                    {
+                        "name": "FedAuth",
+                        "value": "tok",
+                        "domain": ".sharepoint.com",
+                    }
+                ],  # type: ignore[arg-type]
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                academic_site_url=site_url,
+                rate_limiter=AsyncRateLimiter(0.0),
+            )
+        pending1 = client.get_client(site_url).pending_request()
+        pending2 = client.get_client(site_url).pending_request()
+
+        with (
+            patch.object(pending1, "ensure_form_digest") as mock_digest1,
+            patch.object(pending2, "ensure_form_digest") as mock_digest2,
+        ):
+            get_req = RequestOptions(f"{site_url}/_api/web")
+            get_req.method = HttpMethod.Get
+            pending1.beforeExecute(get_req)
+            mock_digest1.assert_not_called()
+            assert "X-RequestDigest" not in get_req.headers
+
+            def _populate_digest(req: RequestOptions) -> None:
+                pending1.context_info.FormDigestValue = "digest-token-1"
+                pending1.context_info.FormDigestTimeoutSeconds = 1800
+                req.set_header("X-RequestDigest", "digest-token-1")
+
+            mock_digest1.side_effect = _populate_digest
+            post_req1 = RequestOptions(f"{site_url}/_api/Web/GetFileByGuestUrlExtended")
+            post_req1.method = HttpMethod.Post
+            pending1.beforeExecute(post_req1)
+            mock_digest1.assert_called_once_with(post_req1)
+            assert post_req1.headers.get("X-RequestDigest") == "digest-token-1"
+
+            post_req2 = RequestOptions(f"{site_url}/_api/Web/GetFileByGuestUrlExtended")
+            post_req2.method = HttpMethod.Post
+            pending2.beforeExecute(post_req2)
+            mock_digest2.assert_not_called()
+            assert post_req2.headers.get("X-RequestDigest") == "digest-token-1"
 
 
 if __name__ == "__main__":
