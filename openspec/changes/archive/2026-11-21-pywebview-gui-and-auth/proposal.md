@@ -29,7 +29,7 @@ Bundling Playwright forces ~50 MB of Node.js driver binaries plus ~150 MB of Chr
 ## Impact
 
 - **Code**: `src/idat_sync/config.py`, `src/idat_sync/bootstrap.py`, `src/idat_sync/infrastructure/sharepoint_auth.py`, `src/idat_sync/ui/{app.py,base.py,login_frame.py,sync_frame.py,course_tree.py,__init__.py}` (deleting `icons.py` and `mfa_dialog.py`), `frontend/`, `tests/{test_auth.py,test_sharepoint_auth.py,test_architecture.py}`.
-- **Packaging & Docs**: `pyproject.toml`, `buildozer.spec`, `.github/workflows/build_and_deploy.yml`, `README.md`, `colab.ipynb`, `docs/adr/0006-pywebview-and-static-astro-ui.md`, `agent-os/standards/{backend/client-adapter-acl.md,global/layer-boundaries.md,testing/composition-and-seams.md}`.
+- **Packaging & Docs**: `pyproject.toml`, `buildozer.spec`, `.github/workflows/build_and_deploy.yml`, `README.md`, `colab.ipynb`, `docs/adr/0007-pywebview-and-static-astro-ui.md`, `agent-os/standards/{backend/client-adapter-acl.md,global/layer-boundaries.md,testing/composition-and-seams.md}`.
 - **Applicable Agent-OS Standards (`agent-os/standards/index.yml`)**:
   - `global/layer-boundaries`
   - `testing/composition-and-seams`

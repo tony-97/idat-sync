@@ -86,6 +86,7 @@ import ActionFooter from "../components/ActionFooter.astro";
           case "downloading":
           case "fetching":
           case "fetching contents...":
+          case "fetching & syncing":
           case "syncing":
             return "bg-blue-50 text-blue-700 ring-blue-200";
           case "failed":
@@ -123,7 +124,7 @@ import ActionFooter from "../components/ActionFooter.astro";
 
           const row = document.createElement("div");
           row.className =
-            "grid grid-cols-[1fr_7.5rem_4.5rem] items-center px-4 py-2 hover:bg-slate-50";
+            "grid grid-cols-[1fr_9.5rem_4.5rem] items-center px-4 py-2 hover:bg-slate-50";
 
           const left = document.createElement("div");
           left.className = "flex min-w-0 items-center gap-2";
@@ -172,7 +173,7 @@ import ActionFooter from "../components/ActionFooter.astro";
           const statusWrap = document.createElement("div");
           if (node.status) {
             const badge = document.createElement("span");
-            badge.className = `inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${badgeClass(node.status)}`;
+            badge.className = `inline-flex items-center whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${badgeClass(node.status)}`;
             badge.textContent = node.status;
             statusWrap.appendChild(badge);
           }

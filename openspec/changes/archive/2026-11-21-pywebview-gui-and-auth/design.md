@@ -2,7 +2,7 @@
 
 ## Context
 
-See `proposal.md` for motivation and [ADR-0006](../../../docs/adr/0006-pywebview-and-static-astro-ui.md) for the long-lived architectural record. Per [ADR-0001](../../../docs/adr/0001-hexagonal-ports-and-adapters.md) and [ADR-0005](../../../docs/adr/0005-platformdirs-gui-root-and-file-credentials.md), `idat-sync` enforces strict inward dependency inversion (`ui/` and `infrastructure/` -> `application/` -> `domain/`) with `bootstrap.py` as the single composition root. Detailed primary-source verification of `pywebview` platform backends (`edgechromium.py`, `cocoa.py`, `gtk.py`, `android/__init__.py`) lives in `.scratch/pywebview-gui-and-auth/research.md`.
+See `proposal.md` for motivation and [ADR-0007](../../../docs/adr/0007-pywebview-and-static-astro-ui.md) for the long-lived architectural record. Per [ADR-0001](../../../docs/adr/0001-hexagonal-ports-and-adapters.md) and [ADR-0005](../../../docs/adr/0005-platformdirs-gui-root-and-file-credentials.md), `idat-sync` enforces strict inward dependency inversion (`ui/` and `infrastructure/` -> `application/` -> `domain/`) with `bootstrap.py` as the single composition root. Detailed primary-source verification of `pywebview` platform backends (`edgechromium.py`, `cocoa.py`, `gtk.py`, `android/__init__.py`) lives in `.scratch/pywebview-gui-and-auth/research.md`.
 
 ## Goals / Non-Goals
 
