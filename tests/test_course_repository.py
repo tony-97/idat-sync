@@ -624,6 +624,44 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         await early_gen.aclose()
         assert other_mod_cancelled.is_set()
 
+        # Cancelling the consuming task cancels unfinished module tasks
+        other_mod_cancelled.clear()
+        other_started.clear()
+        slow_only_course = Course(
+            id=3,
+            name="C3",
+            sections=[
+                CourseSection(
+                    id=30,
+                    name="S1",
+                    modules=[
+                        CourseModule(
+                            id=2,
+                            name="ModB",
+                            contents=[
+                                ModuleContent(
+                                    "other.pdf", "https://sharepoint/other", 3
+                                ),
+                            ],
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        async def _consume_until_cancelled() -> None:
+            async for _ in self.repo.stream_course_content(
+                slow_only_course, Path("Course")
+            ):
+                pass
+
+        consumer = asyncio.create_task(_consume_until_cancelled())
+        await other_started.wait()
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        assert other_mod_cancelled.is_set()
+
         # CredentialsExpiredError cancels other module tasks and stops ModA
         other_mod_cancelled.clear()
         other_started.clear()

@@ -105,14 +105,14 @@ class CourseRepository:
     async def _resolve_module(
         self,
         module_contents: Sequence[ModuleContent],
-        mod_name: Path,
+        module_dir: Path,
         course_dir: str | Path,
     ) -> list[Content]:
         resolved: list[Content] = []
         for module_content in module_contents:
             contents = await self.list_url_content(module_content)
             resolved.extend(
-                item.in_folder(mod_name).in_folder(course_dir) for item in contents
+                item.in_folder(module_dir).in_folder(course_dir) for item in contents
             )
         return resolved
 
@@ -133,15 +133,15 @@ class CourseRepository:
             for module in section.modules:
                 if not module.name:
                     continue
-                mod_name = Path(sec_name) / safe_suffixed_segment(
+                module_dir = Path(sec_name) / safe_suffixed_segment(
                     module.name, f"-[{module.id}]"
                 )
                 inline_items.extend(
-                    item.in_folder(mod_name).in_folder(course_dir)
+                    item.in_folder(module_dir).in_folder(course_dir)
                     for item in module.inline_contents
                 )
                 if module.contents:
-                    jobs.append((module.contents, mod_name))
+                    jobs.append((module.contents, module_dir))
         return inline_items, jobs
 
     async def stream_course_content(
@@ -151,9 +151,9 @@ class CourseRepository:
         inline_items, jobs = self._collect_stream_plan(course, course_dir)
         tasks = [
             asyncio.create_task(
-                self._resolve_module(module_contents, mod_name, course_dir)
+                self._resolve_module(module_contents, module_dir, course_dir)
             )
-            for module_contents, mod_name in jobs
+            for module_contents, module_dir in jobs
         ]
         try:
             if tasks:

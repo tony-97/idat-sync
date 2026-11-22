@@ -150,11 +150,6 @@ async def _consume_events(agen, events: list[SyncEvent]) -> None:
         events.append(event)  # noqa: PERF401
 
 
-async def _empty_content_stream(_course, _course_dir):
-    for item in ():
-        yield item
-
-
 class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """End-to-end and seam tests for synchronization, downloaders, and boundaries."""
 
@@ -432,20 +427,17 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
     async def test_idat_sync_orchestration_with_injected_collaborators(self):
         """Verify IDATSync orchestration events and directory creation."""
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_mgr = MagicMock(spec=DownloadManager)
-        orch = TaskOrchestrator([])
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
         mock_fs = MagicMock(spec=FileSystemPort)
         mock_fs.scan_mtimes.return_value = {}
 
-        mock_repo.stream_course_content.side_effect = _empty_content_stream
-        mock_repo.get_recordings = AsyncMock(return_value=[])
-        mock_repo.populate_course_sections = AsyncMock(side_effect=lambda c: c)
-
         sync = IDATSync(
-            course_repository=mock_repo,
-            download_manager=mock_mgr,
-            task_orchestrator=orch,
+            course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
+            download_manager=DownloadManager([], mock_fs),
+            task_orchestrator=TaskOrchestrator([]),
             file_system=mock_fs,
             recordings_folder_name="Grabaciones",
         )
@@ -464,7 +456,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Grabaciones")
 
         # sync_courses & list_courses
-        mock_repo.list_courses = AsyncMock(return_value=[course])
+        mock_course_gw.list_courses = AsyncMock(return_value=[course])
         assert await sync.list_courses() == [course]
         _ = [event async for event in sync.sync_courses(Path("root_folder"), [course])]
         mock_fs.ensure_dir.assert_any_call(Path("root_folder") / "Algorithms")
@@ -653,30 +645,43 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
     async def test_idat_sync_uses_injected_recordings_folder_name(self):
         """Use configured recordings_folder_name when syncing a course."""
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_mgr = MagicMock(spec=DownloadManager)
-        orch = TaskOrchestrator([])
+
+        class StubRecordingDownloader(Downloader[RecordingContent]):
+            """No-op recording downloader."""
+
+            content_type = RecordingContent
+
+            async def download(self, _content: RecordingContent) -> None:
+                """No-op download."""
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(
+            return_value=[RecordingContent(Path("rec.mp4"), 1, "https://rec/1")]
+        )
         mock_fs = MagicMock(spec=FileSystemPort)
         mock_fs.scan_mtimes.return_value = {}
-
-        mock_repo.stream_course_content.side_effect = _empty_content_stream
-        mock_repo.get_recordings = AsyncMock(return_value=[])
-        mock_repo.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        rec_dl = StubRecordingDownloader()
 
         sync = IDATSync(
-            course_repository=mock_repo,
-            download_manager=mock_mgr,
-            task_orchestrator=orch,
+            course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
+            download_manager=DownloadManager([rec_dl], mock_fs),
+            task_orchestrator=TaskOrchestrator([[rec_dl]]),
             file_system=mock_fs,
             recordings_folder_name="Videos",
         )
 
         course = Course(id=1, name="Algorithms")
-        _ = [event async for event in sync.sync_course(course, Path("target_dir"))]
+        events = [event async for event in sync.sync_course(course, Path("target_dir"))]
 
         mock_fs.ensure_dir.assert_any_call(Path("target_dir") / "Videos")
-        mock_repo.get_recordings.assert_called_once_with(
-            "Algorithms", Path("target_dir") / "Videos"
+        mock_rec_gw.fetch_recordings.assert_called_once_with("Algorithms")
+        assert (
+            CourseFileDiscovered(
+                course, Path("target_dir") / "Videos" / "rec.mp4", is_pending=True
+            )
+            in events
         )
 
     async def test_create_sync_service_wires_sync_config(self):  # noqa: PLR0915  # pylint: disable=too-many-locals,too-many-statements
@@ -1174,6 +1179,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
     async def test_idat_sync_cancels_sibling_group_tasks_on_credentials_expired(self):  # pylint: disable=too-many-locals,too-many-statements
         """Cancel sibling groups when a task raises CredentialsExpiredError."""
+        sibling_started = asyncio.Event()
+        discovery_started = asyncio.Event()
 
         class FailingDownloader(Downloader[StringContent]):
             """Stub downloader raising CredentialsExpiredError."""
@@ -1185,8 +1192,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 return content.path.name == "auth.html"
 
             async def download(self, _content: StringContent) -> None:
-                """Raise CredentialsExpiredError."""
-                await asyncio.sleep(0)
+                """Wait for sibling + discovery, then raise CredentialsExpiredError."""
+                await sibling_started.wait()
+                await discovery_started.wait()
                 raise CredentialsExpiredError("401 expired")
 
         class SiblingDownloader(Downloader[MoodleContent]):
@@ -1200,6 +1208,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             async def download(self, _content: MoodleContent) -> None:
                 """Sleep until cancelled."""
+                sibling_started.set()
                 try:
                     await asyncio.sleep(5)
                     self.finished = True
@@ -1207,15 +1216,21 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     self.cancelled = True
                     raise
 
-        class StubFileSystem:
-            """No-op FileSystemPort stub."""
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
 
-            def ensure_dir(self, _path: Path) -> None:
-                """No-op directory creation."""
+        class StubMoodleStrategy(UrlContentStrategy):
+            """Stub strategy resolving Moodle links without network I/O."""
 
-            def scan_mtimes(self, _root: Path) -> dict[Path, int]:
-                """Return empty mtime map."""
-                return {}
+            def can_handle(self, url: str) -> bool:
+                """Accept moodle URLs."""
+                return url.startswith("https://moodle/")
+
+            async def list_url_content(
+                self, url: str, filename: str, last_modified: int
+            ) -> list[MoodleContent]:
+                """Return a single MoodleContent item."""
+                return [MoodleContent(Path(filename), last_modified, url)]
 
         c1 = Course(
             id=1,
@@ -1225,33 +1240,41 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     id=1,
                     name="S1",
                     inline_contents=[StringContent(Path("auth.html"), 1, ["a"])],
-                    modules=[],
+                    modules=[
+                        CourseModule(
+                            id=1,
+                            name="M1",
+                            contents=[
+                                ModuleContent("sib.pdf", "https://moodle/sib.pdf", 1)
+                            ],
+                        )
+                    ],
                 )
             ],
         )
+        discovery_cancelled = False
+
+        async def _slow_recordings(_course_name: str) -> list[RecordingContent]:
+            nonlocal discovery_cancelled
+            discovery_started.set()
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                discovery_cancelled = True
+                raise
+            return []
+
         mock_course_gw = MagicMock(spec=CourseGateway)
         mock_rec_gw = MagicMock(spec=RecordingGateway)
-        mock_rec_gw.fetch_recordings.return_value = [
-            RecordingContent(Path("r.mp4"), 1, "https://example.com/r.mp4")
-        ]
+        mock_rec_gw.fetch_recordings.side_effect = _slow_recordings
 
-        # Use MoodleContent via a stubbed repo method for the sibling group
         failing_dl = FailingDownloader()
         sibling_dl = SiblingDownloader()
-        repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
+        repo = CourseRepository(mock_course_gw, mock_rec_gw, [StubMoodleStrategy()])
 
-        async def _fake_course_content(_course, course_dir):
-            yield StringContent(Path(course_dir) / "auth.html", 1, ["a"])
-            yield MoodleContent(
-                Path(course_dir) / "sib.pdf", 1, "https://moodle/sib.pdf"
-            )
-
-        repo.stream_course_content = _fake_course_content  # type: ignore[method-assign]
-        mock_rec_gw.fetch_recordings.return_value = []
-
-        dm = DownloadManager([failing_dl, sibling_dl], StubFileSystem())  # type: ignore[arg-type]
+        dm = DownloadManager([failing_dl, sibling_dl], mock_fs)
         orch = TaskOrchestrator([[failing_dl], [sibling_dl]])
-        sync = IDATSync(repo, dm, orch, StubFileSystem(), "Grabaciones")  # type: ignore[arg-type]
+        sync = IDATSync(repo, dm, orch, mock_fs, "Grabaciones")
 
         events: list[SyncEvent] = []
 
@@ -1260,10 +1283,102 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         assert sibling_dl.cancelled
         assert not sibling_dl.finished
+        assert discovery_cancelled
         assert any(isinstance(e, TaskDownloadFailed) for e in events)
         assert isinstance(events[-1], CourseSyncCompleted)
+        assert isinstance(events[-1].error, CredentialsExpiredError)
+
+    async def test_idat_sync_cancels_active_worker_on_discovery_credentials_expired(
+        self,
+    ):
+        """Cancel active download workers on discovery CredentialsExpiredError."""
+        worker_started = asyncio.Event()
+        worker_cancelled = False
+
+        class SlowStringDownloader(Downloader[StringContent]):
+            """Stub downloader that blocks until cancelled."""
+
+            content_type = StringContent
+
+            async def download(self, _content: StringContent) -> None:
+                """Signal start and sleep until cancelled."""
+                nonlocal worker_cancelled
+                worker_started.set()
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    worker_cancelled = True
+                    raise
+
+        async def _failing_recordings(_course_name: str) -> list[RecordingContent]:
+            await worker_started.wait()
+            raise CredentialsExpiredError("401 discovery expired")
+
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings.side_effect = _failing_recordings
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+
+        dl = SlowStringDownloader()
+        sync = IDATSync(
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
+            DownloadManager([dl], mock_fs),
+            TaskOrchestrator([[dl]]),
+            mock_fs,
+            "Grabaciones",
+        )
+        course = Course(
+            id=1,
+            name="Discovery Auth Fail",
+            sections=[
+                CourseSection(
+                    id=1,
+                    name="S1",
+                    inline_contents=[StringContent(Path("slow.html"), 1, ["a"])],
+                )
+            ],
+        )
+        events: list[SyncEvent] = []
+        with pytest.raises(CredentialsExpiredError, match="401 discovery expired"):
+            await _consume_events(sync.sync_course(course, Path("out")), events)
+
+        assert worker_cancelled
         assert isinstance(events[-1], CourseSyncCompleted)
         assert isinstance(events[-1].error, CredentialsExpiredError)
+
+    async def test_idat_sync_courses_isolates_pre_stream_error(self):
+        """Isolate pre-stream IDATSyncError on course 1 and still sync course 2."""
+        c1 = Course(id=1, name="Course One")
+        c2 = Course(
+            id=2,
+            name="Course Two",
+            sections=[CourseSection(id=2, name="S2")],
+        )
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(
+            side_effect=RemoteServiceError("pre-stream 503")
+        )
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {}
+
+        sync = IDATSync(
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
+            DownloadManager([], mock_fs),
+            TaskOrchestrator([]),
+            mock_fs,
+            "Grabaciones",
+        )
+
+        events = [event async for event in sync.sync_courses(Path("root"), [c1, c2])]
+        completed = [
+            (e.course.id, e.error) for e in events if isinstance(e, CourseSyncCompleted)
+        ]
+        assert completed[0][0] == 1
+        assert isinstance(completed[0][1], RemoteServiceError)
+        assert completed[1] == (2, None)
 
     async def test_idat_sync_list_courses_lazy_populate_and_filtering(self):  # pylint: disable=too-many-locals
         """Lazily populate sections and filter already-synced or empty artifacts."""
@@ -1493,27 +1608,33 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
     async def test_idat_sync_sync_courses_invalidates_repository_cache_once(self):
         """Invalidate repository cache once before iterating courses."""
         call_order: list[str] = []
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_repo.invalidate_cache.side_effect = lambda: call_order.append("invalidate")
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.invalidate_cache.side_effect = lambda: call_order.append(
+            "invalidate"
+        )
 
         async def _populate(course: Course) -> Course:
             call_order.append(f"populate:{course.id}")
             return course
 
-        mock_repo.populate_course_sections = AsyncMock(side_effect=_populate)
-        mock_repo.stream_course_content.side_effect = _empty_content_stream
-        mock_repo.get_recordings = AsyncMock(return_value=[])
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=_populate)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
 
         fs = LocalFileSystemAdapter()
-        dm = DownloadManager([], fs)
-        orch = TaskOrchestrator([])
-        sync = IDATSync(mock_repo, dm, orch, fs, "Grabaciones")
+        sync = IDATSync(
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
+            DownloadManager([], fs),
+            TaskOrchestrator([]),
+            fs,
+            "Grabaciones",
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             courses = [Course(id=1, name="C1"), Course(id=2, name="C2")]
             _ = [event async for event in sync.sync_courses(tmpdir, courses)]
 
-        mock_repo.invalidate_cache.assert_called_once_with()
+        mock_course_gw.invalidate_cache.assert_called_once_with()
         assert call_order == ["invalidate", "populate:1", "populate:2"]
 
     async def test_idat_sync_aclose_and_context_manager_run_all_closers_once(self):
@@ -1813,14 +1934,14 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         course_refreshed = Course(
             id=2, name="Refreshed", sections=[CourseSection(id=20, name="Old")]
         )
-        mock_repo = MagicMock(spec=CourseRepository)
-        mock_repo.populate_course_sections = AsyncMock(side_effect=lambda c: c)
-        mock_repo.stream_course_content.side_effect = _empty_content_stream
-        mock_repo.get_recordings = AsyncMock(return_value=[])
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
         fs = MagicMock(spec=FileSystemPort)
         fs.scan_mtimes.return_value = {}
         sync = IDATSync(
-            mock_repo,
+            CourseRepository(mock_course_gw, mock_rec_gw, []),
             DownloadManager([], fs),
             TaskOrchestrator([]),
             fs,
@@ -1829,7 +1950,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _ = [e async for e in sync.sync_courses(tmpdir, [course_cached])]
-            mock_repo.populate_course_sections.assert_not_awaited()
+            mock_course_gw.populate_course_sections.assert_not_awaited()
             assert len(course_cached.sections) == 1
 
             _ = [
@@ -1838,7 +1959,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     tmpdir, [course_refreshed], refresh=True
                 )
             ]
-            mock_repo.populate_course_sections.assert_awaited_once_with(
+            mock_course_gw.populate_course_sections.assert_awaited_once_with(
                 course_refreshed
             )
             assert not course_refreshed.sections
@@ -1885,6 +2006,10 @@ class TestPathDisambiguator(unittest.TestCase):
         assert not any(
             matches_prefix(name, ("idat_sync.domain.content",)) for name in imported
         )
+
+
+class TestContentPendingClassification(unittest.TestCase):
+    """Tests for domain and DownloadManager pending-item classification."""
 
     def test_is_content_pending_pure_in_memory(self):
         """Classify missing, outdated, and synced Content items purely in memory."""
