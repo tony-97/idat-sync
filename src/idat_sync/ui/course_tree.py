@@ -5,6 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,6 @@ from idat_sync.ui.icons import Icons
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from pathlib import Path
 
     from idat_sync.domain.course import Course
 
@@ -23,6 +23,7 @@ class RowStatus(StrEnum):
     IDLE = "Idle"
     QUEUED = "Queued"
     FETCHING = "Fetching contents..."
+    FETCHING_AND_SYNCING = "Fetching & Syncing"
     SYNCING = "Syncing"
     SYNCED = "Synced"
     PENDING = "Pending"
@@ -48,6 +49,8 @@ class _CourseNodes:
     """Treeview item IDs and progress state owned by one course row."""
 
     iid: str
+    course_dir: Path | None = None
+    discovering: bool = False
     folder_iids: dict[tuple[str, ...], str] = field(default_factory=dict)
     file_iids: dict[Path, str] = field(default_factory=dict)
     progress: Progress | None = None
@@ -87,7 +90,7 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
         tree.heading("status", text="Status", anchor="w")
         tree.heading("progress", text="Progress", anchor="e")
         tree.column("#0", width=440, stretch=True)
-        tree.column("status", width=120, stretch=False, anchor="w")
+        tree.column("status", width=130, stretch=False, anchor="w")
         tree.column("progress", width=80, stretch=False, anchor="e")
 
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=tree.yview)
@@ -96,6 +99,17 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree.bind("<Button-1>", self._on_click)
         return tree
+
+    @staticmethod
+    def _format_progress(node: _CourseNodes) -> tuple[RowStatus, str]:
+        if node.progress is None:
+            return (RowStatus.IDLE, "0%")
+        if node.discovering:
+            return (
+                RowStatus.FETCHING_AND_SYNCING,
+                f"{node.progress.done}/{node.progress.total}+",
+            )
+        return (RowStatus.SYNCING, str(node.progress))
 
     def set_interactive(self, *, enabled: bool) -> None:
         """Enable or disable row checkbox toggling."""
@@ -133,33 +147,48 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
             if (node := self._nodes.get(course_id)) is None:
                 continue
             self._clear_course_children(node)
+            node.course_dir = None
+            node.discovering = False
             node.progress = None
             self.tree.item(node.iid, values=(RowStatus.QUEUED, "0%"))
 
-    def show_files(
-        self,
-        course_id: int,
-        course_dir: Path,
-        synced: Sequence[Path],
-        pending: Sequence[Path],
-    ) -> None:
-        """Populate synced and pending file nodes under ``course_id``."""
+    def start_course(self, course_id: int, course_dir: Path) -> None:
+        """Initialize incremental discovery state for ``course_id``."""
         if (node := self._nodes.get(course_id)) is None:
             return
         self._clear_course_children(node)
-        for path in synced:
-            self._insert_file(node, course_dir, path, (RowStatus.SYNCED, "100%"))
-        for path in pending:
+        node.course_dir = course_dir
+        node.discovering = True
+        node.progress = Progress()
+        self.tree.item(node.iid, values=(RowStatus.FETCHING, "..."))
+
+    def add_file(self, course_id: int, path: Path, *, is_pending: bool) -> None:
+        """Insert one discovered file under ``course_id`` and refresh progress."""
+        if (node := self._nodes.get(course_id)) is None:
+            return
+        course_dir = node.course_dir or Path()
+        if node.progress is None:
+            node.progress = Progress()
+        if is_pending:
             child_iid = self._insert_file(
                 node, course_dir, path, (RowStatus.PENDING, "0%")
             )
             node.file_iids[path] = child_iid
             self._file_to_course[path] = (course_id, child_iid)
+        else:
+            self._insert_file(node, course_dir, path, (RowStatus.SYNCED, "100%"))
+            node.progress.done += 1
+        node.progress.total += 1
+        self.tree.item(node.iid, values=self._format_progress(node), open=True)
 
-        node.progress = Progress(done=len(synced), total=len(synced) + len(pending))
-        self.tree.item(
-            node.iid, values=(RowStatus.SYNCING, str(node.progress)), open=True
-        )
+    def finish_discovery(self, course_id: int) -> None:
+        """Transition ``course_id`` from discovering to percentage Syncing progress."""
+        if (node := self._nodes.get(course_id)) is None:
+            return
+        node.discovering = False
+        if node.progress is None:
+            node.progress = Progress()
+        self.tree.item(node.iid, values=(RowStatus.SYNCING, str(node.progress)))
 
     def set_file_status(self, path: Path, status: RowStatus) -> None:
         """Update a pending file row and advance parent progress on completion."""
@@ -174,7 +203,7 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
             and node.progress is not None
         ):
             node.progress.done += 1
-            self.tree.item(node.iid, values=(RowStatus.SYNCING, str(node.progress)))
+            self.tree.item(node.iid, values=self._format_progress(node))
 
     def set_course_status(self, course_id: int, status: RowStatus) -> None:
         """Update a course row's status and percentage."""
@@ -182,8 +211,9 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
             return
         if status is RowStatus.COMPLETED:
             pct = "100%"
-        elif status is RowStatus.FAILED and node.progress is not None:
-            pct = str(node.progress)
+        elif status is RowStatus.FAILED:
+            current = self.tree.item(node.iid, "values")
+            pct = str(current[1]) if len(current) > 1 else "0%"
         else:
             pct = "0%"
         self.tree.item(node.iid, values=(status, pct))

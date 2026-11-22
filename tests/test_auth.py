@@ -23,7 +23,8 @@ import idat_sync.ui.sync_frame as sync_frame_mod
 from idat_sync.application import exceptions, ports
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.events import (
-    CourseFilesDiscovered,
+    CourseDiscoveryCompleted,
+    CourseFileDiscovered,
     CourseSyncCompleted,
     CourseSyncStarted,
     TaskDownloadCompleted,
@@ -1255,15 +1256,19 @@ class TestSyncFrame(unittest.TestCase):
                         synced_p = c_dir / "S1" / "already.pdf"
                         ok_p = c_dir / "S1" / "new.pdf"
                         err_p = c_dir / "S1" / "broken.pdf"
-                        yield CourseSyncStarted(current_course)
-                        yield CourseFilesDiscovered(
-                            current_course,
-                            c_dir,
-                            (synced_p,),
-                            (ok_p, err_p),
+                        yield CourseSyncStarted(current_course, c_dir)
+                        yield CourseFileDiscovered(
+                            current_course, synced_p, is_pending=False
+                        )
+                        yield CourseFileDiscovered(
+                            current_course, ok_p, is_pending=True
                         )
                         yield TaskDownloadStarted(ok_p)
                         yield TaskDownloadCompleted(ok_p)
+                        yield CourseFileDiscovered(
+                            current_course, err_p, is_pending=True
+                        )
+                        yield CourseDiscoveryCompleted(current_course, 1, 2)
                         yield TaskDownloadStarted(err_p)
                         yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
                         yield CourseSyncCompleted(
@@ -1796,7 +1801,7 @@ class TestAppFrameBusy(unittest.TestCase):
 class TestCourseTree(unittest.TestCase):
     """Tests for CourseTree selection, file discovery, and progress updates."""
 
-    def test_course_tree_lifecycle_and_progress(self):
+    def test_course_tree_lifecycle_and_progress(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Manage course rows, nested folders, progress, and interactivity."""
         root = tk.Tk()
         root.withdraw()
@@ -1817,21 +1822,63 @@ class TestCourseTree(unittest.TestCase):
             assert ct.tree.item(top[0], "image") == (str(ct.icons.unchecked),)
             assert ct.tree.item(top[1], "image") == (str(ct.icons.checked),)
 
-            ct.reset_for_sync([1])
+            assert not hasattr(ct, "show_files")
+            assert RowStatus.FETCHING_AND_SYNCING == "Fetching & Syncing"
+
+            ct.reset_for_sync([1, 2])
             assert ct.tree.item(top[0], "values") == (RowStatus.QUEUED, "0%")
 
             c_dir = Path("Course One")
             synced_p = c_dir / "S1" / "done.pdf"
             pending_p = c_dir / "S1" / "todo.pdf"
-            ct.show_files(1, c_dir, (synced_p,), (pending_p,))
-            assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "50%")
+            late_p = c_dir / "S1" / "late.pdf"
+
+            ct.start_course(1, c_dir)
+            assert ct.tree.item(top[0], "values") == (RowStatus.FETCHING, "...")
+
+            ct.add_file(1, synced_p, is_pending=False)
+            assert bool(ct.tree.item(top[0], "open"))
+            assert ct.tree.item(top[0], "values") == (
+                RowStatus.FETCHING_AND_SYNCING,
+                "1/1+",
+            )
+
+            ct.add_file(1, pending_p, is_pending=True)
+            assert ct.tree.item(top[0], "values") == (
+                RowStatus.FETCHING_AND_SYNCING,
+                "1/2+",
+            )
 
             ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
             ct.set_file_status(pending_p, RowStatus.COMPLETED)
+            assert ct.tree.item(top[0], "values") == (
+                RowStatus.FETCHING_AND_SYNCING,
+                "2/2+",
+            )
+
+            ct.add_file(1, late_p, is_pending=True)
+            assert ct.tree.item(top[0], "values") == (
+                RowStatus.FETCHING_AND_SYNCING,
+                "2/3+",
+            )
+
+            ct.finish_discovery(1)
+            assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "66%")
+
+            ct.set_course_status(1, RowStatus.FAILED)
+            assert ct.tree.item(top[0], "values") == (RowStatus.FAILED, "66%")
+
+            ct.set_file_status(late_p, RowStatus.COMPLETED)
             assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "100%")
 
             ct.set_course_status(1, RowStatus.COMPLETED)
             assert ct.tree.item(top[0], "values") == (RowStatus.COMPLETED, "100%")
+
+            # Empty course transitions to 100% on finish_discovery
+            ct.start_course(2, Path("Course Two"))
+            assert ct.tree.item(top[1], "values") == (RowStatus.FETCHING, "...")
+            ct.finish_discovery(2)
+            assert ct.tree.item(top[1], "values") == (RowStatus.SYNCING, "100%")
 
             ct.set_interactive(enabled=False)
             assert not toggled

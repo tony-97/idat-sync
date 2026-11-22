@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Any
 from async_tkinter_loop import async_handler
 
 from idat_sync.application.events import (
-    CourseFilesDiscovered,
+    CourseDiscoveryCompleted,
+    CourseFileDiscovered,
     CourseSyncCompleted,
     CourseSyncStarted,
     SyncEvent,
@@ -248,17 +249,17 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instan
                 self.courses_loaded = False
                 self._set_error_status(exc)
 
-    def _on_course_started(self, course: Course) -> None:
-        self.course_tree.set_course_status(course.id, RowStatus.FETCHING)
+    def _on_course_started(self, course: Course, course_dir: Path) -> None:
+        self.course_tree.start_course(course.id, course_dir)
         self.status_var.set(f"Fetching contents for {course.name}...")
 
-    def _on_files_discovered(self, event: CourseFilesDiscovered) -> None:
-        self.course_tree.show_files(
-            event.course.id,
-            event.course_dir,
-            event.synced_paths,
-            event.pending_paths,
+    def _on_file_discovered(self, event: CourseFileDiscovered) -> None:
+        self.course_tree.add_file(
+            event.course.id, event.path, is_pending=event.is_pending
         )
+
+    def _on_discovery_completed(self, course: Course) -> None:
+        self.course_tree.finish_discovery(course.id)
 
     def _on_download_started(self, path: Path) -> None:
         self.course_tree.set_file_status(path, RowStatus.DOWNLOADING)
@@ -276,10 +277,12 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-ancestors,too-many-instan
 
     def _handle_event(self, event: SyncEvent) -> None:
         match event:
-            case CourseSyncStarted(course=course):
-                self._on_course_started(course)
-            case CourseFilesDiscovered():
-                self._on_files_discovered(event)
+            case CourseSyncStarted(course=course, course_dir=course_dir):
+                self._on_course_started(course, course_dir)
+            case CourseFileDiscovered():
+                self._on_file_discovered(event)
+            case CourseDiscoveryCompleted(course=course):
+                self._on_discovery_completed(course)
             case TaskDownloadStarted(path=path):
                 self._on_download_started(path)
             case TaskDownloadCompleted(path=path):

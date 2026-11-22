@@ -20,16 +20,25 @@ class CourseSyncStarted:
     """Emitted when synchronization begins for a course."""
 
     course: Course
+    course_dir: Path
 
 
 @dataclass(frozen=True)
-class CourseFilesDiscovered:
-    """Emitted after diffing remote contents against local files for a course."""
+class CourseFileDiscovered:
+    """Emitted when a single downloadable file is discovered for a course."""
 
     course: Course
-    course_dir: Path
-    synced_paths: tuple[Path, ...]
-    pending_paths: tuple[Path, ...]
+    path: Path
+    is_pending: bool
+
+
+@dataclass(frozen=True)
+class CourseDiscoveryCompleted:
+    """Emitted once all content and recording sources finish discovery."""
+
+    course: Course
+    synced_count: int
+    pending_count: int
 
 
 @dataclass(frozen=True)
@@ -64,7 +73,8 @@ class CourseSyncCompleted:
 
 SyncEvent = (
     CourseSyncStarted
-    | CourseFilesDiscovered
+    | CourseFileDiscovered
+    | CourseDiscoveryCompleted
     | TaskDownloadStarted
     | TaskDownloadCompleted
     | TaskDownloadFailed
@@ -77,14 +87,21 @@ def log_sync_event(event: SyncEvent) -> None:
     match event:
         case CourseSyncStarted(course=course):
             _logger.info("Syncing course '%s'...", course.name)
-        case CourseFilesDiscovered(
-            course=course, synced_paths=synced, pending_paths=pending
+        case CourseFileDiscovered(course=course, path=path, is_pending=is_pending):
+            _logger.debug(
+                "Course '%s': discovered %s (%s)",
+                course.name,
+                path,
+                "pending" if is_pending else "synced",
+            )
+        case CourseDiscoveryCompleted(
+            course=course, synced_count=synced_count, pending_count=pending_count
         ):
             _logger.info(
                 "Course '%s': %d synced, %d pending.",
                 course.name,
-                len(synced),
-                len(pending),
+                synced_count,
+                pending_count,
             )
         case TaskDownloadStarted(path=path):
             _logger.info("Downloading %s", path)
@@ -99,7 +116,8 @@ def log_sync_event(event: SyncEvent) -> None:
 
 
 __all__ = [
-    "CourseFilesDiscovered",
+    "CourseDiscoveryCompleted",
+    "CourseFileDiscovered",
     "CourseSyncCompleted",
     "CourseSyncStarted",
     "SyncEvent",

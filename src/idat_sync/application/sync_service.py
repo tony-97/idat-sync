@@ -2,7 +2,8 @@
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Self
@@ -10,7 +11,8 @@ from typing import Self
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.events import (
-    CourseFilesDiscovered,
+    CourseDiscoveryCompleted,
+    CourseFileDiscovered,
     CourseSyncCompleted,
     CourseSyncStarted,
     SyncEvent,
@@ -27,15 +29,12 @@ from idat_sync.application.ports import (
     IDATSyncError,
     RemoteServiceError,
 )
-from idat_sync.application.task_orchestrator import TaskOrchestrator
+from idat_sync.application.task_orchestrator import TaskChannel, TaskOrchestrator
 from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
-from idat_sync.domain.path_utils import (
-    safe_filename,
-    safe_suffixed_segment,
-    split_extension,
-)
-from idat_sync.domain.sync import SyncDiff
+from idat_sync.domain.path_utils import PathDisambiguator, safe_filename
+
+_logger = logging.getLogger("idat_sync")
 
 
 def _emit(event: SyncEvent) -> SyncEvent:
@@ -43,29 +42,113 @@ def _emit(event: SyncEvent) -> SyncEvent:
     return event
 
 
-def _disambiguate_paths(items: Sequence[Content]) -> list[Content]:
-    seen_keys: set[str] = set()
-    result: list[Content] = []
-    for item in items:
-        candidate = item.path
-        key = candidate.as_posix().casefold()
-        resolved = item
-        if key in seen_keys:
-            stem, ext = split_extension(item.path.name)
-            counter = 2
-            while key in seen_keys:
-                new_name = safe_suffixed_segment(stem, f" ({counter}){ext}")
-                candidate = item.path.with_name(new_name)
-                key = candidate.as_posix().casefold()
-                counter += 1
-            resolved = replace(item, path=candidate)
-        seen_keys.add(key)
-        result.append(resolved)
-    return result
+def _first_credentials_expired(exc: BaseException) -> CredentialsExpiredError | None:
+    if isinstance(exc, CredentialsExpiredError):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            if (found := _first_credentials_expired(sub)) is not None:
+                return found
+    return None
+
+
+class _CourseStreamRun:  # pylint: disable=too-few-public-methods,too-many-instance-attributes
+    """Per-course streaming state shared between discovery tasks and group workers."""
+
+    def __init__(
+        self,
+        sync: "IDATSync",
+        course: Course,
+        course_path: Path,
+        local_mtimes: Mapping[Path, int],
+        errors: list[IDATSyncError],
+    ) -> None:
+        self._sync = sync
+        self.course = course
+        self.course_path = course_path
+        self.recordings_folder = course_path / sync.recordings_folder_name
+        self.local_mtimes = local_mtimes
+        self.errors = errors
+        self.channel: TaskChannel = sync.task_orchestrator.create_channel()
+        self.event_queue: asyncio.Queue[SyncEvent | None] = asyncio.Queue()
+        self._disambiguator = PathDisambiguator()
+        self._synced_count = 0
+        self._pending_count = 0
+
+    def _on_item(self, item: Content) -> None:
+        new_path = self._disambiguator.disambiguate(item.path)
+        if new_path != item.path:
+            item = replace(item, path=new_path)
+        task = self._sync.download_manager.create_download_task(item)
+        if task is None:
+            return
+        is_pending = self._sync.download_manager.is_pending(item, self.local_mtimes)
+        self.event_queue.put_nowait(
+            CourseFileDiscovered(self.course, item.path, is_pending)
+        )
+        if is_pending:
+            self._pending_count += 1
+            self.channel.enqueue(task)
+        else:
+            self._synced_count += 1
+
+    async def _consume_content(self) -> None:
+        async for item in self._sync.course_repository.stream_course_content(
+            self.course, self.course_path
+        ):
+            self._on_item(item)
+
+    async def _consume_recordings(self) -> None:
+        try:
+            recordings = await self._sync.course_repository.get_recordings(
+                self.course.name, self.recordings_folder
+            )
+        except RemoteServiceError as exc:
+            _logger.exception("Failed fetching recordings for '%s'", self.course.name)
+            self.errors.append(exc)
+            return
+        for recording in recordings:
+            self._on_item(recording)
+
+    async def _discover(self) -> None:
+        try:
+            async with asyncio.TaskGroup() as discovery_tg:
+                discovery_tg.create_task(self._consume_content())
+                discovery_tg.create_task(self._consume_recordings())
+            self.event_queue.put_nowait(
+                CourseDiscoveryCompleted(
+                    self.course, self._synced_count, self._pending_count
+                )
+            )
+        finally:
+            self.channel.close()
+
+    async def _run_single_task(self, task: DownloadTask) -> None:
+        self.event_queue.put_nowait(TaskDownloadStarted(task.path))
+        try:
+            await task.download()
+        except CredentialsExpiredError as exc:
+            self.event_queue.put_nowait(TaskDownloadFailed(task.path, exc))
+            raise
+        except (RemoteServiceError, FileSystemError) as exc:
+            self.errors.append(exc)
+            self.event_queue.put_nowait(TaskDownloadFailed(task.path, exc))
+        else:
+            self.event_queue.put_nowait(TaskDownloadCompleted(task.path))
+
+    async def run(self) -> None:
+        """Execute discovery and all group workers concurrently until completion."""
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._discover())
+                for worker in self.channel.create_workers(self._run_single_task):
+                    tg.create_task(worker)
+        finally:
+            self.event_queue.put_nowait(None)
 
 
 class IDATSync:
-    """Application service coordinating course discovery, diffing, and downloads."""
+    """Application service coordinating streaming course discovery and downloads."""
 
     def __init__(  # noqa: PLR0913  # pylint: disable=too-many-arguments
         self,
@@ -110,79 +193,25 @@ class IDATSync:
         """Return all enrolled courses."""
         return await self.course_repository.list_courses()
 
-    async def get_course_remote_tree(
-        self, course: Course, course_dir: str | Path
-    ) -> list[Content]:
-        """Collect and disambiguate all remote Content items for ``course``."""
-        course_path = Path(course_dir)
-        recordings_folder = course_path / self.recordings_folder_name
-        remote_tree = list(
-            await self.course_repository.get_course_content(course, course_path)
-        )
-        recordings_content = await self.course_repository.get_recordings(
-            course.name, recordings_folder
-        )
-        remote_tree.extend(recordings_content)
-        return _disambiguate_paths(remote_tree)
-
-    async def check_course_sync(
-        self, course: Course, course_dir: str | Path
-    ) -> SyncDiff:
-        """Diff remote course contents against local files in ``course_dir``."""
-        remote_tree = await self.get_course_remote_tree(course, course_dir)
-        return self.download_manager.diff_trees(course_dir, remote_tree)
-
-    async def _run_single_task(
+    async def _stream_course(
         self,
-        task: DownloadTask,
-        event_queue: asyncio.Queue[SyncEvent | None],
-        errors: list[IDATSyncError],
-    ) -> None:
-        await event_queue.put(TaskDownloadStarted(task.path))
-        try:
-            await task.download()
-        except CredentialsExpiredError as exc:
-            await event_queue.put(TaskDownloadFailed(task.path, exc))
-            raise
-        except (RemoteServiceError, FileSystemError) as exc:
-            errors.append(exc)
-            await event_queue.put(TaskDownloadFailed(task.path, exc))
-        else:
-            await event_queue.put(TaskDownloadCompleted(task.path))
-
-    async def _run_task_group(
-        self,
-        tasks: Sequence[DownloadTask],
-        event_queue: asyncio.Queue[SyncEvent | None],
-        errors: list[IDATSyncError],
-    ) -> None:
-        try:
-            async with asyncio.TaskGroup() as tg:
-                for coro in self.task_orchestrator.create_coroutines(
-                    tasks,
-                    lambda task: self._run_single_task(task, event_queue, errors),
-                ):
-                    tg.create_task(coro)
-        finally:
-            await event_queue.put(None)
-
-    async def _execute_tasks(
-        self,
-        tasks: Sequence[DownloadTask],
+        course: Course,
+        course_path: Path,
+        local_mtimes: Mapping[Path, int],
         errors: list[IDATSyncError],
     ) -> AsyncIterator[SyncEvent]:
-        event_queue: asyncio.Queue[SyncEvent | None] = asyncio.Queue()
-        runner = asyncio.create_task(self._run_task_group(tasks, event_queue, errors))
+        run = _CourseStreamRun(self, course, course_path, local_mtimes, errors)
+        runner = asyncio.create_task(run.run())
         try:
-            cred_group: ExceptionGroup[CredentialsExpiredError] | None = None
+            cred_error: CredentialsExpiredError | None = None
             try:
-                while (event := await event_queue.get()) is not None:
+                while (event := await run.event_queue.get()) is not None:
                     yield _emit(event)
                 await runner
             except* CredentialsExpiredError as eg:
-                cred_group = eg
-            if cred_group is not None:
-                raise cred_group.exceptions[0] from cred_group
+                cred_error = _first_credentials_expired(eg)
+            if cred_error is not None:
+                raise cred_error
         finally:
             if not runner.done():
                 runner.cancel()
@@ -197,7 +226,7 @@ class IDATSync:
         """Synchronize a single ``course`` into ``course_dir``, yielding SyncEvents."""
         course_path = Path(course_dir)
         recordings_folder = course_path / self.recordings_folder_name
-        yield _emit(CourseSyncStarted(course))
+        yield _emit(CourseSyncStarted(course, course_path))
         errors: list[IDATSyncError] = []
 
         try:
@@ -205,18 +234,11 @@ class IDATSync:
                 await self.course_repository.populate_course_sections(course)
             self.file_system.ensure_dir(course_path)
             self.file_system.ensure_dir(recordings_folder)
+            local_mtimes = self.file_system.scan_mtimes(course_path)
 
-            diff = await self.check_course_sync(course, course_path)
-            tasks = self.download_manager.prepare_download_tasks(diff.pending_contents)
-            yield _emit(
-                CourseFilesDiscovered(
-                    course,
-                    course_path,
-                    tuple(sorted(diff.synced_paths)),
-                    tuple(t.path for t in tasks),
-                )
-            )
-            async for event in self._execute_tasks(tasks, errors):
+            async for event in self._stream_course(
+                course, course_path, local_mtimes, errors
+            ):
                 yield event
         except IDATSyncError as exc:
             yield _emit(CourseSyncCompleted(course, exc))

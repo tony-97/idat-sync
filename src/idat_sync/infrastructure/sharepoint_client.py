@@ -46,7 +46,7 @@ class SharepointClient:
         ]
         self._cookies = list(cookies)
         self._transport = HttpxTransport()
-        self.client = self.get_client(academic_site_url.rstrip("/"))
+        self._academic_site_url = academic_site_url.rstrip("/")
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
         self.search_client: ClientContext | None = None
@@ -119,7 +119,7 @@ class SharepointClient:
 
         if site_url:
             return self.get_client(site_url)
-        return self.client
+        return self.get_client(self._academic_site_url)
 
     def cookies_for_host(self, host: str) -> dict[str, str]:
         """Return matching SharePoint auth cookies for ``host``."""

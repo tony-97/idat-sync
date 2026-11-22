@@ -479,6 +479,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             rate_limiter=limiter,
         )
 
+        client.get_client_from_url("https://contoso.sharepoint.com/other")
         called_urls = [call.args[0] for call in mock_ctx_cls.call_args_list]
         assert "https://contoso.sharepoint.com/sites/ACAD" in called_urls
         assert "https://contoso-my.sharepoint.com" in called_urls
@@ -599,6 +600,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             "SPOIDCRL": "evil"
         }
 
+        client.get_client_from_url("https://contoso.sharepoint.com/other")
         acad_cb = next(
             cb
             for url, cb in captured_callbacks
@@ -1032,9 +1034,9 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         mock_sleep.assert_not_called()
         mock_ctx.web.current_user.get_personal_site.assert_not_called()
         mock_transport_cls.assert_called_once_with()
-        assert mock_ctx.with_auto_retry.call_count == 2
+        assert mock_ctx.with_auto_retry.call_count == 1
         assert (
-            mock_ctx.pending_request.return_value.with_async_transport.call_count == 2
+            mock_ctx.pending_request.return_value.with_async_transport.call_count == 1
         )
         mock_ctx.pending_request.return_value.with_async_transport.assert_called_with(
             mock_transport_cls.return_value
@@ -1148,6 +1150,46 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             assert isinstance(client, SharepointClient)
 
         mock_transport_cls.return_value.aclose.assert_awaited_once_with()
+
+    @patch("idat_sync.infrastructure.sharepoint_client.HttpxTransport")
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    def test_get_client_from_url_returns_fresh_context_on_fallback(
+        self, mock_ctx_cls, mock_transport_cls
+    ):
+        """Return a fresh ClientContext on fallback wired with shared transport."""
+        created_ctxs: list[MagicMock] = []
+
+        def _build_ctx(_site_url):
+            ctx = MagicMock()
+            ctx.with_cookies.return_value = ctx
+            ctx.with_auto_retry.return_value = ctx
+            created_ctxs.append(ctx)
+            return ctx
+
+        mock_ctx_cls.side_effect = _build_ctx
+        client = SharepointClient(
+            cookies=[],
+            sharepoint_personal_host="idat628-my.sharepoint.com",
+            academic_site_url="https://idat628.sharepoint.com/sites/Academic/",
+            rate_limiter=AsyncRateLimiter(0.0),
+        )
+        mock_ctx_cls.reset_mock()
+        created_ctxs.clear()
+
+        ctx_a = client.get_client_from_url("https://idat628.sharepoint.com/other/a")
+        ctx_b = client.get_client_from_url("https://idat628.sharepoint.com/other/b")
+
+        assert ctx_a is created_ctxs[0]
+        assert ctx_b is created_ctxs[1]
+        assert ctx_a is not ctx_b
+        assert [c.args[0] for c in mock_ctx_cls.call_args_list] == [
+            "https://idat628.sharepoint.com/sites/Academic",
+            "https://idat628.sharepoint.com/sites/Academic",
+        ]
+        for created in created_ctxs:
+            created.pending_request.return_value.with_async_transport.assert_called_once_with(
+                mock_transport_cls.return_value
+            )
 
 
 if __name__ == "__main__":

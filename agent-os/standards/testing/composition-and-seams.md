@@ -42,6 +42,6 @@ repo = CourseRepository(
   - `SharepointBrowserAuth` tests: patch external Playwright entrypoint (`idat_sync.infrastructure.sharepoint_auth.async_playwright`, plus `asyncio.sleep`).
   - `JsonCredentialStore` tests: tested against real temporary files (`tempfile.TemporaryDirectory()` and unreadable-file `PermissionError`).
   - `*Adapter` tests (`MoodleAdapter`, `MoodleTokenAdapter`, `SharepointApiAdapter`): inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (`Course`, `CourseSection`, `CourseModule`, `RecordingContent`) or port return values, never raw dicts or SDK objects.
-  - Domain seam: `SyncDiff.from_trees`, `safe_filename`, `Content.in_folder` tested purely in memory without disk I/O.
+  - Domain seam: `is_content_pending`, `PathDisambiguator`, `safe_filename`, `Content.in_folder` tested purely in memory without disk I/O.
   - Application orchestration seam: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync` tested with fake ports and stubs.
   - Architecture boundary seam: AST inspection verifying zero forbidden imports in `domain/` and `application/`, zero `idat_sync.infrastructure` imports in `ui/`, zero `idat_sync.utils` and `idat_sync.infrastructure.auth` imports (`src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` removed), and `playwright` isolated to `infrastructure/sharepoint_auth.py`.
