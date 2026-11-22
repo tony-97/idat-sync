@@ -4,16 +4,20 @@ import contextlib
 import re
 import urllib.parse
 from collections.abc import Awaitable, Callable, Coroutine
-from typing import BinaryIO, Self, TypeVar
+from functools import partial
+from typing import TYPE_CHECKING, BinaryIO, ClassVar, Self, TypeVar
 
 import httpx
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_result import ClientResult
+from office365.runtime.http.http_method import HttpMethod
+from office365.runtime.http.request_options import RequestOptions
 from office365.runtime.transport.httpx_transport import HttpxTransport
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 from office365.sharepoint.listitems.collection import ListItem
+from office365.sharepoint.request import SharePointRequest
 from office365.sharepoint.search.result import SearchResult
 
 from idat_sync.application.ports import (
@@ -23,12 +27,23 @@ from idat_sync.application.ports import (
 )
 from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 
+if TYPE_CHECKING:
+    from office365.sharepoint.webs.context_web_information import (
+        ContextWebInformation,
+    )
+
 _EntityT = TypeVar("_EntityT", File, Folder)
 _ResultT = TypeVar("_ResultT")
 
 
 class SharepointClient:
     """Low-level client wrapping the Office365 SharePoint REST SDK."""
+
+    properties_to_retrieve: ClassVar[list[str]] = [
+        "Name",
+        "ServerRelativeUrl",
+        "TimeLastModified",
+    ]
 
     def __init__(
         self,
@@ -39,13 +54,9 @@ class SharepointClient:
     ) -> None:
         """Initialize the SharePoint client with cookies, hosts, and limiter."""
         self.rate_limiter = rate_limiter
-        self.properties_to_retrieve = [
-            "Name",
-            "ServerRelativeUrl",
-            "TimeLastModified",
-        ]
         self._cookies = list(cookies)
         self._transport = HttpxTransport()
+        self._web_infos: dict[str, ContextWebInformation] = {}
         self._academic_site_url = academic_site_url.rstrip("/")
         personal_sharepoint_url = f"https://{sharepoint_personal_host}"
         self.personal_client = self.get_client(personal_sharepoint_url)
@@ -100,8 +111,26 @@ class SharepointClient:
             .with_cookies(lambda host=target_host: self.cookies_for_host(host))
             .with_auto_retry()
         )
-        ctx.pending_request().with_async_transport(self._transport)
+        pending = ctx.pending_request()
+        pending.with_async_transport(self._transport)
+        pending.beforeExecute -= pending.ensure_form_digest
+        pending.beforeExecute += partial(self._ensure_form_digest, pending, site_url)
         return ctx
+
+    def _ensure_form_digest(
+        self,
+        pending: SharePointRequest,
+        site_url: str,
+        request: RequestOptions,
+    ) -> None:
+        if request.method == HttpMethod.Get:
+            return
+        web_info = self._web_infos.get(site_url)
+        if web_info is None or not web_info.is_valid:
+            pending.ensure_form_digest(request)
+            web_info = pending.context_info
+            self._web_infos[site_url] = web_info
+        request.set_header("X-RequestDigest", web_info.FormDigestValue)
 
     def get_client_from_url(self, url: str) -> ClientContext:
         """Resolve the site ClientContext corresponding to ``url``."""
@@ -165,7 +194,7 @@ class SharepointClient:
 
     async def load_entity(self, entity: File | Folder, ctx: ClientContext) -> None:
         """Load standard metadata properties onto a SharePoint File or Folder."""
-        ctx.load(entity, self.properties_to_retrieve)
+        entity.select(self.properties_to_retrieve)
 
         async def _exec() -> None:
             # odata.null guest URL responses leave entity.resource_url as None
@@ -216,20 +245,28 @@ class SharepointClient:
     async def fetch_folder_by_guest_url(self, url: str) -> Folder:
         """Resolve and load a SharePoint Folder from a guest sharing URL."""
         return await self._load_entity_at_url(
-            url, lambda ctx: ctx.web.get_folder_by_guest_url(url)
+            url,
+            lambda ctx: ctx.web.get_folder_by_guest_url_extended(
+                url, ensure_access=True
+            ),
         )
 
     async def fetch_file_by_guest_url(self, url: str) -> File:
         """Resolve and load a SharePoint File from a guest sharing URL."""
         return await self._load_entity_at_url(
-            url, lambda ctx: ctx.web.get_file_by_guest_url(url)
+            url,
+            lambda ctx: ctx.web.get_file_by_guest_url_extended(url, ensure_access=True),
         )
 
     async def fetch_file_by_id(self, url: str, file_id: str) -> File:
         """Resolve and load a SharePoint File by its unique ID."""
-        return await self._load_entity_at_url(
-            url, lambda ctx: ctx.web.get_file_by_id(file_id)
-        )
+
+        def _resolve(ctx: ClientContext) -> File:
+            file = ctx.web.get_file_by_id(file_id)
+            ctx.load(file, self.properties_to_retrieve)
+            return file
+
+        return await self._load_entity_at_url(url, _resolve)
 
     async def fetch_folder_files(self, folder: Folder) -> list[File]:
         """Return all File children of ``folder``."""
@@ -245,4 +282,5 @@ class SharepointClient:
 
     async def download_file(self, file: File, dest: BinaryIO) -> None:
         """Stream ``file`` contents into ``dest``."""
+        file.set_property("Id", file.unique_id, persist_changes=False)
         await self._await_query(file.download_session_async(dest, use_path=False))
