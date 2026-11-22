@@ -1,18 +1,14 @@
-"""Treeview widget wrapper and per-course progress state for SyncFrame."""
+"""Pure-Python hierarchical course, folder, and file progress tree."""
 
 from __future__ import annotations
 
-import tkinter as tk
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from tkinter import ttk
-from typing import TYPE_CHECKING
-
-from idat_sync.ui.icons import Icons
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from idat_sync.domain.course import Course
 
@@ -45,63 +41,124 @@ class Progress:
 
 
 @dataclass
-class _CourseNodes:
-    """Treeview item IDs and progress state owned by one course row."""
+class _FileNode:
+    """Leaf file row in the course tree."""
 
-    iid: str
+    name: str
+    status: RowStatus
+
+    @property
+    def progress(self) -> Progress:
+        """Return 1/1 when synced or completed, else 0/1."""
+        done = 1 if self.status in {RowStatus.SYNCED, RowStatus.COMPLETED} else 0
+        return Progress(done=done, total=1)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize file node for frontend rendering."""
+        return {
+            "type": "file",
+            "name": self.name,
+            "status": str(self.status),
+            "progress": str(self.progress),
+        }
+
+
+def _aggregate_folder_state(
+    files: list[_FileNode],
+) -> tuple[RowStatus, Progress]:
+    """Compute aggregate status and progress across a folder's descendant files."""
+    total = len(files)
+    done = sum(f.progress.done for f in files)
+    progress = Progress(done=done, total=total)
+    statuses = {f.status for f in files}
+    if RowStatus.DOWNLOADING in statuses:
+        status = RowStatus.DOWNLOADING
+    elif RowStatus.FAILED in statuses:
+        status = RowStatus.FAILED
+    elif total and statuses == {RowStatus.SYNCED}:
+        status = RowStatus.SYNCED
+    elif done == total:
+        status = RowStatus.COMPLETED
+    else:
+        status = RowStatus.PENDING
+    return status, progress
+
+
+@dataclass
+class _FolderNode:
+    """Nested folder node containing child folders and leaf files."""
+
+    id: str
+    name: str
+    folders: dict[str, _FolderNode] = field(default_factory=dict)
+    files: dict[str, _FileNode] = field(default_factory=dict)
+
+    def _iter_files(self) -> list[_FileNode]:
+        descendants = list(self.files.values())
+        for folder in self.folders.values():
+            descendants.extend(folder._iter_files())  # noqa: SLF001  # pylint: disable=protected-access
+        return descendants
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize folder node, aggregate progress/status, and children."""
+        status, progress = _aggregate_folder_state(self._iter_files())
+        children = [f.to_dict() for f in self.folders.values()] + [
+            f.to_dict() for f in self.files.values()
+        ]
+        return {
+            "id": self.id,
+            "type": "folder",
+            "name": self.name,
+            "status": str(status),
+            "progress": str(progress),
+            "open": True,
+            "children": children,
+        }
+
+
+@dataclass
+class _CourseNode:  # pylint: disable=too-many-instance-attributes
+    """Top-level course row and its nested folder/file state."""
+
+    course_id: int
+    name: str
+    checked: bool
+    status: RowStatus = RowStatus.IDLE
+    progress_text: str = "0%"
+    open: bool = False
     course_dir: Path | None = None
     discovering: bool = False
-    folder_iids: dict[tuple[str, ...], str] = field(default_factory=dict)
-    file_iids: dict[Path, str] = field(default_factory=dict)
+    root_folders: dict[str, _FolderNode] = field(default_factory=dict)
+    root_files: dict[str, _FileNode] = field(default_factory=dict)
+    file_paths: set[Path] = field(default_factory=set)
     progress: Progress | None = None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize course row and its nested children."""
+        children = [f.to_dict() for f in self.root_folders.values()] + [
+            f.to_dict() for f in self.root_files.values()
+        ]
+        return {
+            "id": self.course_id,
+            "name": self.name,
+            "checked": self.checked,
+            "status": str(self.status),
+            "progress": self.progress_text,
+            "open": self.open,
+            "children": children,
+        }
 
-class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
-    """Scrollable Treeview managing course selection, nested folders, and progress."""
 
-    def __init__(
-        self,
-        master: tk.Misc,
-        on_toggle: Callable[[int], None],
-        icons: Icons | None = None,
-    ) -> None:
-        """Initialize the Treeview, columns, scrollbar, and icon bundle."""
-        super().__init__(master)
-        self.icons = icons or Icons.create()
-        self._on_toggle = on_toggle
-        self._interactive = True
-        self._nodes: dict[int, _CourseNodes] = {}
-        self._iid_to_course_id: dict[str, int] = {}
-        self._file_to_course: dict[Path, tuple[int, str]] = {}
-        self.tree = self._build_tree()
+class CourseTree:
+    """Pure-Python tree tracking course selection, nested folders, and progress."""
 
-    def _build_tree(self) -> ttk.Treeview:
-        style = ttk.Style(self)
-        style.configure("Sync.Treeview", rowheight=22)
-
-        tree = ttk.Treeview(
-            self,
-            style="Sync.Treeview",
-            columns=("status", "progress"),
-            show="tree headings",
-            selectmode="browse",
-        )
-        tree.heading("#0", text="Name", anchor="w")
-        tree.heading("status", text="Status", anchor="w")
-        tree.heading("progress", text="Progress", anchor="e")
-        tree.column("#0", width=440, stretch=True)
-        tree.column("status", width=130, stretch=False, anchor="w")
-        tree.column("progress", width=80, stretch=False, anchor="e")
-
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tree.bind("<Button-1>", self._on_click)
-        return tree
+    def __init__(self) -> None:
+        """Initialize an empty course tree."""
+        self._nodes: dict[int, _CourseNode] = {}
+        self._file_to_course: dict[Path, tuple[int, _FileNode]] = {}
 
     @staticmethod
-    def _format_progress(node: _CourseNodes) -> tuple[RowStatus, str]:
+    def _format_progress(node: _CourseNode) -> tuple[RowStatus, str]:
         if node.progress is None:
             return (RowStatus.IDLE, "0%")
         if node.discovering:
@@ -111,35 +168,33 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
             )
         return (RowStatus.SYNCING, str(node.progress))
 
-    def set_interactive(self, *, enabled: bool) -> None:
-        """Enable or disable row checkbox toggling."""
-        self._interactive = enabled
-
-    def set_courses(self, courses: Sequence[Course], selected: set[int]) -> None:
-        """Replace all tree rows with ``courses`` and apply initial ``selected``."""
-        self.tree.delete(*self.tree.get_children(""))
+    def set_courses(
+        self,
+        courses: Sequence[Course],
+        selected: set[int],
+        in_progress: set[int] | None = None,
+    ) -> list[Course]:
+        """Replace course rows, ordering ``in_progress`` first when given."""
+        ordered = (
+            [c for c in courses if c.id in in_progress]
+            + [c for c in courses if c.id not in in_progress]
+            if in_progress is not None
+            else list(courses)
+        )
         self._nodes.clear()
-        self._iid_to_course_id.clear()
         self._file_to_course.clear()
-
-        for course in courses:
-            icon = self.icons.checked if course.id in selected else self.icons.unchecked
-            iid = self.tree.insert(
-                "",
-                tk.END,
-                text=course.name,
-                image=icon,
-                values=(RowStatus.IDLE, "0%"),
-                open=False,
+        for course in ordered:
+            self._nodes[course.id] = _CourseNode(
+                course_id=course.id,
+                name=course.name,
+                checked=course.id in selected,
             )
-            self._nodes[course.id] = _CourseNodes(iid=iid)
-            self._iid_to_course_id[iid] = course.id
+        return ordered
 
     def refresh_selection(self, selected: set[int]) -> None:
-        """Update checkbox icons for all loaded course rows."""
+        """Update checked state for all loaded course rows."""
         for course_id, node in self._nodes.items():
-            icon = self.icons.checked if course_id in selected else self.icons.unchecked
-            self.tree.item(node.iid, image=icon)
+            node.checked = course_id in selected
 
     def reset_for_sync(self, course_ids: Sequence[int]) -> None:
         """Clear children and mark ``course_ids`` as Queued at 0%."""
@@ -150,7 +205,9 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
             node.course_dir = None
             node.discovering = False
             node.progress = None
-            self.tree.item(node.iid, values=(RowStatus.QUEUED, "0%"))
+            node.status = RowStatus.QUEUED
+            node.progress_text = "0%"
+            node.open = False
 
     def start_course(self, course_id: int, course_dir: Path) -> None:
         """Initialize incremental discovery state for ``course_id``."""
@@ -160,7 +217,9 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
         node.course_dir = course_dir
         node.discovering = True
         node.progress = Progress()
-        self.tree.item(node.iid, values=(RowStatus.FETCHING, "..."))
+        node.status = RowStatus.FETCHING
+        node.progress_text = "..."
+        node.open = False
 
     def add_file(self, course_id: int, path: Path, *, is_pending: bool) -> None:
         """Insert one discovered file under ``course_id`` and refresh progress."""
@@ -170,16 +229,15 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
         if node.progress is None:
             node.progress = Progress()
         if is_pending:
-            child_iid = self._insert_file(
-                node, course_dir, path, (RowStatus.PENDING, "0%")
-            )
-            node.file_iids[path] = child_iid
-            self._file_to_course[path] = (course_id, child_iid)
+            file_node = self._insert_file(node, course_dir, path, RowStatus.PENDING)
+            node.file_paths.add(path)
+            self._file_to_course[path] = (course_id, file_node)
         else:
-            self._insert_file(node, course_dir, path, (RowStatus.SYNCED, "100%"))
+            self._insert_file(node, course_dir, path, RowStatus.SYNCED)
             node.progress.done += 1
         node.progress.total += 1
-        self.tree.item(node.iid, values=self._format_progress(node), open=True)
+        node.status, node.progress_text = self._format_progress(node)
+        node.open = True
 
     def finish_discovery(self, course_id: int) -> None:
         """Transition ``course_id`` from discovering to percentage Syncing progress."""
@@ -188,22 +246,22 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
         node.discovering = False
         if node.progress is None:
             node.progress = Progress()
-        self.tree.item(node.iid, values=(RowStatus.SYNCING, str(node.progress)))
+        node.status = RowStatus.SYNCING
+        node.progress_text = str(node.progress)
 
     def set_file_status(self, path: Path, status: RowStatus) -> None:
         """Update a pending file row and advance parent progress on completion."""
         if (entry := self._file_to_course.get(path)) is None:
             return
-        course_id, child_iid = entry
-        pct = "100%" if status is RowStatus.COMPLETED else "0%"
-        self.tree.item(child_iid, values=(status, pct))
+        course_id, file_node = entry
+        file_node.status = status
         if (
             status is RowStatus.COMPLETED
             and (node := self._nodes.get(course_id)) is not None
             and node.progress is not None
         ):
             node.progress.done += 1
-            self.tree.item(node.iid, values=self._format_progress(node))
+            node.status, node.progress_text = self._format_progress(node)
 
     def set_course_status(self, course_id: int, status: RowStatus) -> None:
         """Update a course row's status and percentage."""
@@ -212,67 +270,49 @@ class CourseTree(ttk.Frame):  # pylint: disable=too-many-ancestors
         if status is RowStatus.COMPLETED:
             pct = "100%"
         elif status is RowStatus.FAILED:
-            current = self.tree.item(node.iid, "values")
-            pct = str(current[1]) if len(current) > 1 else "0%"
+            pct = node.progress_text
         else:
             pct = "0%"
-        self.tree.item(node.iid, values=(status, pct))
+        node.status = status
+        node.progress_text = pct
 
-    def _clear_course_children(self, node: _CourseNodes) -> None:
-        if existing := self.tree.get_children(node.iid):
-            self.tree.delete(*existing)
-        node.folder_iids.clear()
-        for path in node.file_iids:
+    def to_dict(self) -> list[dict[str, Any]]:
+        """Serialize all course rows and their nested folder/file trees."""
+        return [node.to_dict() for node in self._nodes.values()]
+
+    def _clear_course_children(self, node: _CourseNode) -> None:
+        node.root_folders.clear()
+        node.root_files.clear()
+        for path in node.file_paths:
             self._file_to_course.pop(path, None)
-        node.file_iids.clear()
-
-    def _ensure_folder(self, node: _CourseNodes, parts: tuple[str, ...]) -> str:
-        parent_iid = node.iid
-        for depth in range(1, len(parts) + 1):
-            key = parts[:depth]
-            if (cached := node.folder_iids.get(key)) is not None:
-                parent_iid = cached
-            else:
-                parent_iid = self.tree.insert(
-                    parent_iid,
-                    tk.END,
-                    text=parts[depth - 1],
-                    image=self.icons.folder,
-                    values=("", ""),
-                    open=True,
-                )
-                node.folder_iids[key] = parent_iid
-        return parent_iid
+        node.file_paths.clear()
 
     def _insert_file(
         self,
-        node: _CourseNodes,
+        node: _CourseNode,
         course_dir: Path,
         path: Path,
-        state: tuple[str, str],
-    ) -> str:
+        status: RowStatus,
+    ) -> _FileNode:
         rel = path.relative_to(course_dir) if path.is_relative_to(course_dir) else path
-        parent_iid = self._ensure_folder(node, rel.parts[:-1])
-        return self.tree.insert(
-            parent_iid,
-            tk.END,
-            text=rel.name,
-            image=self.icons.file,
-            values=state,
+        folder_parts = rel.parts[:-1]
+        file_node = _FileNode(name=rel.name, status=status)
+        if not folder_parts:
+            node.root_files[rel.name] = file_node
+            return file_node
+        prefix = folder_parts[0]
+        current = node.root_folders.setdefault(
+            prefix,
+            _FolderNode(id=f"folder:{node.course_id}:{prefix}", name=prefix),
         )
-
-    def _on_click(self, event: tk.Event) -> None:
-        if not self._interactive:
-            return
-        if self.tree.identify_element(event.x, event.y) == "Treeitem.indicator":
-            return
-        row_id = self.tree.identify_row(event.y)
-        if (
-            row_id
-            and not self.tree.parent(row_id)
-            and (course_id := self._iid_to_course_id.get(row_id)) is not None
-        ):
-            self._on_toggle(course_id)
+        for part in folder_parts[1:]:
+            prefix = f"{prefix}/{part}"
+            current = current.folders.setdefault(
+                part,
+                _FolderNode(id=f"folder:{node.course_id}:{prefix}", name=part),
+            )
+        current.files[rel.name] = file_node
+        return file_node
 
 
 __all__ = ["CourseTree", "Progress", "RowStatus"]

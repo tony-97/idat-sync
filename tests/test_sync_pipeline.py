@@ -501,8 +501,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         )
 
         assert not legacy_imports, f"Found forbidden legacy imports: {legacy_imports}"
-        assert playwright_importers == {"infrastructure/sharepoint_auth.py"}, (
-            "Playwright imports must be confined to infrastructure/sharepoint_auth.py, "
+        assert playwright_importers == set(), (
+            "Playwright imports must not appear anywhere in src/idat_sync/, "
             f"got: {sorted(playwright_importers)}"
         )
 

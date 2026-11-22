@@ -9,7 +9,7 @@ from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.ports import Credentials, Downloader
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.application.task_orchestrator import TaskOrchestrator
-from idat_sync.config import SyncConfig
+from idat_sync.config import SyncConfig, is_android
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import (
     MoodleDownloader,
@@ -22,7 +22,11 @@ from idat_sync.infrastructure.moodle_adapter import MoodleAdapter, MoodleTokenAd
 from idat_sync.infrastructure.moodle_client import MoodleClient, MoodleTokenClient
 from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 from idat_sync.infrastructure.sharepoint_adapter import SharepointApiAdapter
-from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
+from idat_sync.infrastructure.sharepoint_auth import (
+    AndroidWebViewDriver,
+    PyWebviewDriver,
+    SharepointBrowserAuth,
+)
 from idat_sync.infrastructure.sharepoint_client import SharepointClient
 
 
@@ -126,9 +130,14 @@ def create_auth_service(config: SyncConfig) -> AuthService:
             sharepoint_host=config.sharepoint_host,
             sharepoint_personal_host=config.sharepoint_personal_host,
             email_domain=config.email_domain,
+            driver=AndroidWebViewDriver() if is_android() else PyWebviewDriver(),
         ),
         credential_store=JsonCredentialStore(config.session_file),
     )
 
 
-__all__ = ["configure_logging", "create_auth_service", "create_sync_service"]
+__all__ = [
+    "configure_logging",
+    "create_auth_service",
+    "create_sync_service",
+]

@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "idat-sync"
 version = "0.0.2"
 dependencies = [
-    "async-tkinter-loop >= 0.10.2",
+    "pywebview >= 5.0",
+    "pyobjc-framework-WebKit >= 9.0; sys_platform == 'darwin'",
     "office365-rest-python-client[httpx] >= 3.3.1",
     "platformdirs >= 2.1",
-    "playwright >= 1.55.0",
     "yt-dlp[default]",
     "httpx >= 0.27",
     "tzdata; sys_platform == 'win32'",
@@ -29,8 +29,15 @@ license-files = ["LICEN[CS]E*"]
 Homepage = "https://github.com/tony-97/idat-sync"
 Issues = "https://github.com/tony-97/idat-sync/issues"
 
+[project.optional-dependencies]
+linux = ["pywebview[gtk]"]
+android = ["pywebview[android]"]
+
 [project.gui-scripts]
 idat_sync = "idat_sync.main:main"
+
+[tool.setuptools.package-data]
+"idat_sync.ui" = ["index.html"]
 
 [dependency-groups]
 dev = ["ruff>=0.8.0", "pylint>=3.3.0"]

@@ -4,9 +4,38 @@ import ast
 import unittest
 from pathlib import Path
 
+FORBIDDEN_INNER_LAYER_IMPORTS: tuple[str, ...] = (
+    "idat_sync.config",
+    "idat_sync.infrastructure",
+    "idat_sync.ui",
+    "requests",
+    "httpx",
+    "office365",
+    "yt_dlp",
+    "playwright",
+    "tkinter",
+    "async_tkinter_loop",
+    "webview",
+    "jnius",
+)
+
+
+def _dynamic_import_target(node: ast.AST) -> str | None:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "import_module"
+        and node.args
+    ):
+        return None
+    arg = node.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
 
 def iter_module_imports(py_file: Path) -> list[tuple[int, str]]:
-    """Return (lineno, module_name) pairs from AST Import and ImportFrom nodes."""
+    """Return (lineno, module_name) pairs from static and import_module() imports."""
     tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
     imports: list[tuple[int, str]] = []
     for node in ast.walk(tree):
@@ -14,6 +43,8 @@ def iter_module_imports(py_file: Path) -> list[tuple[int, str]]:
             imports.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.append((node.lineno, node.module))
+        elif (target := _dynamic_import_target(node)) is not None:
+            imports.append((node.lineno, target))
     return imports
 
 
@@ -64,17 +95,6 @@ class TestArchitectureBoundaries(unittest.TestCase):
     def test_exceptions_and_ports_have_zero_vendor_or_outer_layer_imports(self):
         """Ensure application.exceptions and ports avoid outer layers and SDKs."""
         src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
-        forbidden = (
-            "idat_sync.config",
-            "idat_sync.infrastructure",
-            "idat_sync.ui",
-            "requests",
-            "httpx",
-            "office365",
-            "yt_dlp",
-            "playwright",
-            "tkinter",
-        )
         exceptions_path = src_root / "application" / "exceptions.py"
         ports_path = src_root / "application" / "ports.py"
         assert exceptions_path.is_file(), "application/exceptions.py must exist"
@@ -82,9 +102,75 @@ class TestArchitectureBoundaries(unittest.TestCase):
             f"{py_file.name}:{lineno} imports {name}"
             for py_file in (exceptions_path, ports_path)
             for lineno, name in iter_module_imports(py_file)
-            if matches_prefix(name, forbidden)
+            if matches_prefix(name, FORBIDDEN_INNER_LAYER_IMPORTS)
         ]
         assert violations == [], f"Forbidden imports in exceptions/ports: {violations}"
+
+    def test_domain_and_application_have_zero_forbidden_imports(self):
+        """Ensure domain and application layers avoid outer layers and vendor SDKs."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        violations = [
+            f"{py_file.relative_to(src_root).as_posix()}:{lineno} imports {name}"
+            for target_dir in (src_root / "domain", src_root / "application")
+            for py_file in target_dir.rglob("*.py")
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, FORBIDDEN_INNER_LAYER_IMPORTS)
+        ]
+        assert violations == [], (
+            f"Forbidden imports in domain/application: {violations}"
+        )
+
+    def test_no_forbidden_legacy_imports_or_print_calls_across_src(self):
+        """Ensure src/idat_sync never imports removed frameworks or calls print()."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        forbidden = ("playwright", "tkinter", "async_tkinter_loop", "requests")
+        import_violations = [
+            f"{py_file.relative_to(src_root).as_posix()}:{lineno} imports {name}"
+            for py_file in src_root.rglob("*.py")
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, forbidden)
+        ]
+        assert import_violations == [], (
+            f"Forbidden imports across src/idat_sync: {import_violations}"
+        )
+
+        print_violations = [
+            f"{py_file.relative_to(src_root).as_posix()}:{node.lineno} calls print()"
+            for py_file in src_root.rglob("*.py")
+            for node in ast.walk(
+                ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+            )
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+        ]
+        assert print_violations == [], (
+            f"Forbidden print() calls across src/idat_sync: {print_violations}"
+        )
+
+    def test_ui_never_imports_infrastructure(self):
+        """Ensure src/idat_sync/ui never imports idat_sync.infrastructure."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        violations = [
+            f"{py_file.relative_to(src_root).as_posix()}:{lineno} imports {name}"
+            for py_file in (src_root / "ui").rglob("*.py")
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, ("idat_sync.infrastructure",))
+        ]
+        assert violations == [], f"Forbidden infrastructure imports in ui: {violations}"
+
+    def test_webview_isolated_to_app_and_sharepoint_auth(self):
+        """Ensure webview imports are confined to ui/app.py and sharepoint_auth.py."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        allowed = {"ui/app.py", "infrastructure/sharepoint_auth.py"}
+        violations = [
+            f"{py_file.relative_to(src_root).as_posix()}:{lineno} imports {name}"
+            for py_file in src_root.rglob("*.py")
+            if py_file.relative_to(src_root).as_posix() not in allowed
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, ("webview",))
+        ]
+        assert not violations, f"webview imported outside allowed modules: {violations}"
 
 
 if __name__ == "__main__":

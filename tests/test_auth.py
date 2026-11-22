@@ -3,18 +3,18 @@
 
 import ast
 import asyncio
-import contextlib
+import importlib.resources
 import inspect
+import json
 import sys
 import tempfile
 import threading
-import tkinter as tk
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import idat_sync.main as main_module
 import idat_sync.ui as ui_pkg
@@ -42,15 +42,15 @@ from idat_sync.application.ports import (
     SharepointAuthPort,
     StorageStateData,
 )
-from idat_sync.config import SyncConfig
+from idat_sync.application.sync_service import IDATSync
+from idat_sync.config import WEBVIEW_USER_AGENT, SyncConfig
 from idat_sync.domain.course import Course, CourseSection
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
-from idat_sync.infrastructure.sharepoint_auth import SharepointBrowserAuth
 from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.course_tree import CourseTree, RowStatus
-from idat_sync.ui.icons import Icons
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
+from tests.test_architecture import FORBIDDEN_INNER_LAYER_IMPORTS
 
 
 class FakeMoodleTokenPort:  # pylint: disable=too-few-public-methods
@@ -577,399 +577,29 @@ class TestJsonCredentialStore(unittest.TestCase):
             assert not part_path.exists()
 
 
-def _make_mock_playwright():
-    mock_page = MagicMock()
-    mock_page.goto = AsyncMock()
-    mock_page.wait_for_load_state = AsyncMock()
-    mock_page.wait_for_url = AsyncMock()
-    mock_page.wait_for_selector = AsyncMock()
-    mock_page.is_visible = AsyncMock(return_value=False)
-    mock_page.fill = AsyncMock()
-    mock_page.click = AsyncMock()
-
-    mock_context = MagicMock()
-    mock_context.new_page = AsyncMock(return_value=mock_page)
-    mock_context.storage_state = AsyncMock(
-        return_value={
-            "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
-        }
-    )
-    mock_context.close = AsyncMock()
-
-    mock_browser = MagicMock()
-    mock_browser.new_context = AsyncMock(return_value=mock_context)
-    mock_browser.close = AsyncMock()
-
-    mock_pw = MagicMock()
-    mock_pw.devices = {"Galaxy A55 landscape": {}}
-    mock_pw.chromium.launch = AsyncMock(return_value=mock_browser)
-
-    mock_pw_cm = MagicMock()
-    mock_pw_cm.__aenter__ = AsyncMock(return_value=mock_pw)
-    mock_pw_cm.__aexit__ = AsyncMock(return_value=False)
-    return mock_pw_cm, mock_browser, mock_context, mock_page
-
-
-class TestSharepointBrowserAuth(unittest.TestCase):
-    """Tests for SharepointBrowserAuth Playwright SSO and MFA flow."""
-
-    def test_requires_tenant_hosts_and_omits_login_flow_ended(self):
-        """Require tenant host args and omit login_flow_ended parameter."""
-        with pytest.raises(TypeError, match="sharepoint_host"):
-            SharepointBrowserAuth()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
-
-        sig = inspect.signature(SharepointBrowserAuth.fetch_storage_state)
-        assert "login_flow_ended" not in sig.parameters
-        assert list(sig.parameters) == ["self", "username", "password", "get_mfa_code"]
-
-    def _run_sso_case(  # pylint: disable=too-many-locals
-        self,
-        auth: SharepointBrowserAuth,
-        input_user: str,
-        expected_email: str,
-        *,
-        skip_visible: bool,
-    ) -> None:
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-        events: list[tuple[str, object]] = []
-        mock_page.wait_for_url = AsyncMock(
-            side_effect=lambda url, **kw: events.append(
-                ("wait_for_url", (url, kw.get("timeout")))
-            )
-        )
-        mock_page.wait_for_selector = AsyncMock(
-            side_effect=lambda sel, **kw: events.append(
-                ("wait_for_selector", (sel, kw.get("timeout")))
-            )
-        )
-
-        async def _is_visible(sel: str) -> bool:
-            events.append(("is_visible", sel))
-            return skip_visible
-
-        mock_page.is_visible = AsyncMock(side_effect=_is_visible)
-        mock_page.click = AsyncMock(
-            side_effect=lambda sel, **_kw: events.append(("click", sel))
-        )
-        with (
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                return_value=mock_pw_cm,
-            ),
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                new=AsyncMock(),
-            ),
-        ):
-            state = asyncio.run(auth.fetch_storage_state(input_user, "pw", _mfa_code))
-
-        assert state == {
-            "cookies": [{"name": "FedAuth", "value": "v", "domain": ".sharepoint.com"}]
-        }
-        mock_launch = mock_pw_cm.__aenter__.return_value.chromium.launch
-        mock_launch.assert_awaited_once()
-        assert mock_launch.call_args.kwargs.get("headless") is False
-        assert [call.args[0] for call in mock_page.goto.call_args_list] == [
-            "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-            "https://contoso-my.sharepoint.com/shared",
-        ]
-        mock_page.fill.assert_any_call("#i0116", expected_email, force=True)
-        mock_page.fill.assert_any_call("#i0118", "pw")
-        mock_page.fill.assert_any_call("#idTxtBx_SAOTCC_OTC", "123456", force=True)
-        expected_post_mfa = [
-            ("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"),
-            ("click", "#idChkBx_SAOTCC_TD"),
-            ("click", "#idSubmit_SAOTCC_Continue"),
-            (
-                "wait_for_url",
-                (
-                    "https://login.microsoftonline.com/common/SAS/ProcessAuth",
-                    60000 * 3,
-                ),
-            ),
-            (
-                "wait_for_selector",
-                ("#skipMfaRegistrationLink, #KmsiCheckboxField", 60000 * 3),
-            ),
-            ("is_visible", "#skipMfaRegistrationLink"),
-            *([("click", "#skipMfaRegistrationLink")] if skip_visible else []),
-            ("click", "#KmsiCheckboxField"),
-            ("click", "#idSIButton9"),
-            (
-                "wait_for_url",
-                (
-                    "https://contoso.sharepoint.com/_layouts/15/sharepoint.aspx",
-                    60000 * 3,
-                ),
-            ),
-        ]
-        mfa_start = events.index(("click", "#idDiv_SAOTCS_Proofs > div:nth-child(2)"))
-        assert events[mfa_start:] == expected_post_mfa
-        mock_context.close.assert_awaited_once()
-        mock_browser.close.assert_awaited_once()
-
-    def test_fetch_storage_state_runs_playwright_sso_and_mfa_flow(self):
-        """Drive Playwright SSO/MFA steps and close context and browser."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-        for input_user, expected_email, skip_visible in [
-            ("jdoe", "jdoe@example.edu", True),
-            ("jdoe@other.edu", "jdoe@other.edu", False),
-        ]:
-            with self.subTest(input_user=input_user, skip_visible=skip_visible):
-                self._run_sso_case(
-                    auth, input_user, expected_email, skip_visible=skip_visible
-                )
-
-    def test_fetch_storage_state_errors_and_cancellation(self):
-        """Wrap Playwright errors in AuthenticationError and propagate cancellation."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-
-        def run_failure_case(
-            configure_mocks,
-            *,
-            expected_exception: type[BaseException] | None = None,
-            expected_auth: tuple[str, type[BaseException]] | None = None,
-            expect_context_close: bool = False,
-            expect_browser_close: bool = False,
-        ) -> None:
-            mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-            configure_mocks(mock_pw_cm, mock_browser, mock_context, mock_page)
-            with (
-                patch(
-                    "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                    return_value=mock_pw_cm,
-                ),
-                patch(
-                    "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                    new=AsyncMock(),
-                ),
-            ):
-                if expected_exception is not None:
-                    with pytest.raises(expected_exception):
-                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                else:
-                    with (
-                        self.assertLogs(
-                            "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
-                        ) as log_cm,
-                        pytest.raises(
-                            AuthenticationError,
-                            match=expected_auth[0] if expected_auth else None,
-                        ) as auth_ctx,
-                    ):
-                        asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
-                    assert any(r.exc_info is not None for r in log_cm.records)
-                    if expected_auth is not None:
-                        assert isinstance(auth_ctx.value.__cause__, expected_auth[1])
-            if expect_context_close:
-                mock_context.close.assert_awaited_once()
-            else:
-                mock_context.close.assert_not_awaited()
-            if expect_browser_close:
-                mock_browser.close.assert_awaited_once()
-            else:
-                mock_browser.close.assert_not_awaited()
-
-        # Startup failure in async_playwright().__aenter__
-        run_failure_case(
-            lambda cm, _b, _c, _p: setattr(
-                cm, "__aenter__", AsyncMock(side_effect=RuntimeError("driver failed"))
-            ),
-            expected_auth=("SharePoint browser authentication failed", RuntimeError),
-        )
-
-        # Playwright timeout failure translates to distinct timeout message
-        run_failure_case(
-            lambda _cm, _b, _c, p: setattr(
-                p,
-                "wait_for_url",
-                AsyncMock(side_effect=PlaywrightTimeoutError("timed out")),
-            ),
-            expected_auth=(r"SharePoint sign-in timed out\.", PlaywrightTimeoutError),
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Launch failure
-        run_failure_case(
-            lambda cm, _b, _c, _p: setattr(
-                cm.__aenter__.return_value.chromium,
-                "launch",
-                AsyncMock(side_effect=RuntimeError("launch failed")),
-            ),
-        )
-
-        # Context creation failure must still close launched browser
-        run_failure_case(
-            lambda _cm, b, _c, _p: setattr(
-                b, "new_context", AsyncMock(side_effect=RuntimeError("context failed"))
-            ),
-            expect_browser_close=True,
-        )
-
-        # Page navigation failure closes context and browser
-        run_failure_case(
-            lambda _cm, _b, _c, p: setattr(
-                p, "goto", AsyncMock(side_effect=RuntimeError("network timeout"))
-            ),
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Context cleanup failure still closes browser
-        run_failure_case(
-            lambda _cm, _b, c, _p: setattr(
-                c, "close", AsyncMock(side_effect=RuntimeError("context close failed"))
-            ),
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Cancellation closes context and browser and propagates CancelledError
-        run_failure_case(
-            lambda _cm, _b, _c, p: setattr(
-                p, "goto", AsyncMock(side_effect=asyncio.CancelledError())
-            ),
-            expected_exception=asyncio.CancelledError,
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-        # Cancellation still propagates if context.close() raises during cleanup
-        def cancel_with_close_failure(_cm, _b, c, p) -> None:
-            p.goto = AsyncMock(side_effect=asyncio.CancelledError())
-            c.close = AsyncMock(side_effect=RuntimeError("context close failed"))
-
-        run_failure_case(
-            cancel_with_close_failure,
-            expected_exception=asyncio.CancelledError,
-            expect_context_close=True,
-            expect_browser_close=True,
-        )
-
-    def test_fetch_storage_state_launches_webkit_on_darwin_and_aborts_on_blank_mfa(
-        self,
-    ):
-        """Launch WebKit on macOS, Edge on Windows, and abort on blank MFA code."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-
-        for os_name, expected_engine, expected_kwargs in [
-            ("Darwin", "webkit", {"headless": False}),
-            ("Windows", "chromium", {"headless": False, "channel": "msedge"}),
-            ("Linux", "chromium", {"headless": False, "channel": "chromium"}),
-        ]:
-            with self.subTest(os_name=os_name):
-                mock_pw_cm, mock_browser, _, _ = _make_mock_playwright()
-                mock_pw = mock_pw_cm.__aenter__.return_value
-                mock_pw.webkit = MagicMock()
-                mock_pw.webkit.launch = AsyncMock(return_value=mock_browser)
-                with (
-                    patch(
-                        "idat_sync.infrastructure.sharepoint_auth.platform.system",
-                        return_value=os_name,
-                    ),
-                    patch(
-                        "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                        return_value=mock_pw_cm,
-                    ),
-                    patch(
-                        "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                        new=AsyncMock(),
-                    ),
-                ):
-                    state = asyncio.run(
-                        auth.fetch_storage_state("jdoe", "pw", _mfa_code)
-                    )
-
-                assert state is not None
-                getattr(mock_pw, expected_engine).launch.assert_awaited_once_with(
-                    **expected_kwargs
-                )
-                other_engine = "chromium" if expected_engine == "webkit" else "webkit"
-                getattr(mock_pw, other_engine).launch.assert_not_awaited()
-
-    def test_fetch_storage_state_aborts_on_blank_mfa(self):
-        """Abort before OTP entry and close browser on blank MFA code."""
-        auth = SharepointBrowserAuth(
-            sharepoint_host="contoso.sharepoint.com",
-            sharepoint_personal_host="contoso-my.sharepoint.com",
-            email_domain="example.edu",
-        )
-        mock_pw_cm, mock_browser, mock_context, mock_page = _make_mock_playwright()
-
-        async def _blank_mfa() -> str:
-            return "   "
-
-        with (
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.platform.system",
-                return_value="Linux",
-            ),
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.async_playwright",
-                return_value=mock_pw_cm,
-            ),
-            patch(
-                "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
-                new=AsyncMock(),
-            ),
-            pytest.raises(AuthenticationError),
-        ):
-            asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
-
-        assert "#idTxtBx_SAOTCC_OTC" not in [
-            call.args[0] for call in mock_page.fill.call_args_list
-        ]
-        mock_context.close.assert_awaited_once()
-        mock_browser.close.assert_awaited_once()
-
-
 class TestLoginFrame(unittest.TestCase):
-    """Tests for LoginFrame validation, MFA popup, and login submission."""
+    """Tests for pure-Python LoginFrame validation, inline MFA, and login."""
 
-    def _create_master(self):
-        class StubMaster(tk.Tk):
-            """Minimal Tk root stub for LoginFrame tests."""
+    def _create_app(self):
+        class StubApp:
+            """Minimal app stub for LoginFrame tests."""
 
             def __init__(self) -> None:
-                super().__init__()
-                self.withdraw()
                 self.switched_to_sync = 0
-                self.centered_size: tuple[int, int] | None = None
-
-            def center_window(self, window_width: int, window_height: int) -> None:
-                """Record requested window dimensions."""
-                self.centered_size = (window_width, window_height)
+                self.push_count = 0
 
             def switch_to_sync(self) -> None:
                 """Count transitions to SyncFrame."""
                 self.switched_to_sync += 1
 
-        master = StubMaster()
-        self.addCleanup(master.destroy)
-        return master
+            def push_state(self) -> None:
+                """Count state pushes."""
+                self.push_count += 1
 
-    def _login_button(self, frame: LoginFrame) -> tk.Button:
-        return next(w for w in frame.winfo_children() if isinstance(w, tk.Button))
-
-    def _set_entry(self, entry: tk.Entry, value: str) -> None:
-        entry.delete(0, tk.END)
-        entry.insert(0, value)
+        return StubApp()
 
     def test_login_button_disables_while_blank_or_logging_in_and_guards_submit(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
-        """Disable login button when inputs blank or in-flight and guard submit."""
+        """Disable can_login when inputs blank or in-flight and guard submit."""
         expected_state: StorageStateData = {
             "cookies": [
                 {"name": "FedAuth", "value": "cookie-v", "domain": ".sharepoint.com"}
@@ -1006,21 +636,20 @@ class TestLoginFrame(unittest.TestCase):
             sharepoint_auth=sharepoint,  # type: ignore[arg-type]
             credential_store=store,
         )
-        master = self._create_master()
-        frame = LoginFrame(master, auth)  # type: ignore[arg-type]
-        login_button = self._login_button(frame)
+        app = self._create_app()
+        frame = LoginFrame(app, auth)  # type: ignore[arg-type]
 
-        assert str(login_button["state"]) == "disabled"
-        self._set_entry(frame.user_entry, "   ")
-        self._set_entry(frame.pass_entry, " secret ")
-        assert str(login_button["state"]) == "disabled"
-        self._set_entry(frame.user_entry, " jdoe@custom.edu ")
-        self._set_entry(frame.pass_entry, "")
-        assert str(login_button["state"]) == "disabled"
-        self._set_entry(frame.pass_entry, " secret ")
-        assert str(login_button["state"]) == "normal"
+        assert not frame.can_login
+        frame.username = "   "
+        frame.password = " secret "  # noqa: S105
+        assert not frame.can_login
+        frame.username = " jdoe@custom.edu "
+        frame.password = ""
+        assert not frame.can_login
+        frame.password = " secret "  # noqa: S105
+        assert frame.can_login
 
-        async def exercise_do_login() -> None:
+        async def exercise_do_login() -> None:  # pylint: disable=too-many-statements
             sharepoint.started = asyncio.Event()
             sharepoint.release = asyncio.Event()
             sharepoint.error = RemoteServiceError("sso boom")
@@ -1028,7 +657,8 @@ class TestLoginFrame(unittest.TestCase):
             with self.assertLogs("idat_sync.ui.login_frame", level="ERROR") as log_cm:
                 task = asyncio.create_task(frame.do_login())
                 await sharepoint.started.wait()
-                assert str(login_button["state"]) == "disabled"
+                assert frame.is_login is True
+                assert not frame.can_login
 
                 await frame.do_login()
                 assert len(sharepoint.calls) == 1
@@ -1037,14 +667,14 @@ class TestLoginFrame(unittest.TestCase):
                 await task
 
             assert any("sso boom" in msg for msg in log_cm.output)
-            assert frame.error_var.get() == "sso boom"
-            assert str(login_button["state"]) == "normal"
-            assert not master.switched_to_sync
+            assert frame.error == "sso boom"
+            assert frame.can_login
+            assert not app.switched_to_sync
 
             moodle.token = None
             await frame.do_login()
-            assert bool(frame.error_var.get())
-            assert not master.switched_to_sync
+            assert bool(frame.error)
+            assert not app.switched_to_sync
 
             moodle.token = "tok123"  # noqa: S105
             sharepoint.started = None
@@ -1052,7 +682,7 @@ class TestLoginFrame(unittest.TestCase):
             sharepoint.error = None
             await frame.do_login()
 
-            assert not frame.error_var.get()
+            assert not frame.error
             assert moodle.calls == [
                 ("jdoe", " secret "),
                 ("jdoe", " secret "),
@@ -1063,35 +693,26 @@ class TestLoginFrame(unittest.TestCase):
                 ("jdoe@custom.edu", " secret "),
                 ("jdoe@custom.edu", " secret "),
             ]
-            assert master.switched_to_sync == 1
-            assert str(login_button["state"]) == "normal"
+            assert app.switched_to_sync == 1
+            assert frame.can_login
 
-            self._set_entry(frame.user_entry, "   ")
-            assert str(login_button["state"]) == "disabled"
+            frame.username = "   "
+            assert not frame.can_login
             await frame.do_login()
             assert len(moodle.calls) == 3
-            assert str(login_button["state"]) == "disabled"
-
-        error_labels = [
-            w
-            for w in frame.winfo_children()
-            if isinstance(w, tk.Label)
-            and str(w.cget("textvariable")) == str(frame.error_var)
-        ]
-        assert len(error_labels) == 1
-        assert str(error_labels[0].cget("fg")) == "red"
+            assert not frame.can_login
 
         asyncio.run(exercise_do_login())
 
     def test_login_frame_surfaces_logout_credential_store_error_on_init(self):
-        """Show CredentialStoreError in error_var if logout fails during init."""
+        """Show CredentialStoreError in error if logout fails during init."""
         mock_auth = MagicMock(spec=AuthService)
         mock_auth.logout.side_effect = CredentialStoreError(
             "Could not remove credentials file: locked"
         )
-        master = self._create_master()
-        frame = LoginFrame(master, mock_auth)  # type: ignore[arg-type]
-        assert "Could not remove credentials file: locked" in frame.error_var.get()
+        app = self._create_app()
+        frame = LoginFrame(app, mock_auth)  # type: ignore[arg-type]
+        assert "Could not remove credentials file: locked" in frame.error
 
     def test_credentials_expired_error_exported_without_vendor_imports(self):
         """Export IDATSyncError hierarchy cleanly without vendor imports."""
@@ -1125,84 +746,78 @@ class TestLoginFrame(unittest.TestCase):
                 if isinstance(node, ast.Import)
                 for alias in node.names
             }
-            assert (
-                imported
-                & {"requests", "httpx", "office365", "yt_dlp", "playwright", "tkinter"}
-                == set()
-            )
+            assert imported & set(FORBIDDEN_INNER_LAYER_IMPORTS) == set()
 
-    def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):  # pylint: disable=too-many-statements
-        """Verify MFA popup Return/close handling and dead UI symbol removal."""
+    def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):
+        """Verify inline async MFA future handling and dead UI symbol removal."""
         assert not hasattr(LoginFrame, "get_mfa_code_ui")
         assert not hasattr(AppFrame, "exit")
         assert "LoadingDialog" not in ui_pkg.__all__
         assert not hasattr(ui_pkg, "LoadingDialog")
-        assert not (Path(ui_pkg.__file__).resolve().parent / "dialogs.py").exists()
+        assert "Icons" not in ui_pkg.__all__
+        assert not hasattr(ui_pkg, "Icons")
+        ui_dir = Path(ui_pkg.__file__).resolve().parent
+        assert not (ui_dir / "dialogs.py").exists()
+        assert not (ui_dir / "icons.py").exists()
+        assert not (ui_dir / "mfa_dialog.py").exists()
 
-        master = self._create_master()
+        app = self._create_app()
         auth = AuthService(
             moodle_auth=FakeMoodleTokenPort(),  # type: ignore[arg-type]
             sharepoint_auth=FakeSharepointAuthPort(),  # type: ignore[arg-type]
             credential_store=InMemoryCredentialStore(),
         )
-        frame = LoginFrame(master, auth)  # type: ignore[arg-type]
+        frame = LoginFrame(app, auth)  # type: ignore[arg-type]
 
         async def exercise_mfa() -> None:
             task = asyncio.create_task(frame.get_mfa_code())
             await asyncio.sleep(0)
-            popup = next(
-                w for w in master.winfo_children() if isinstance(w, tk.Toplevel)
-            )
-            entry = next(w for w in popup.winfo_children() if isinstance(w, tk.Entry))
-            entry.insert(0, "654321")
-            popup.update()
-            entry.focus_force()
-            entry.event_generate("<Return>")
-            master.update()
+            assert frame.mfa_open is True
+            frame.submit_mfa("654321")
             assert await task == "654321"
-            assert not popup.winfo_exists()
+            assert frame.mfa_open is False
 
             task2 = asyncio.create_task(frame.get_mfa_code())
             await asyncio.sleep(0)
-            popup2 = next(
-                w for w in master.winfo_children() if isinstance(w, tk.Toplevel)
-            )
-            close_cmd = popup2.protocol("WM_DELETE_WINDOW")
-            assert close_cmd
-            popup2.tk.call(close_cmd)
-            master.update()
+            assert frame.mfa_open is True
+            frame.cancel_mfa()
             assert not await task2
-            assert not popup2.winfo_exists()
+            assert frame.mfa_open is False
+
+            task3 = asyncio.create_task(frame.get_mfa_code())
+            await asyncio.sleep(0)
+            assert frame.mfa_open is True
+            task3.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task3
+            assert frame.mfa_open is False
 
         asyncio.run(exercise_mfa())
 
-        app = MainApp(SyncConfig())
-        self.addCleanup(app.destroy)
-        app.withdraw()
-        first_frame = app.winfo_children()[0]
-        app.switch_to_login()
-        assert not first_frame.winfo_exists()
 
+class _SyncStubMaster:
+    """Minimal app stub for pure-Python SyncFrame tests."""
 
-class _SyncStubMaster(tk.Tk):
-    """Minimal Tk root stub for SyncFrame tests."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.withdraw()
-        self.loop = asyncio.get_running_loop()
+    def __init__(self, window: object | None = None) -> None:
+        self.window = window
         self.switched_to_login = 0
-
-    def center_window(self, _w: int, _h: int) -> None:
-        """No-op window centering for headless tests."""
+        self.push_count = 0
 
     def switch_to_login(self) -> None:
         """Count transitions to LoginFrame."""
         self.switched_to_login += 1
 
+    def push_state(self) -> None:
+        """Count state pushes."""
+        self.push_count += 1
+
+    def pick_folder(self) -> str:
+        """Simulate a cancelled desktop dialog."""
+        return ""
+
 
 class TestSyncFrame(unittest.TestCase):
-    """Tests for SyncFrame treeview, selection, sync progress, and cancellation."""
+    """Tests for pure-Python SyncFrame selection, sync progress, and cancellation."""
 
     def test_sync_frame_treeview_selection_progress_and_error_recovery(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Verify SyncFrame course ordering, tree progress, selection, and logout."""
@@ -1224,168 +839,187 @@ class TestSyncFrame(unittest.TestCase):
                 id=2, name="IV.01.2026-III CURRENT", category="IV.01.2026-III"
             )
 
-            async def exercise() -> None:  # noqa: PLR0915  # pylint: disable=too-many-statements,too-many-locals
+            async def exercise() -> None:  # noqa: PLR0915  # pylint: disable=too-many-statements
                 master = _SyncStubMaster()
-                try:
-                    assert not hasattr(sync_frame_mod, "_TreeProgressListener")
-                    frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
-                    assert not hasattr(frame, "output_text")
-                    assert not hasattr(frame, "progress_queue")
-                    assert not hasattr(frame, "update_progress")
-                    mock_sync = MagicMock()
-                    mock_sync.aclose = AsyncMock()
-                    mock_sync.list_courses = AsyncMock(
-                        return_value=[past_course, current_course]
+                assert not hasattr(sync_frame_mod, "_TreeProgressListener")
+                frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
+                assert not hasattr(frame, "output_text")
+                assert not hasattr(frame, "progress_queue")
+                assert not hasattr(frame, "update_progress")
+                assert not hasattr(frame, "exit")
+                mock_sync = MagicMock(spec=IDATSync)
+                mock_sync.aclose = AsyncMock()
+                mock_sync.list_courses = AsyncMock(
+                    return_value=[past_course, current_course]
+                )
+                attempts = 0
+
+                async def fake_create_sync_service(_credentials, _cfg):
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts == 1:
+                        raise RemoteServiceError("network offline")
+                    return mock_sync
+
+                async def fake_sync_courses(root_folder, courses, *, refresh=False):
+                    assert root_folder == tmpdir
+                    assert courses == [current_course]
+                    if refresh:
+                        for c in courses:
+                            c.sections.clear()
+                    c_dir = Path(tmpdir) / current_course.name
+                    synced_p = c_dir / "S1" / "already.pdf"
+                    ok_p = c_dir / "S1" / "new.pdf"
+                    err_p = c_dir / "S1" / "broken.pdf"
+                    yield CourseSyncStarted(current_course, c_dir)
+                    yield CourseFileDiscovered(
+                        current_course, synced_p, is_pending=False
                     )
-                    attempts = 0
+                    yield CourseFileDiscovered(current_course, ok_p, is_pending=True)
+                    yield TaskDownloadStarted(ok_p)
+                    yield TaskDownloadCompleted(ok_p)
+                    yield CourseFileDiscovered(current_course, err_p, is_pending=True)
+                    yield CourseDiscoveryCompleted(current_course, 1, 2)
+                    yield TaskDownloadStarted(err_p)
+                    yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
+                    yield CourseSyncCompleted(
+                        current_course, RemoteServiceError("partial")
+                    )
 
-                    async def fake_create_sync_service(_credentials, _cfg):
-                        nonlocal attempts
-                        attempts += 1
-                        if attempts == 1:
-                            raise RemoteServiceError("network offline")
-                        return mock_sync
+                mock_sync.sync_courses.side_effect = fake_sync_courses
 
-                    async def fake_sync_courses(root_folder, courses, *, refresh=False):
-                        assert root_folder == tmpdir
-                        assert courses == [current_course]
-                        if refresh:
-                            for c in courses:
-                                c.sections.clear()
-                        c_dir = Path(tmpdir) / current_course.name
-                        synced_p = c_dir / "S1" / "already.pdf"
-                        ok_p = c_dir / "S1" / "new.pdf"
-                        err_p = c_dir / "S1" / "broken.pdf"
-                        yield CourseSyncStarted(current_course, c_dir)
-                        yield CourseFileDiscovered(
-                            current_course, synced_p, is_pending=False
-                        )
-                        yield CourseFileDiscovered(
-                            current_course, ok_p, is_pending=True
-                        )
-                        yield TaskDownloadStarted(ok_p)
-                        yield TaskDownloadCompleted(ok_p)
-                        yield CourseFileDiscovered(
-                            current_course, err_p, is_pending=True
-                        )
-                        yield CourseDiscoveryCompleted(current_course, 1, 2)
-                        yield TaskDownloadStarted(err_p)
-                        yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
-                        yield CourseSyncCompleted(
-                            current_course, RemoteServiceError("partial")
-                        )
+                with patch(
+                    "idat_sync.ui.sync_frame.create_sync_service",
+                    side_effect=fake_create_sync_service,
+                ) as mock_factory:
+                    await frame.load_idat_sync(creds)
+                    assert frame.idat_sync is None
+                    assert not frame.is_syncing
+                    assert not master.switched_to_login
+                    assert creds_file.exists()
+                    assert "network offline" in frame.status
 
+                    frame.set_folder_path(tmpdir)
+                    assert frame.can_sync is True
+                    await frame.do_sync()
+                    assert mock_factory.call_count == 2
+                    assert not frame.is_syncing
+
+                    rows = frame.course_tree.to_dict()
+                    assert len(rows) == 2
+                    assert rows[0]["name"] == current_course.name
+                    assert rows[0]["checked"] is True
+                    assert rows[1]["name"] == past_course.name
+                    assert rows[1]["checked"] is False
+                    assert (rows[0]["status"], rows[0]["progress"]) == (
+                        "Failed",
+                        "66%",
+                    )
+                    folders = rows[0]["children"]
+                    assert len(folders) == 1
+                    assert folders[0]["type"] == "folder"
+                    assert folders[0]["name"] == "S1"
+                    child_rows = {
+                        f["name"]: (f["status"], f["progress"])
+                        for f in folders[0]["children"]
+                    }
+                    assert child_rows == {
+                        "already.pdf": ("Synced", "100%"),
+                        "new.pdf": ("Completed", "100%"),
+                        "broken.pdf": ("Failed", "0%"),
+                    }
+
+                    frame.clear_selection()
+                    assert frame.can_sync is False
+                    frame.select_all()
+                    assert frame.can_sync is True
+                    assert all(r["checked"] for r in frame.course_tree.to_dict())
+                    frame.select_in_progress()
+                    rows = frame.course_tree.to_dict()
+                    assert rows[0]["checked"] is True
+                    assert rows[1]["checked"] is False
+                    frame.toggle_course(current_course.id)
+                    assert frame.can_sync is False
+                    frame.toggle_course(current_course.id)
+                    assert frame.can_sync is True
+
+                    async def fail_sync_courses(
+                        _root_folder, _courses, *, refresh=False
+                    ):
+                        _ = refresh
+                        raise CredentialsExpiredError("401 expired")
+                        yield  # pragma: no cover
+
+                    mock_sync.sync_courses.side_effect = fail_sync_courses
+                    await frame.do_sync()
+                    assert not frame.is_syncing
+                    assert not master.switched_to_login
+                    assert creds_file.exists()
+                    assert "Logout" in frame.status
+
+                    current_course.sections = [CourseSection(id=1, name="Cached")]
+                    past_course.sections = [CourseSection(id=2, name="Kept")]
                     mock_sync.sync_courses.side_effect = fake_sync_courses
+                    await frame.do_sync()
+                    assert not current_course.sections
+                    assert len(past_course.sections) == 1
+                    assert mock_factory.call_count == 2
 
-                    with patch(
-                        "idat_sync.ui.sync_frame.create_sync_service",
-                        side_effect=fake_create_sync_service,
-                    ) as mock_factory:
-                        await frame.load_idat_sync(creds)
-                        assert frame.idat_sync is None
-                        assert not frame.is_syncing.get()
-                        assert str(frame.browse_button["state"]) == "normal"
-                        assert str(frame.logout_button["state"]) == "normal"
-                        assert not master.switched_to_login
-                        assert creds_file.exists()
-                        assert "network offline" in frame.status_var.get()
+                    frame.is_syncing = True
+                    await frame.do_logout()
+                    mock_sync.aclose.assert_not_awaited()
+                    assert not master.switched_to_login
 
-                        frame.folder_path.set(tmpdir)
-                        assert str(frame.sync_button["state"]) == "normal"
-                        await frame.do_sync()
-                        assert mock_factory.call_count == 2
-                        assert not frame.is_syncing.get()
-
-                        tree = frame.course_tree.tree
-                        icons = frame.course_tree.icons
-                        top_items = tree.get_children("")
-                        assert len(top_items) == 2
-                        assert tree.item(top_items[0], "text") == current_course.name
-                        assert tree.item(top_items[0], "image") == (str(icons.checked),)
-                        assert tree.item(top_items[1], "text") == past_course.name
-                        assert tree.item(top_items[1], "image") == (
-                            str(icons.unchecked),
-                        )
-
-                        assert tree.item(top_items[0], "values") == (
-                            "Failed",
-                            "66%",
-                        )
-                        folder_items = tree.get_children(top_items[0])
-                        assert len(folder_items) == 1
-                        assert tree.item(folder_items[0], "text") == "S1"
-                        assert tree.item(folder_items[0], "image") == (
-                            str(icons.folder),
-                        )
-                        file_items = tree.get_children(folder_items[0])
-                        file_icon = (str(icons.file),)
-                        child_rows = {
-                            tree.item(cid, "text"): (
-                                tree.item(cid, "values"),
-                                tree.item(cid, "image"),
-                            )
-                            for cid in file_items
-                        }
-                        assert child_rows == {
-                            "already.pdf": (("Synced", "100%"), file_icon),
-                            "new.pdf": (("Completed", "100%"), file_icon),
-                            "broken.pdf": (("Failed", "0%"), file_icon),
-                        }
-
-                        frame.clear_selection()
-                        assert str(frame.sync_button["state"]) == "disabled"
-                        frame.select_all()
-                        assert str(frame.sync_button["state"]) == "normal"
-                        assert all(
-                            tree.item(iid, "image") == (str(icons.checked),)
-                            for iid in tree.get_children("")
-                        )
-                        frame.select_in_progress()
-                        assert tree.item(top_items[0], "image") == (str(icons.checked),)
-                        assert tree.item(top_items[1], "image") == (
-                            str(icons.unchecked),
-                        )
-                        frame.toggle_course(current_course.id)
-                        assert str(frame.sync_button["state"]) == "disabled"
-                        frame.toggle_course(current_course.id)
-                        assert str(frame.sync_button["state"]) == "normal"
-
-                        async def fail_sync_courses(
-                            _root_folder, _courses, *, refresh=False
-                        ):
-                            _ = refresh
-                            raise CredentialsExpiredError("401 expired")
-                            yield  # pragma: no cover
-
-                        mock_sync.sync_courses.side_effect = fail_sync_courses
-                        await frame.do_sync()
-                        assert not frame.is_syncing.get()
-                        assert not master.switched_to_login
-                        assert creds_file.exists()
-                        assert "Logout" in frame.status_var.get()
-
-                        current_course.sections = [CourseSection(id=1, name="Cached")]
-                        past_course.sections = [CourseSection(id=2, name="Kept")]
-                        mock_sync.sync_courses.side_effect = fake_sync_courses
-                        await frame.do_sync()
-                        assert not current_course.sections
-                        assert len(past_course.sections) == 1
-                        assert mock_factory.call_count == 2
-
-                        frame.is_syncing.set(True)
-                        await frame.do_logout()
-                        mock_sync.aclose.assert_not_awaited()
-                        assert not master.switched_to_login
-
-                        frame.is_syncing.set(False)
-                        await frame.do_logout()
-                        mock_sync.aclose.assert_awaited_once_with()
-                        assert frame.idat_sync is None
-                        assert master.switched_to_login == 1
-                finally:
-                    master.destroy()
+                    frame.is_syncing = False
+                    await frame.do_logout()
+                    mock_sync.aclose.assert_awaited_once_with()
+                    assert frame.idat_sync is None
+                    assert master.switched_to_login == 1
 
             asyncio.run(exercise())
+
+    def test_sync_frame_browse_folder_desktop_and_android_fallback(self):
+        """Use MainApp desktop folder dialog when available, else Android Downloads."""
+        creds: Credentials = {
+            "token": "t",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = SyncConfig(session_file=Path(tmpdir) / "missing_credentials.json")
+
+            mock_window = MagicMock()
+            mock_window.create_file_dialog.return_value = ("/chosen/sync/dir",)
+            fake_webview = types.SimpleNamespace(
+                FileDialog=types.SimpleNamespace(FOLDER=20)
+            )
+            desktop_app = MainApp(config=config, window=mock_window)
+            frame = SyncFrame(desktop_app, creds, config)
+            with (
+                patch.dict("os.environ", {}, clear=False),
+                patch.dict(sys.modules, {"webview": fake_webview}),
+            ):
+                assert frame.browse_folder() == "/chosen/sync/dir"
+            assert frame.folder_path == "/chosen/sync/dir"
+
+            mock_window.create_file_dialog.return_value = None
+            with (
+                patch.dict("os.environ", {}, clear=False),
+                patch.dict(sys.modules, {"webview": fake_webview}),
+            ):
+                assert frame.browse_folder() == "/chosen/sync/dir"
+            assert frame.folder_path == "/chosen/sync/dir"
+
+            android_frame = SyncFrame(
+                MainApp(config=config, window=None), creds, config
+            )
+            with patch.dict(
+                "os.environ",
+                {"ANDROID_ARGUMENT": "1", "EXTERNAL_STORAGE": "/sdcard"},
+                clear=False,
+            ):
+                expected = str(Path("/sdcard") / "Download" / "idat-sync")
+                assert android_frame.browse_folder() == expected
+            assert android_frame.folder_path == expected
 
     def test_sync_frame_closes_partial_service_and_logout_switches_on_aclose_error(
         self,
@@ -1402,42 +1036,37 @@ class TestSyncFrame(unittest.TestCase):
 
             async def exercise() -> None:
                 master = _SyncStubMaster()
-                try:
-                    frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
-                    partial_sync = MagicMock()
-                    partial_sync.aclose = AsyncMock()
-                    partial_sync.list_courses = AsyncMock(
-                        side_effect=RemoteServiceError("list failed")
-                    )
+                frame = SyncFrame(master, creds, config)  # type: ignore[arg-type]
+                partial_sync = MagicMock(spec=IDATSync)
+                partial_sync.aclose = AsyncMock()
+                partial_sync.list_courses = AsyncMock(
+                    side_effect=RemoteServiceError("list failed")
+                )
 
-                    with patch(
-                        "idat_sync.ui.sync_frame.create_sync_service",
-                        new=AsyncMock(return_value=partial_sync),
-                    ):
-                        await frame.load_idat_sync(creds)
+                with patch(
+                    "idat_sync.ui.sync_frame.create_sync_service",
+                    new=AsyncMock(return_value=partial_sync),
+                ):
+                    await frame.load_idat_sync(creds)
 
-                    partial_sync.aclose.assert_awaited_once_with()
-                    assert frame.idat_sync is None
-                    assert "list failed" in frame.status_var.get()
+                partial_sync.aclose.assert_awaited_once_with()
+                assert frame.idat_sync is None
+                assert "list failed" in frame.status
 
-                    with patch(
-                        "idat_sync.ui.sync_frame.create_sync_service",
-                        new=AsyncMock(return_value=None),
-                    ):
-                        await frame.load_idat_sync(creds)
-                    assert "Sync service failed to initialize" in frame.status_var.get()
+                with patch(
+                    "idat_sync.ui.sync_frame.create_sync_service",
+                    new=AsyncMock(return_value=None),
+                ):
+                    await frame.load_idat_sync(creds)
+                assert "Sync service failed to initialize" in frame.status
 
-                    failing_sync = MagicMock()
-                    failing_sync.aclose = AsyncMock(
-                        side_effect=RuntimeError("close boom")
-                    )
-                    frame.idat_sync = failing_sync
-                    with pytest.raises(RuntimeError, match="close boom"):
-                        await frame.do_logout()
-                    assert frame.idat_sync is None
-                    assert master.switched_to_login == 1
-                finally:
-                    master.destroy()
+                failing_sync = MagicMock(spec=IDATSync)
+                failing_sync.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
+                frame.idat_sync = failing_sync
+                with pytest.raises(RuntimeError, match="close boom"):
+                    await frame.do_logout()
+                assert frame.idat_sync is None
+                assert master.switched_to_login == 1
 
             asyncio.run(exercise())
 
@@ -1467,18 +1096,16 @@ class TestSyncFrame(unittest.TestCase):
             assert sys.stderr is orig_stderr
 
     def test_app_frame_aclose_and_main_app_on_close_closes_frame_before_destroy(self):
-        """Close active AppFrame before destroying MainApp."""
+        """Close active AppFrame before destroying MainApp window idempotently."""
 
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "missing_session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
+                mock_window = MagicMock()
+                app = MainApp(config=cfg, window=mock_window)
                 try:
-                    assert bool(app.protocol("WM_DELETE_WINDOW"))
-                    base_frame = AppFrame(app)
+                    base_frame = AppFrame()
                     await base_frame.aclose()
-                    base_frame.destroy()
 
                     active_frame = MagicMock()
                     active_frame.aclose = AsyncMock(
@@ -1486,85 +1113,105 @@ class TestSyncFrame(unittest.TestCase):
                     )
                     app._frame = active_frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
-                    with patch.object(
-                        app, "destroy", wraps=app.destroy
-                    ) as mock_destroy:
-                        with pytest.raises(RuntimeError, match="close error"):
-                            await app.on_close()
+                    with pytest.raises(RuntimeError, match="close error"):
                         await app.on_close()
+                    await app.on_close()
 
                     active_frame.aclose.assert_awaited_once_with()
-                    mock_destroy.assert_called_once_with()
+                    mock_window.destroy.assert_called_once_with()
                 finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
                     app.loop.close()
 
         asyncio.run(exercise())
 
-    def test_login_frame_return_binding_mfa_cancel_and_on_close(self):  # pylint: disable=too-many-statements
-        """Verify <Return> submit, MFA cancellation, and on_close cleanup."""
+    def test_main_app_initial_frame_switching_and_state_push(self):
+        """Select initial frame from credentials, switch views, and push JSON state."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            creds_path = Path(tmpdir) / "credentials.json"
+            cfg = SyncConfig(session_file=creds_path)
+            mock_window = MagicMock()
+            app = MainApp(config=cfg, window=mock_window)
+            try:
+                assert isinstance(app.active_frame, LoginFrame)
+                assert app.get_state()["view"] == "login"
 
-        async def exercise() -> None:  # pylint: disable=too-many-statements
+                mock_window.evaluate_js.reset_mock()
+                app.push_state()
+                mock_window.evaluate_js.assert_called_once()
+                js_call = mock_window.evaluate_js.call_args.args[0]
+                assert js_call.startswith("window.__onPythonState(")
+                assert js_call.endswith(")")
+                payload = json.loads(
+                    js_call.removeprefix("window.__onPythonState(").removesuffix(")")
+                )
+                assert payload["view"] == "login"
+
+                app.auth.credential_store.save(
+                    {
+                        "token": "tok-saved",
+                        "sharepoint_storage_state": {"cookies": []},
+                    }
+                )
+                app.switch_to_sync()
+                assert isinstance(app.active_frame, SyncFrame)
+                assert app.get_state()["view"] == "sync"
+
+                app.switch_to_login()
+                assert isinstance(app.active_frame, LoginFrame)
+                assert app.get_state()["view"] == "login"
+            finally:
+                app.loop.close()
+
+            # Authenticated startup lands directly on SyncFrame
+            JsonCredentialStore(credentials_file=creds_path).save(
+                {
+                    "token": "tok-saved",
+                    "sharepoint_storage_state": {"cookies": []},
+                }
+            )
+            app_authed = MainApp(config=cfg, window=MagicMock())
+            try:
+                assert isinstance(app_authed.active_frame, SyncFrame)
+                assert app_authed.get_state()["view"] == "sync"
+            finally:
+                app_authed.loop.close()
+
+    def test_main_app_on_close_cancels_active_login_and_mfa(self):
+        """Verify on_close cancels active login task and dismisses open MFA prompt."""
+
+        async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
-                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
+                creds_path = Path(tmpdir) / "credentials.json"
+                cfg = SyncConfig(session_file=creds_path)
+                mock_window = MagicMock()
+                real_auth = AuthService(
+                    moodle_auth=FakeMoodleTokenPort("tok"),
+                    sharepoint_auth=FakeSharepointAuthPort({"cookies": []}),
+                    credential_store=JsonCredentialStore(credentials_file=creds_path),
+                )
+                with patch(
+                    "idat_sync.ui.app.create_auth_service", return_value=real_auth
+                ):
+                    app = MainApp(config=cfg, window=mock_window)
                 try:
-                    frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame = app.active_frame
                     assert isinstance(frame, LoginFrame)
+                    frame.username = "jdoe"
+                    frame.password = "secret"  # noqa: S105
 
-                    frame.user_var.set("jdoe")
-                    frame.pass_var.set("secret")
-                    login_started = asyncio.Event()
-                    mfa_ready = asyncio.Event()
+                    login_task = asyncio.create_task(frame.do_login())
+                    for _ in range(50):
+                        if frame.mfa_open:
+                            break
+                        await asyncio.sleep(0.01)
+                    assert frame.mfa_open
 
-                    async def slow_login(_username, _password, get_mfa_code):
-                        login_started.set()
-                        mfa_task = asyncio.create_task(get_mfa_code())
-                        await asyncio.sleep(0)
-                        mfa_ready.set()
-                        await mfa_task
-
-                    with patch.object(app.auth, "login", side_effect=slow_login):
-                        assert frame.pass_entry.bind("<Return>")
-                        app.deiconify()
-                        app.update()
-                        frame.pass_entry.focus_force()
-                        frame.pass_entry.event_generate("<Return>")
-                        app.update()
-                        app.withdraw()
-                        await asyncio.wait_for(login_started.wait(), timeout=2.0)
-                        await asyncio.wait_for(mfa_ready.wait(), timeout=2.0)
-
-                        popups = [
-                            w
-                            for w in app.winfo_children()
-                            if isinstance(w, tk.Toplevel)
-                        ]
-                        assert len(popups) == 1
-
-                        mfa_only_task = asyncio.create_task(frame.get_mfa_code())
-                        await asyncio.sleep(0)
-                        extra_popups = [
-                            w
-                            for w in app.winfo_children()
-                            if isinstance(w, tk.Toplevel) and w not in popups
-                        ]
-                        assert len(extra_popups) == 1
-                        mfa_only_task.cancel()
-                        with pytest.raises(asyncio.CancelledError):
-                            await mfa_only_task
-                        assert not extra_popups[0].winfo_exists()
-
-                        with patch.object(
-                            popups[0], "destroy", wraps=popups[0].destroy
-                        ) as mock_popup_destroy:
-                            await app.on_close()
-                            mock_popup_destroy.assert_called()
+                    await app.on_close()
+                    assert not frame.mfa_open
+                    mock_window.destroy.assert_called_once_with()
+                    with pytest.raises(asyncio.CancelledError):
+                        await login_task
                 finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
                     app.loop.close()
 
         asyncio.run(exercise())
@@ -1574,43 +1221,83 @@ class TestSyncFrame(unittest.TestCase):
 
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
-                creds_path = Path(tmpdir) / "session.json"
+                creds_path = Path(tmpdir) / "credentials.json"
                 cfg = SyncConfig(session_file=creds_path)
-                app = MainApp(config=cfg)
-                app.withdraw()
+                real_auth = AuthService(
+                    moodle_auth=FakeMoodleTokenPort("tok"),
+                    sharepoint_auth=FakeSharepointAuthPort({"cookies": []}),
+                    credential_store=JsonCredentialStore(credentials_file=creds_path),
+                )
+                with patch(
+                    "idat_sync.ui.app.create_auth_service", return_value=real_auth
+                ):
+                    app = MainApp(config=cfg, window=MagicMock())
                 try:
-                    frame = app._frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    frame = app.active_frame
                     assert isinstance(frame, LoginFrame)
-                    frame.user_var.set("jdoe")
-                    frame.pass_var.set("secret")
+                    frame.username = "jdoe"
+                    frame.password = "secret"  # noqa: S105
 
-                    async def ok_login(_username, _password, _get_mfa_code):
-                        app.auth.credential_store.save(
-                            {
-                                "token": "tok",
-                                "sharepoint_storage_state": {"cookies": []},
-                            }
-                        )
+                    login_task = asyncio.create_task(frame.do_login())
+                    for _ in range(50):
+                        if frame.mfa_open:
+                            break
+                        await asyncio.sleep(0.01)
+                    assert frame.mfa_open
+                    frame.submit_mfa("123456")
+                    await login_task
 
-                    with (
-                        patch.object(app.auth, "login", side_effect=ok_login),
-                        patch(
-                            "idat_sync.ui.sync_frame.SyncFrame.load_idat_sync",
-                            new=AsyncMock(),
-                        ),
-                    ):
-                        await frame.do_login()
-
-                    assert not frame.winfo_exists()
+                    assert isinstance(app.active_frame, SyncFrame)
                 finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
                     app.loop.close()
 
         asyncio.run(exercise())
 
+    def test_main_app_run_starts_webview_with_bundled_html_and_ua(self):
+        """Load bundled index.html via importlib.resources and start webview."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = SyncConfig(session_file=Path(tmpdir) / "missing_credentials.json")
+            app = MainApp(config=cfg)
+            expected_html = (
+                importlib.resources.files("idat_sync.ui")
+                .joinpath("index.html")
+                .read_text(encoding="utf-8")
+            )
+            closing_handlers = []
+            fake_window = MagicMock()
+            fake_window.events.closing.__iadd__.side_effect = lambda fn: (
+                closing_handlers.append(fn) or fake_window.events.closing
+            )
+            loop_was_running = False
+
+            def fake_start(**kwargs):
+                nonlocal loop_was_running
+                loop_was_running = app.loop.is_running()
+                assert kwargs.get("user_agent") == WEBVIEW_USER_AGENT
+                assert len(closing_handlers) == 1
+                # Triggering closing event closes frame without re-entrant destroy().
+                closing_handlers[0]()
+                fake_window.destroy.assert_not_called()
+
+            fake_webview = MagicMock()
+            fake_webview.create_window.return_value = fake_window
+            fake_webview.start.side_effect = fake_start
+
+            with patch.dict(sys.modules, {"webview": fake_webview}):
+                app.run()
+
+            assert loop_was_running
+            assert app.loop.is_closed()
+            fake_webview.create_window.assert_called_once()
+            create_kwargs = fake_webview.create_window.call_args.kwargs
+            assert create_kwargs["html"] == expected_html
+            js_api = create_kwargs["js_api"]
+            assert js_api.get_state()["view"] == "login"
+            assert not hasattr(js_api, "set_folder_path")
+            fake_webview.start.assert_called_once_with(user_agent=WEBVIEW_USER_AGENT)
+
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
-        """Cancel active load_idat_sync and do_sync tasks on MainApp.on_close."""
+        """Cancel active load_idat_sync and do_sync tasks on SyncFrame.aclose."""
         creds: Credentials = {
             "token": "tok",
             "sharepoint_storage_state": {"cookies": []},
@@ -1619,84 +1306,70 @@ class TestSyncFrame(unittest.TestCase):
         async def exercise_load_cancel() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
-                try:
-                    frame = SyncFrame(app, creds, cfg)
-                    app._frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
-                    load_started = asyncio.Event()
-                    load_cancelled = asyncio.Event()
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+                load_started = asyncio.Event()
+                load_cancelled = asyncio.Event()
 
-                    async def slow_create_sync_service(_c, _conf):
-                        load_started.set()
-                        try:
-                            await asyncio.Future()
-                        except asyncio.CancelledError:
-                            load_cancelled.set()
-                            raise
+                async def slow_create_sync_service(_c, _conf):
+                    load_started.set()
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        load_cancelled.set()
+                        raise
 
-                    with patch(
-                        "idat_sync.ui.sync_frame.create_sync_service",
-                        side_effect=slow_create_sync_service,
-                    ):
-                        load_task = asyncio.create_task(frame.load_idat_sync(creds))
-                        await asyncio.wait_for(load_started.wait(), timeout=2.0)
-                        await app.on_close()
-                        assert load_cancelled.is_set()
-                        with pytest.raises(asyncio.CancelledError):
-                            await load_task
-                finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
-                    app.loop.close()
+                with patch(
+                    "idat_sync.ui.sync_frame.create_sync_service",
+                    side_effect=slow_create_sync_service,
+                ):
+                    load_task = asyncio.create_task(frame.load_idat_sync(creds))
+                    await asyncio.wait_for(load_started.wait(), timeout=2.0)
+                    await frame.aclose()
+                    assert load_cancelled.is_set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await load_task
 
         async def exercise_sync_cancel() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
-                try:
-                    frame = SyncFrame(app, creds, cfg)
-                    app._frame = frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
-                    frame._populate_courses([Course(id=1, name="Course 1")])  # noqa: SLF001  # pylint: disable=protected-access
-                    frame.selected_course_ids = {1}
-                    frame.folder_path.set(tmpdir)
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+                frame._populate_courses([Course(id=1, name="Course 1")])  # noqa: SLF001  # pylint: disable=protected-access
+                frame.selected_course_ids = {1}
+                frame.set_folder_path(tmpdir)
 
-                    sync_started = asyncio.Event()
-                    sync_cancelled = asyncio.Event()
+                sync_started = asyncio.Event()
+                sync_cancelled = asyncio.Event()
 
-                    async def slow_sync_courses(_path, _selected, *, refresh=False):
-                        _ = refresh
-                        sync_started.set()
-                        try:
-                            await asyncio.Future()
-                        except asyncio.CancelledError:
-                            sync_cancelled.set()
-                            raise
-                        yield  # pragma: no cover
+                async def slow_sync_courses(_path, _selected, *, refresh=False):
+                    _ = refresh
+                    sync_started.set()
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        sync_cancelled.set()
+                        raise
+                    yield  # pragma: no cover
 
-                    mock_service = MagicMock()
-                    mock_service.sync_courses = slow_sync_courses
-                    mock_service.aclose = AsyncMock()
-                    frame.idat_sync = mock_service
+                mock_service = MagicMock(spec=IDATSync)
+                mock_service.sync_courses = slow_sync_courses
+                mock_service.aclose = AsyncMock()
+                frame.idat_sync = mock_service
 
-                    sync_task = asyncio.create_task(frame.do_sync())
-                    await asyncio.wait_for(sync_started.wait(), timeout=2.0)
-                    await app.on_close()
-                    assert sync_cancelled.is_set()
-                    mock_service.aclose.assert_awaited_once_with()
-                    with pytest.raises(asyncio.CancelledError):
-                        await sync_task
-                finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
-                    app.loop.close()
+                sync_task = asyncio.create_task(frame.do_sync())
+                await asyncio.wait_for(sync_started.wait(), timeout=2.0)
+                await frame.aclose()
+                assert sync_cancelled.is_set()
+                mock_service.aclose.assert_awaited_once_with()
+                with pytest.raises(asyncio.CancelledError):
+                    await sync_task
 
         asyncio.run(exercise_load_cancel())
         asyncio.run(exercise_sync_cancel())
 
     def test_sync_frame_reports_sync_completion_status(self):
-        """Set status_var to 'Sync completed with errors.' or 'Sync done.'."""
+        """Set status to 'Sync completed with errors.' or 'Sync done.'."""
         creds: Credentials = {
             "token": "tok",
             "sharepoint_storage_state": {"cookies": []},
@@ -1705,185 +1378,265 @@ class TestSyncFrame(unittest.TestCase):
         async def exercise() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
-                app = MainApp(config=cfg)
-                app.withdraw()
-                try:
-                    frame = SyncFrame(app, creds, cfg)
-                    c1 = Course(id=1, name="Course 1")
-                    frame._populate_courses([c1])  # noqa: SLF001  # pylint: disable=protected-access
-                    frame.selected_course_ids = {1}
-                    frame.folder_path.set(tmpdir)
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+                c1 = Course(id=1, name="Course 1")
+                frame._populate_courses([c1])  # noqa: SLF001  # pylint: disable=protected-access
+                frame.selected_course_ids = {1}
+                frame.set_folder_path(tmpdir)
 
-                    async def err_sync_courses(_path, _selected, *, refresh=False):
-                        _ = refresh
-                        yield CourseSyncCompleted(c1, RemoteServiceError("boom"))
+                async def err_sync_courses(_path, _selected, *, refresh=False):
+                    _ = refresh
+                    yield CourseSyncCompleted(c1, RemoteServiceError("boom"))
 
-                    mock_service = MagicMock()
-                    mock_service.sync_courses = err_sync_courses
-                    frame.idat_sync = mock_service
+                mock_service = MagicMock()
+                mock_service.sync_courses = err_sync_courses
+                frame.idat_sync = mock_service
 
-                    await frame.do_sync()
-                    assert frame.status_var.get() == "Sync completed with errors."
+                await frame.do_sync()
+                assert frame.status == "Sync completed with errors."
 
-                    async def ok_sync_courses(_path, _selected, *, refresh=False):
-                        _ = refresh
-                        yield CourseSyncCompleted(c1, None)
+                async def ok_sync_courses(_path, _selected, *, refresh=False):
+                    _ = refresh
+                    yield CourseSyncCompleted(c1, None)
 
-                    mock_service.sync_courses = ok_sync_courses
-                    await frame.do_sync()
-                    assert frame.status_var.get() == "Sync done."
-                finally:
-                    with contextlib.suppress(tk.TclError):
-                        app.destroy()
-                    app.loop.close()
+                mock_service.sync_courses = ok_sync_courses
+                await frame.do_sync()
+                assert frame.status == "Sync done."
 
         asyncio.run(exercise())
 
 
-class TestIcons(unittest.TestCase):
-    """Tests for UI pixel-art Icons bundle."""
-
-    def test_icons_create_builds_distinct_16x16_photo_images(self):
-        """Build four 16x16 PhotoImage icons with distinct checked/unchecked pixels."""
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            icons = Icons.create()
-            for img in (icons.checked, icons.unchecked, icons.folder, icons.file):
-                assert isinstance(img, tk.PhotoImage)
-                assert img.width() == 16
-                assert img.height() == 16
-            assert icons.checked.get(11, 5) == (255, 255, 255)
-            assert icons.unchecked.get(11, 5) == (255, 255, 255)
-            assert icons.checked.get(3, 3) == (0, 120, 212)
-            assert icons.unchecked.get(3, 3) == (255, 255, 255)
-        finally:
-            root.destroy()
-
-
 class TestAppFrameBusy(unittest.TestCase):
-    """Tests for AppFrame._busy async context manager."""
+    """Tests for pure-Python AppFrame._busy and aclose lifecycle."""
 
-    def test_busy_sets_active_task_and_resets_flag_on_exit_and_destroy(self):
-        """Track _active_task and reset flag only while widget still exists."""
+    def test_busy_sets_active_task_resets_flag_and_aclose_cancels(self):
+        """Track _active_task, reset flag on exit/error, and cancel in aclose."""
+        assert AppFrame.__bases__ == (object,)
+        assert not hasattr(AppFrame, "exit")
 
         async def exercise() -> None:
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                frame = AppFrame(root)
-                flag = tk.BooleanVar(value=False)
+            frame = AppFrame()
+            flags: list[bool] = []
 
-                async with frame._busy(flag):  # noqa: SLF001  # pylint: disable=protected-access
-                    assert flag.get() is True
-                    assert frame._active_task is asyncio.current_task()  # noqa: SLF001  # pylint: disable=protected-access
+            async with frame._busy(flags.append):  # noqa: SLF001  # pylint: disable=protected-access
+                assert flags == [True]
+                assert frame._active_task is asyncio.current_task()  # noqa: SLF001  # pylint: disable=protected-access
 
-                assert flag.get() is False
-                assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
+            assert flags == [True, False]
+            assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
 
-                async def fail_after_destroy() -> None:
-                    async with frame._busy(flag):  # noqa: SLF001  # pylint: disable=protected-access
-                        assert flag.get() is True
-                        frame.destroy()
-                        raise RuntimeError("boom")
+            async def fail_while_busy() -> None:
+                async with frame._busy(flags.append):  # noqa: SLF001  # pylint: disable=protected-access
+                    raise RuntimeError("boom")
 
-                with pytest.raises(RuntimeError, match="boom"):
-                    await fail_after_destroy()
+            with pytest.raises(RuntimeError, match="boom"):
+                await fail_while_busy()
 
-                assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
-            finally:
-                with contextlib.suppress(tk.TclError):
-                    root.destroy()
+            assert flags == [True, False, True, False]
+            assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
+
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def long_work() -> None:
+                async with frame._busy(flags.append):  # noqa: SLF001  # pylint: disable=protected-access
+                    started.set()
+                    try:
+                        await asyncio.Future()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+
+            task = asyncio.create_task(long_work())
+            await started.wait()
+            await frame.aclose()
+            assert cancelled.is_set()
+            assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
         asyncio.run(exercise())
 
 
 class TestCourseTree(unittest.TestCase):
-    """Tests for CourseTree selection, file discovery, and progress updates."""
+    """Tests for pure-Python CourseTree selection, streaming discovery, and progress."""
 
-    def test_course_tree_lifecycle_and_progress(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
-        """Manage course rows, nested folders, progress, and interactivity."""
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            toggled: list[int] = []
-            ct = CourseTree(root, on_toggle=toggled.append)
-            c1 = Course(id=1, name="Course One")
-            c2 = Course(id=2, name="Course Two")
-            ct.set_courses([c1, c2], selected={1})
+    def test_course_tree_lifecycle_and_progress(self):  # pylint: disable=too-many-statements
+        """Manage course rows, nested folders, streaming discovery, and to_dict."""
+        ct = CourseTree()
+        c1 = Course(id=1, name="Course One")
+        c2 = Course(id=2, name="Course Two")
+        ct.set_courses([c1, c2], selected={1})
 
-            top = ct.tree.get_children("")
-            assert len(top) == 2
-            assert ct.tree.item(top[0], "image") == (str(ct.icons.checked),)
-            assert ct.tree.item(top[1], "image") == (str(ct.icons.unchecked),)
-            assert ct.tree.item(top[0], "values") == (RowStatus.IDLE, "0%")
+        rows = ct.to_dict()
+        assert len(rows) == 2
+        assert rows[0]["checked"] is True
+        assert rows[1]["checked"] is False
+        assert (rows[0]["status"], rows[0]["progress"]) == (RowStatus.IDLE, "0%")
 
-            ct.refresh_selection({2})
-            assert ct.tree.item(top[0], "image") == (str(ct.icons.unchecked),)
-            assert ct.tree.item(top[1], "image") == (str(ct.icons.checked),)
+        ct.refresh_selection({2})
+        rows = ct.to_dict()
+        assert rows[0]["checked"] is False
+        assert rows[1]["checked"] is True
 
-            assert not hasattr(ct, "show_files")
-            assert RowStatus.FETCHING_AND_SYNCING == "Fetching & Syncing"
+        assert not hasattr(ct, "show_files")
+        assert RowStatus.FETCHING_AND_SYNCING == "Fetching & Syncing"
 
-            ct.reset_for_sync([1, 2])
-            assert ct.tree.item(top[0], "values") == (RowStatus.QUEUED, "0%")
+        ct.reset_for_sync([1, 2])
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.QUEUED,
+            "0%",
+        )
 
-            c_dir = Path("Course One")
-            synced_p = c_dir / "S1" / "done.pdf"
-            pending_p = c_dir / "S1" / "todo.pdf"
-            late_p = c_dir / "S1" / "late.pdf"
+        c_dir = Path("Course One")
+        synced_p = c_dir / "S1" / "done.pdf"
+        pending_p = c_dir / "S1" / "todo.pdf"
+        late_p = c_dir / "S2" / "late.pdf"
 
-            ct.start_course(1, c_dir)
-            assert ct.tree.item(top[0], "values") == (RowStatus.FETCHING, "...")
+        ct.start_course(1, c_dir)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FETCHING,
+            "...",
+        )
 
-            ct.add_file(1, synced_p, is_pending=False)
-            assert bool(ct.tree.item(top[0], "open"))
-            assert ct.tree.item(top[0], "values") == (
-                RowStatus.FETCHING_AND_SYNCING,
-                "1/1+",
-            )
+        ct.add_file(1, synced_p, is_pending=False)
+        row = ct.to_dict()[0]
+        assert row["open"] is True
+        assert (row["status"], row["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "1/1+",
+        )
 
-            ct.add_file(1, pending_p, is_pending=True)
-            assert ct.tree.item(top[0], "values") == (
-                RowStatus.FETCHING_AND_SYNCING,
-                "1/2+",
-            )
+        ct.add_file(1, pending_p, is_pending=True)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "1/2+",
+        )
 
-            ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
-            ct.set_file_status(pending_p, RowStatus.COMPLETED)
-            assert ct.tree.item(top[0], "values") == (
-                RowStatus.FETCHING_AND_SYNCING,
-                "2/2+",
-            )
+        ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
+        ct.set_file_status(pending_p, RowStatus.COMPLETED)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "2/2+",
+        )
 
-            ct.add_file(1, late_p, is_pending=True)
-            assert ct.tree.item(top[0], "values") == (
-                RowStatus.FETCHING_AND_SYNCING,
-                "2/3+",
-            )
+        ct.add_file(1, late_p, is_pending=True)
+        row = ct.to_dict()[0]
+        assert (row["status"], row["progress"]) == (
+            RowStatus.FETCHING_AND_SYNCING,
+            "2/3+",
+        )
+        assert [child["name"] for child in row["children"]] == ["S1", "S2"]
 
-            ct.finish_discovery(1)
-            assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "66%")
+        ct.finish_discovery(1)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.SYNCING,
+            "66%",
+        )
 
-            ct.set_course_status(1, RowStatus.FAILED)
-            assert ct.tree.item(top[0], "values") == (RowStatus.FAILED, "66%")
+        ct.set_course_status(1, RowStatus.FAILED)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.FAILED,
+            "66%",
+        )
 
-            ct.set_file_status(late_p, RowStatus.COMPLETED)
-            assert ct.tree.item(top[0], "values") == (RowStatus.SYNCING, "100%")
+        ct.set_file_status(late_p, RowStatus.COMPLETED)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.SYNCING,
+            "100%",
+        )
 
-            ct.set_course_status(1, RowStatus.COMPLETED)
-            assert ct.tree.item(top[0], "values") == (RowStatus.COMPLETED, "100%")
+        ct.set_course_status(1, RowStatus.COMPLETED)
+        assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
+            RowStatus.COMPLETED,
+            "100%",
+        )
 
-            # Empty course transitions to 100% on finish_discovery
-            ct.start_course(2, Path("Course Two"))
-            assert ct.tree.item(top[1], "values") == (RowStatus.FETCHING, "...")
-            ct.finish_discovery(2)
-            assert ct.tree.item(top[1], "values") == (RowStatus.SYNCING, "100%")
+        # Empty course transitions to 100% on finish_discovery
+        ct.start_course(2, Path("Course Two"))
+        assert (ct.to_dict()[1]["status"], ct.to_dict()[1]["progress"]) == (
+            RowStatus.FETCHING,
+            "...",
+        )
+        ct.finish_discovery(2)
+        assert (ct.to_dict()[1]["status"], ct.to_dict()[1]["progress"]) == (
+            RowStatus.SYNCING,
+            "100%",
+        )
 
-            ct.set_interactive(enabled=False)
-            assert not toggled
-        finally:
-            root.destroy()
+    def test_folder_nodes_track_aggregate_status_and_progress(self):
+        """Folder rows report aggregate status and 0%-100% progress."""
+        ct = CourseTree()
+        c_past = Course(id=1, name="Past")
+        c_cur = Course(id=2, name="Current")
+        ordered = ct.set_courses([c_past, c_cur], selected={2}, in_progress={2})
+        assert [c.id for c in ordered] == [2, 1]
+        assert [row["id"] for row in ct.to_dict()] == [2, 1]
+
+        c_dir = Path("Current")
+        synced_p = c_dir / "S1" / "done.pdf"
+        pending_p = c_dir / "S1" / "todo.pdf"
+        ct.start_course(2, c_dir)
+        ct.add_file(2, synced_p, is_pending=False)
+        ct.add_file(2, pending_p, is_pending=True)
+        s1 = ct.to_dict()[0]["children"][0]
+        assert (s1["status"], s1["progress"]) == (RowStatus.PENDING, "50%")
+
+        ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
+        assert ct.to_dict()[0]["children"][0]["status"] == RowStatus.DOWNLOADING
+
+        ct.set_file_status(pending_p, RowStatus.COMPLETED)
+        s1 = ct.to_dict()[0]["children"][0]
+        assert (s1["status"], s1["progress"]) == (RowStatus.COMPLETED, "100%")
+
+    def test_folder_nodes_emit_unique_ids_across_courses(self):
+        """Folder nodes emit unique IDs so collapsing one does not toggle others."""
+        ct = CourseTree()
+        ct.set_courses(
+            [Course(id=1, name="Course One"), Course(id=2, name="Course Two")],
+            selected={1, 2},
+        )
+        ct.start_course(1, Path("Course One"))
+        ct.add_file(1, Path("Course One/S1/Sub/a.pdf"), is_pending=False)
+        ct.start_course(2, Path("Course Two"))
+        ct.add_file(2, Path("Course Two/S1/b.pdf"), is_pending=False)
+
+        rows = ct.to_dict()
+        c1_s1 = rows[0]["children"][0]
+        c1_sub = c1_s1["children"][0]
+        c2_s1 = rows[1]["children"][0]
+        assert c1_s1["id"]
+        assert c1_sub["id"]
+        assert c2_s1["id"]
+        assert len({c1_s1["id"], c1_sub["id"], c2_s1["id"]}) == 3
+
+    def test_start_course_resets_children_and_stale_counts(self):
+        """Starting a course clears prior children and resets Progress counts."""
+        ct = CourseTree()
+        ct.set_courses([Course(id=1, name="Course One")], selected={1})
+        c_dir = Path("Course One")
+        ct.start_course(1, c_dir)
+        ct.add_file(1, c_dir / "old.pdf", is_pending=False)
+        ct.finish_discovery(1)
+        assert ct.to_dict()[0]["progress"] == "100%"
+
+        ct.start_course(1, c_dir)
+        ct.add_file(1, c_dir / "new.pdf", is_pending=True)
+        ct.finish_discovery(1)
+        row = ct.to_dict()[0]
+        assert row["progress"] == "0%"
+        assert [child["name"] for child in row["children"]] == ["new.pdf"]
+
+    def test_failed_course_before_file_discovery_preserves_progress(self):
+        """A course failing during FETCHING before add_file preserves '...'."""
+        ct = CourseTree()
+        ct.set_courses([Course(id=1, name="Course One")], selected={1})
+        ct.start_course(1, Path("Course One"))
+        ct.set_course_status(1, RowStatus.FAILED)
+        row = ct.to_dict()[0]
+        assert row["status"] == RowStatus.FAILED
+        assert row["progress"] == "..."
 
 
 if __name__ == "__main__":

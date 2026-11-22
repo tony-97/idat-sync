@@ -1,4 +1,4 @@
-"""Tkinter desktop UI package for idat_sync."""
+"""PyWebView desktop and mobile UI package for idat_sync."""
 
 from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.login_frame import LoginFrame
