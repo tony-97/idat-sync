@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from idat_sync.application.exceptions import (
     AuthenticationError,
+    AuthFailureReason,
     CredentialsExpiredError,
     CredentialStoreError,
     FileSystemError,
+    FileSystemOperation,
     IDATSyncError,
     RemoteServiceError,
+    ServiceName,
 )
 from idat_sync.domain.content import Content
 
@@ -185,6 +188,7 @@ class CredentialStorePort(Protocol):
 
 
 __all__ = [
+    "AuthFailureReason",
     "AuthenticationError",
     "CookieData",
     "CourseGateway",
@@ -195,12 +199,14 @@ __all__ = [
     "DownloadTask",
     "Downloader",
     "FileSystemError",
+    "FileSystemOperation",
     "FileSystemPort",
     "IDATSyncError",
     "MoodleTokenPort",
     "ProgressCallback",
     "RecordingGateway",
     "RemoteServiceError",
+    "ServiceName",
     "SharepointAuthPort",
     "StorageStateData",
     "UrlContentStrategy",

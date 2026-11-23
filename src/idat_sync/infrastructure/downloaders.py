@@ -55,7 +55,9 @@ async def _atomic_download(
         part_path.replace(os_target)
     except OSError as exc:
         part_path.unlink(missing_ok=True)
-        raise FileSystemError(f"Failed to write '{target_path}': {exc}") from exc
+        raise FileSystemError(
+            f"Failed to write '{target_path}': {exc}", operation="write"
+        ) from exc
     except BaseException:
         part_path.unlink(missing_ok=True)
         raise
@@ -221,6 +223,30 @@ class RecordingDownloader(Downloader[RecordingContent]):
 
         return _progress_hook
 
+    @staticmethod
+    def _translate_download_error(
+        exc: DownloadError,
+    ) -> CredentialsExpiredError | RemoteServiceError:
+        cause = exc.exc_info[1] if exc.exc_info and len(exc.exc_info) > 1 else None
+        if (
+            isinstance(cause, urllib.error.HTTPError) and cause.code in (401, 403)
+        ) or re.search(
+            r"\b(?:HTTP Error 40[13]|401 Unauthorized|403 Forbidden)\b",
+            str(exc),
+        ):
+            return CredentialsExpiredError(str(exc), service="SharePoint")
+        status_code = cause.code if isinstance(cause, urllib.error.HTTPError) else None
+        is_network = (
+            isinstance(cause, (urllib.error.URLError, TimeoutError))
+            and status_code is None
+        )
+        return RemoteServiceError(
+            str(exc),
+            service="SharePoint",
+            status_code=status_code,
+            is_network=is_network,
+        )
+
     def _download_sync(
         self,
         content: RecordingContent,
@@ -258,18 +284,11 @@ class RecordingDownloader(Downloader[RecordingContent]):
             with yt_dlp.YoutubeDL(cast("Any", ydl_opts)) as ydl:
                 ydl.download([content.url])
         except DownloadError as exc:
-            cause = exc.exc_info[1] if exc.exc_info and len(exc.exc_info) > 1 else None
-            if (
-                isinstance(cause, urllib.error.HTTPError) and cause.code in (401, 403)
-            ) or re.search(
-                r"\b(?:HTTP Error 40[13]|401 Unauthorized|403 Forbidden)\b",
-                str(exc),
-            ):
-                raise CredentialsExpiredError(str(exc)) from exc
-            raise RemoteServiceError(str(exc)) from exc
+            raise self._translate_download_error(exc) from exc
         except OSError as exc:
             raise FileSystemError(
-                f"Failed to write recording '{content.path}': {exc}"
+                f"Failed to write recording '{content.path}': {exc}",
+                operation="write",
             ) from exc
 
     async def download(

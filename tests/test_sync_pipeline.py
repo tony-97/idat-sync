@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+import urllib.error
 from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -529,6 +530,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             ):
                 fs.ensure_dir(tmp_path / "blocked")
             assert isinstance(dir_err.value.__cause__, OSError)
+            assert dir_err.value.operation == "access"
 
             with (
                 patch.object(Path, "rglob", side_effect=OSError("io failure")),
@@ -536,6 +538,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             ):
                 fs.scan_mtimes(tmp_path)
             assert isinstance(scan_err.value.__cause__, OSError)
+            assert scan_err.value.operation == "access"
 
             with patch.object(
                 Path, "read_bytes", side_effect=PermissionError("locked")
@@ -1020,8 +1023,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 ) as mock_ydl:
                     dl_mock = mock_ydl.return_value.__enter__.return_value
                     dl_mock.download.side_effect = DownloadError(msg)
-                    with pytest.raises(CredentialsExpiredError):
+                    with pytest.raises(CredentialsExpiredError) as ctx:
                         await dl.download(content)
+                    assert ctx.value.service == "SharePoint"
 
             with patch(
                 "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
@@ -1034,13 +1038,67 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     await dl.download(content)
                 assert not isinstance(ctx.value, CredentialsExpiredError)
                 assert isinstance(ctx.value.__cause__, DownloadError)
+                assert ctx.value.service == "SharePoint"
+                assert ctx.value.status_code is None
+                assert ctx.value.is_network is False
 
             with (
                 patch.object(Path, "mkdir", side_effect=PermissionError("no mkdir")),
-                pytest.raises(FileSystemError, match="no mkdir") as fs_ctx,
+                pytest.raises(FileSystemError, match="no mkdir") as ctx,
             ):
                 await dl.download(content)
-            assert isinstance(fs_ctx.value.__cause__, OSError)
+            assert isinstance(ctx.value.__cause__, OSError)
+            assert ctx.value.operation == "access"
+
+    async def test_recording_downloader_sets_structured_error_metadata(self):
+        """Populate service, status_code, is_network, and write operation metadata."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            content = RecordingContent(
+                Path(tmpdir) / "Semana 1" / "video.mp4",
+                1700000000,
+                "https://idat628-my.sharepoint.com/:v:/r/video.mp4",
+            )
+            dl = RecordingDownloader(
+                [], "idat628-my.sharepoint.com", AsyncRateLimiter(0.0)
+            )
+            http_cause = urllib.error.HTTPError(
+                content.url, 502, "Bad Gateway", hdrs=None, fp=None
+            )
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
+            ) as mock_ydl:
+                dl_mock = mock_ydl.return_value.__enter__.return_value
+                dl_mock.download.side_effect = DownloadError(
+                    "HTTP Error 502", exc_info=(type(http_cause), http_cause, None)
+                )
+                with pytest.raises(RemoteServiceError) as ctx:
+                    await dl.download(content)
+                assert ctx.value.service == "SharePoint"
+                assert ctx.value.status_code == 502
+                assert ctx.value.is_network is False
+
+            url_cause = urllib.error.URLError("offline")
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
+            ) as mock_ydl:
+                dl_mock = mock_ydl.return_value.__enter__.return_value
+                dl_mock.download.side_effect = DownloadError(
+                    "Unable to download", exc_info=(type(url_cause), url_cause, None)
+                )
+                with pytest.raises(RemoteServiceError) as ctx:
+                    await dl.download(content)
+                assert ctx.value.service == "SharePoint"
+                assert ctx.value.status_code is None
+                assert ctx.value.is_network is True
+
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
+            ) as mock_ydl:
+                dl_mock = mock_ydl.return_value.__enter__.return_value
+                dl_mock.download.side_effect = OSError("disk full")
+                with pytest.raises(FileSystemError, match="disk full") as fs_ctx:
+                    await dl.download(content)
+                assert fs_ctx.value.operation == "write"
 
     async def test_task_orchestrator_channel_fifo_concurrency_errors_and_imports(  # pylint: disable=too-many-locals,too-many-statements
         self,
@@ -1781,6 +1839,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             ):
                 await dl.download(StringContent(target, 0, ["<p>Corrupted</p>"]))
             assert isinstance(err_ctx.value.__cause__, OSError)
+            assert err_ctx.value.operation == "write"
 
             assert target.read_text(encoding="utf-8") == "<p>Hola</p>"
             assert not part_path.exists()

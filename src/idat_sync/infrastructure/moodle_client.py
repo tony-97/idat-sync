@@ -48,13 +48,20 @@ class MoodleTokenClient:  # pylint: disable=too-few-public-methods
             return response.json()
         except httpx.HTTPStatusError as exc:
             raise RemoteServiceError(
-                f"HTTP {exc.response.status_code} from Moodle login endpoint."
+                f"HTTP {exc.response.status_code} from Moodle login endpoint.",
+                service="Moodle",
+                status_code=exc.response.status_code,
             ) from exc
         except httpx.RequestError as exc:
-            raise RemoteServiceError(f"Could not connect to Moodle: {exc}") from exc
+            raise RemoteServiceError(
+                f"Could not connect to Moodle: {exc}",
+                service="Moodle",
+                is_network=True,
+            ) from exc
         except ValueError as exc:
             raise RemoteServiceError(
-                "Invalid JSON response from Moodle login endpoint."
+                "Invalid JSON response from Moodle login endpoint.",
+                service="Moodle",
             ) from exc
 
 
@@ -103,30 +110,36 @@ class MoodleClient:
                 response = await self._client.post(url, data=payload, timeout=45)
                 if response.status_code in (401, 403):
                     raise CredentialsExpiredError(
-                        f"HTTP {response.status_code}: Moodle credentials expired."
+                        f"HTTP {response.status_code}: Moodle credentials expired.",
+                        service="Moodle",
                     )
                 response.raise_for_status()
                 result = response.json()
             except httpx.HTTPStatusError as exc:
                 raise RemoteServiceError(
                     f"HTTP {exc.response.status_code} "
-                    f"from Moodle web service ({function})."
+                    f"from Moodle web service ({function}).",
+                    service="Moodle",
+                    status_code=exc.response.status_code,
                 ) from exc
             except httpx.RequestError as exc:
                 raise RemoteServiceError(
-                    f"Moodle web service request failed ({function}): {exc}"
+                    f"Moodle web service request failed ({function}): {exc}",
+                    service="Moodle",
+                    is_network=True,
                 ) from exc
             except ValueError as exc:
                 raise RemoteServiceError(
-                    f"Invalid JSON response from Moodle web service ({function})."
+                    f"Invalid JSON response from Moodle web service ({function}).",
+                    service="Moodle",
                 ) from exc
 
             if isinstance(result, dict) and result.get("exception"):
                 error_code = result.get("errorcode")
                 msg = f"{error_code}: {result.get('message')}"
                 if error_code == "invalidtoken":
-                    raise CredentialsExpiredError(msg)
-                raise RemoteServiceError(msg)
+                    raise CredentialsExpiredError(msg, service="Moodle")
+                raise RemoteServiceError(msg, service="Moodle")
             return result
 
     async def fetch_enrolled_courses(
@@ -206,11 +219,13 @@ class MoodleClient:
                     if response.status_code == HTTPStatus.UNAUTHORIZED:
                         raise CredentialsExpiredError(
                             "401 Unauthorized: your session cookie/token "
-                            "is missing/expired."
+                            "is missing/expired.",
+                            service="Moodle",
                         )
                     if response.status_code == HTTPStatus.FORBIDDEN:
                         raise CredentialsExpiredError(
-                            "403 Forbidden: your session cookie is missing/expired."
+                            "403 Forbidden: your session cookie is missing/expired.",
+                            service="Moodle",
                         )
                     try:
                         response.raise_for_status()
@@ -225,7 +240,9 @@ class MoodleClient:
                             .copy_remove_param("token")
                         )
                         raise RemoteServiceError(
-                            f"HTTP {response.status_code} for url '{err_url}'"
+                            f"HTTP {response.status_code} for url '{err_url}'",
+                            service="Moodle",
+                            status_code=response.status_code,
                         ) from None
                     total = self._parse_content_length(response.headers)
                     downloaded = 0
@@ -237,5 +254,7 @@ class MoodleClient:
                                 on_progress(downloaded, total)
             except httpx.RequestError:
                 raise RemoteServiceError(
-                    f"Network error downloading '{safe_url}'"
+                    f"Network error downloading '{safe_url}'",
+                    service="Moodle",
+                    is_network=True,
                 ) from None

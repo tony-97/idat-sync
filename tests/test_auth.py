@@ -50,6 +50,7 @@ from idat_sync.domain.sync import ContentSyncState
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.course_tree import CourseTree, RowStatus
+from idat_sync.ui.error_format import format_ui_error
 from idat_sync.ui.login_frame import LoginFrame
 from idat_sync.ui.sync_frame import SyncFrame
 from tests.test_architecture import FORBIDDEN_INNER_LAYER_IMPORTS
@@ -669,16 +670,27 @@ class TestLoginFrame(unittest.TestCase):
                 await task
 
             assert any("sso boom" in msg for msg in log_cm.output)
-            assert frame.error == "sso boom"
+            assert frame.error == "Remote service error"
             assert frame.can_login
             assert not app.switched_to_sync
 
             moodle.token = None
-            await frame.do_login()
-            assert bool(frame.error)
+            sharepoint.error = None
+            with self.assertLogs("idat_sync.ui.login_frame", level="ERROR") as auth_cm:
+                await frame.do_login()
+            assert any("empty token" in msg for msg in auth_cm.output)
+            assert frame.error == "Sign-in failed — check your username and password"
             assert not app.switched_to_sync
 
             moodle.token = "tok123"  # noqa: S105
+            store.save_result = False
+            with self.assertLogs("idat_sync.ui.login_frame", level="ERROR") as store_cm:
+                await frame.do_login()
+            assert any("credentials file" in msg for msg in store_cm.output)
+            assert frame.error == "Could not update stored credentials"
+            assert not app.switched_to_sync
+            store.save_result = True
+
             sharepoint.started = None
             sharepoint.release = None
             sharepoint.error = None
@@ -689,8 +701,10 @@ class TestLoginFrame(unittest.TestCase):
                 ("jdoe", " secret "),
                 ("jdoe", " secret "),
                 ("jdoe", " secret "),
+                ("jdoe", " secret "),
             ]
             assert sharepoint.calls == [
+                ("jdoe@custom.edu", " secret "),
                 ("jdoe@custom.edu", " secret "),
                 ("jdoe@custom.edu", " secret "),
                 ("jdoe@custom.edu", " secret "),
@@ -701,20 +715,20 @@ class TestLoginFrame(unittest.TestCase):
             frame.username = "   "
             assert not frame.can_login
             await frame.do_login()
-            assert len(moodle.calls) == 3
+            assert len(moodle.calls) == 4
             assert not frame.can_login
 
         asyncio.run(exercise_do_login())
 
     def test_login_frame_surfaces_logout_credential_store_error_on_init(self):
-        """Show CredentialStoreError in error if logout fails during init."""
+        """Show summarized CredentialStoreError in error if logout fails during init."""
         mock_auth = MagicMock(spec=AuthService)
         mock_auth.logout.side_effect = CredentialStoreError(
             "Could not remove credentials file: locked"
         )
         app = self._create_app()
         frame = LoginFrame(app, mock_auth)  # type: ignore[arg-type]
-        assert "Could not remove credentials file: locked" in frame.error
+        assert frame.error == "Could not update stored credentials"
 
     def test_credentials_expired_error_exported_without_vendor_imports(self):
         """Export IDATSyncError hierarchy cleanly without vendor imports."""
@@ -749,6 +763,47 @@ class TestLoginFrame(unittest.TestCase):
                 for alias in node.names
             }
             assert imported & set(FORBIDDEN_INNER_LAYER_IMPORTS) == set()
+
+        for alias_name in ("ServiceName", "AuthFailureReason", "FileSystemOperation"):
+            assert hasattr(exceptions, alias_name)
+            assert getattr(ports, alias_name) == getattr(exceptions, alias_name)
+            assert alias_name in exceptions.__all__
+            assert alias_name in ports.__all__
+
+    def test_exception_structured_metadata_defaults_and_keyword_args(self):
+        """Verify default and explicit keyword-only attributes on IDATSyncError."""
+        auth_default = AuthenticationError("bad creds")
+        assert str(auth_default) == "bad creds"
+        assert auth_default.reason == "credentials"
+        auth_mfa = AuthenticationError("mfa", reason="mfa")
+        assert auth_mfa.reason == "mfa"
+        with pytest.raises(TypeError):
+            _ = AuthenticationError("msg", "mfa")  # type: ignore[misc]  # pylint: disable=too-many-function-args
+
+        exp_default = CredentialsExpiredError("expired")
+        assert str(exp_default) == "expired"
+        assert exp_default.service is None
+        exp_sp = CredentialsExpiredError("403", service="SharePoint")
+        assert exp_sp.service == "SharePoint"
+
+        fs_default = FileSystemError("scan failed")
+        assert str(fs_default) == "scan failed"
+        assert fs_default.operation == "access"
+        fs_write = FileSystemError("write failed", operation="write")
+        assert fs_write.operation == "write"
+
+        rem_default = RemoteServiceError("boom")
+        assert str(rem_default) == "boom"
+        assert rem_default.service is None
+        assert rem_default.status_code is None
+        assert rem_default.is_network is False
+        rem_full = RemoteServiceError(
+            "http 500", service="Moodle", status_code=500, is_network=True
+        )
+        assert str(rem_full) == "http 500"
+        assert rem_full.service == "Moodle"
+        assert rem_full.status_code == 500
+        assert rem_full.is_network is True
 
     def test_mfa_popup_return_and_dismiss_and_dead_ui_cleanup(self):
         """Verify inline async MFA future handling and dead UI symbol removal."""
@@ -865,7 +920,7 @@ class TestSyncFrame(unittest.TestCase):
                     nonlocal attempts
                     attempts += 1
                     if attempts == 1:
-                        raise RemoteServiceError("network offline")
+                        raise RemoteServiceError("network offline", is_network=True)
                     return mock_sync
 
                 async def fake_sync_courses(root_folder, courses, *, refresh=False):
@@ -892,7 +947,13 @@ class TestSyncFrame(unittest.TestCase):
                     )
                     yield CourseDiscoveryCompleted(current_course, 1, 2)
                     yield TaskDownloadStarted(err_p)
-                    yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
+                    yield TaskDownloadFailed(
+                        err_p,
+                        FileSystemError(
+                            "Failed to write 'C:\\secret\\broken.pdf': disk full",
+                            operation="write",
+                        ),
+                    )
                     yield CourseSyncCompleted(
                         current_course, RemoteServiceError("partial")
                     )
@@ -903,18 +964,31 @@ class TestSyncFrame(unittest.TestCase):
                     "idat_sync.ui.sync_frame.create_sync_service",
                     side_effect=fake_create_sync_service,
                 ) as mock_factory:
-                    await frame.load_idat_sync(creds)
+                    with self.assertLogs(
+                        "idat_sync.ui.sync_frame", level="ERROR"
+                    ) as load_cm:
+                        await frame.load_idat_sync(creds)
+                    assert len(load_cm.output) == 1
+                    assert "network offline" in load_cm.output[0]
                     assert frame.idat_sync is None
                     assert not frame.is_syncing
                     assert not master.switched_to_login
                     assert creds_file.exists()
-                    assert "network offline" in frame.status
+                    assert frame.status == "Sync error: Network connection error"
+                    assert frame.error == (
+                        "Network connection error. "
+                        f"Check {config.log_file.name} for details."
+                    )
 
                     frame.set_folder_path(tmpdir)
                     assert frame.can_sync is True
                     await frame.do_sync()
                     assert mock_factory.call_count == 2
                     assert not frame.is_syncing
+                    assert frame.error == (
+                        "1 file failed to download. "
+                        f"Check {config.log_file.name} for details."
+                    )
 
                     rows = frame.course_tree.to_dict()
                     assert len(rows) == 2
@@ -939,6 +1013,10 @@ class TestSyncFrame(unittest.TestCase):
                         "new.pdf": ("Completed", "100%"),
                         "broken.pdf": ("Failed", "0%"),
                     }
+                    assert (
+                        frame.course_tree.activity_to_dict()["failed"][0]["error"]
+                        == "Could not save file to disk"
+                    )
 
                     frame.clear_selection()
                     assert frame.can_sync is True
@@ -963,11 +1041,14 @@ class TestSyncFrame(unittest.TestCase):
                         yield  # pragma: no cover
 
                     mock_sync.sync_courses.side_effect = fail_sync_courses
-                    await frame.do_sync()
+                    with self.assertNoLogs("idat_sync.ui.sync_frame", level="ERROR"):
+                        await frame.do_sync()
                     assert not frame.is_syncing
                     assert not master.switched_to_login
                     assert creds_file.exists()
-                    assert "Logout" in frame.status
+                    assert frame.status == "Credentials expired. Sign in again."
+                    assert frame.error == "Credentials expired — sign in again"
+                    assert config.log_file.name not in frame.error
 
                     current_course.sections = [CourseSection(id=1, name="Cached")]
                     past_course.sections = [CourseSection(id=2, name="Kept")]
@@ -1055,22 +1136,42 @@ class TestSyncFrame(unittest.TestCase):
                     side_effect=RemoteServiceError("list failed")
                 )
 
-                with patch(
-                    "idat_sync.ui.sync_frame.create_sync_service",
-                    new=AsyncMock(return_value=partial_sync),
+                with (
+                    patch(
+                        "idat_sync.ui.sync_frame.create_sync_service",
+                        new=AsyncMock(return_value=partial_sync),
+                    ),
+                    self.assertLogs(
+                        "idat_sync.ui.sync_frame", level="ERROR"
+                    ) as list_cm,
                 ):
                     await frame.load_idat_sync(creds)
 
+                assert len(list_cm.output) == 1
+                assert "list failed" in list_cm.output[0]
                 partial_sync.aclose.assert_awaited_once_with()
                 assert frame.idat_sync is None
-                assert "list failed" in frame.status
+                assert frame.status == "Sync error: Remote service error"
+                assert frame.error == (
+                    f"Remote service error. Check {config.log_file.name} for details."
+                )
 
-                with patch(
-                    "idat_sync.ui.sync_frame.create_sync_service",
-                    new=AsyncMock(return_value=None),
+                with (
+                    patch(
+                        "idat_sync.ui.sync_frame.create_sync_service",
+                        new=AsyncMock(return_value=None),
+                    ),
+                    self.assertLogs(
+                        "idat_sync.ui.sync_frame", level="ERROR"
+                    ) as init_cm,
                 ):
                     await frame.load_idat_sync(creds)
-                assert "Sync service failed to initialize" in frame.status
+                assert len(init_cm.output) == 1
+                assert "Sync service failed to initialize" in init_cm.output[0]
+                assert frame.status == "Sync error: Unexpected sync error"
+                assert frame.error == (
+                    f"Unexpected sync error. Check {config.log_file.name} for details."
+                )
 
                 failing_sync = MagicMock(spec=IDATSync)
                 failing_sync.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
@@ -1440,13 +1541,15 @@ class TestSyncFrame(unittest.TestCase):
                     _ = refresh
                     yield CourseSyncCompleted(c1, RemoteServiceError("boom"))
 
-                mock_service = MagicMock()
+                mock_service = MagicMock(spec=IDATSync)
                 mock_service.sync_courses = err_sync_courses
                 frame.idat_sync = mock_service
 
                 await frame.do_sync()
                 assert frame.status == "Sync completed with errors."
-                assert frame.error == "boom"
+                assert frame.error == (
+                    f"Remote service error. Check {cfg.log_file.name} for details."
+                )
 
                 async def ok_sync_courses(_path, _selected, *, refresh=False):
                     _ = refresh
@@ -1456,6 +1559,68 @@ class TestSyncFrame(unittest.TestCase):
                 await frame.do_sync()
                 assert frame.status == "Sync done."
                 assert not frame.error
+
+        asyncio.run(exercise())
+
+    def test_sync_frame_reports_multi_file_download_failures(self):
+        """Summarize per-file errors and show plural failed count on SyncBar."""
+        creds: Credentials = {
+            "token": "tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+                c1 = Course(id=1, name="Course 1")
+                frame._populate_courses([c1])  # noqa: SLF001  # pylint: disable=protected-access
+                frame.selected_course_ids = {1}
+                frame.set_folder_path(tmpdir)
+
+                async def multi_file_err_sync_courses(
+                    _path, _selected, *, refresh=False
+                ):
+                    _ = refresh
+                    c_dir = Path(tmpdir) / c1.name
+                    p1 = c_dir / "S1" / "a.pdf"
+                    p2 = c_dir / "S1" / "b.pdf"
+                    yield CourseSyncStarted(c1, c_dir)
+                    yield CourseFileDiscovered(c1, p1, ContentSyncState.NEW)
+                    yield CourseFileDiscovered(c1, p2, ContentSyncState.NEW)
+                    yield CourseDiscoveryCompleted(c1, 0, 2)
+                    yield TaskDownloadFailed(
+                        p1,
+                        FileSystemError(
+                            "Failed to write 'C:\\a.pdf': disk full", operation="write"
+                        ),
+                    )
+                    yield TaskDownloadFailed(
+                        p2,
+                        RemoteServiceError(
+                            "HTTP 500 from Moodle web service",
+                            service="Moodle",
+                            status_code=500,
+                        ),
+                    )
+                    yield CourseSyncCompleted(c1, RemoteServiceError("partial"))
+
+                mock_service = MagicMock(spec=IDATSync)
+                mock_service.sync_courses = multi_file_err_sync_courses
+                frame.idat_sync = mock_service
+
+                await frame.do_sync()
+                assert frame.status == "Sync completed with errors."
+                assert frame.error == (
+                    "2 files failed to download. "
+                    f"Check {cfg.log_file.name} for details."
+                )
+                failed = frame.course_tree.activity_to_dict()["failed"]
+                assert [f["error"] for f in failed] == [
+                    "Could not save file to disk",
+                    "Moodle error (HTTP 500)",
+                ]
 
         asyncio.run(exercise())
 
@@ -1543,7 +1708,8 @@ class TestSyncFrame(unittest.TestCase):
                     state = frame.to_dict()
                     assert state["courses_loaded"] is False
                     assert state["auth_expired"] is True
-                    assert "expired token" in state["error"]
+                    assert state["error"] == "Credentials expired — sign in again"
+                    assert cfg.log_file.name not in state["error"]
 
                     await frame.retry_load()
                     state = frame.to_dict()
@@ -1946,6 +2112,145 @@ class TestCourseTree(unittest.TestCase):
         assert not files_by_name["o.pdf"]["percent"]
         assert files_by_name["f.pdf"]["status"] == "Failed"
         assert files_by_name["f.pdf"]["error"] == "disk full"
+
+
+class TestErrorFormat(unittest.TestCase):
+    """Tests for pure-Python UI error summarization in idat_sync.ui.error_format."""
+
+    def test_error_format_authentication_and_credentials_errors(self):
+        """Map authentication and credential errors strictly from attributes."""
+        cases: list[tuple[IDATSyncError, str]] = [
+            (
+                AuthenticationError("MFA code is required", reason="mfa"),
+                "Verification code is required",
+            ),
+            (
+                AuthenticationError("SharePoint sign-in timed out.", reason="timeout"),
+                "Sign-in timed out — try again",
+            ),
+            (
+                AuthenticationError(
+                    "SharePoint browser authentication failed", reason="sharepoint"
+                ),
+                "SharePoint sign-in failed — try again",
+            ),
+            (
+                AuthenticationError(
+                    "Authentication failed: empty token or SharePoint storage state."
+                ),
+                "Sign-in failed — check your username and password",
+            ),
+            (
+                AuthenticationError("Invalid login"),
+                "Sign-in failed — check your username and password",
+            ),
+            (
+                CredentialsExpiredError("HTTP 403", service="SharePoint"),
+                "SharePoint credentials expired — sign in again",
+            ),
+            (
+                CredentialsExpiredError("HTTP 401", service="Moodle"),
+                "Moodle credentials expired — sign in again",
+            ),
+            (
+                CredentialsExpiredError("401 Unauthorized"),
+                "Credentials expired — sign in again",
+            ),
+            (
+                CredentialStoreError(
+                    "Could not create credentials file: [Errno 13] Permission denied"
+                ),
+                "Could not update stored credentials",
+            ),
+        ]
+        for exc, expected in cases:
+            with self.subTest(exc=exc):
+                assert format_ui_error(exc) == expected
+
+    def test_error_format_filesystem_remote_service_and_base_errors(self):
+        """Map FileSystemError, RemoteServiceError, and IDATSyncError."""
+        cases: list[tuple[IDATSyncError, str]] = [
+            (
+                FileSystemError(
+                    "Failed to write 'C:\\secret\\a.pdf': disk full", operation="write"
+                ),
+                "Could not save file to disk",
+            ),
+            (
+                FileSystemError(
+                    "Could not scan 'C:\\courses\\write_notes': access denied"
+                ),
+                "Could not access local folder",
+            ),
+            (
+                RemoteServiceError(
+                    "SharePoint error: ('400', \"400 Bad Request for url: "
+                    'https://idat628.sharepoint.com/...")',
+                    service="SharePoint",
+                    status_code=400,
+                ),
+                "SharePoint error (HTTP 400)",
+            ),
+            (
+                RemoteServiceError(
+                    "HTTP 500 from Moodle web service (core_course_get_contents).",
+                    service="Moodle",
+                    status_code=500,
+                ),
+                "Moodle error (HTTP 500)",
+            ),
+            (
+                RemoteServiceError(
+                    "HTTP 404 for url 'https://aulavirtual.idat.edu.pe/pluginfile.php/1'",
+                    status_code=404,
+                ),
+                "Server error (HTTP 404)",
+            ),
+            (
+                RemoteServiceError(
+                    "SharePoint request failed: ConnectError",
+                    service="SharePoint",
+                    is_network=True,
+                ),
+                "SharePoint connection error",
+            ),
+            (
+                RemoteServiceError(
+                    "Moodle timed out", service="Moodle", is_network=True
+                ),
+                "Moodle connection error",
+            ),
+            (
+                RemoteServiceError(
+                    "Network error downloading 'https://...'", is_network=True
+                ),
+                "Network connection error",
+            ),
+            (
+                RemoteServiceError(
+                    "SharePoint error on file 500_lab.pdf", service="SharePoint"
+                ),
+                "SharePoint error",
+            ),
+            (
+                RemoteServiceError("Moodle web service failure", service="Moodle"),
+                "Moodle error",
+            ),
+            (
+                RemoteServiceError("ERROR: yt-dlp failure"),
+                "Remote service error",
+            ),
+            (
+                IDATSyncError("internal detail"),
+                "Unexpected sync error",
+            ),
+        ]
+        for exc, expected in cases:
+            with self.subTest(exc=exc):
+                result = format_ui_error(exc)
+                assert result == expected
+                assert "http://" not in result.lower()
+                assert "https://" not in result.lower()
 
 
 if __name__ == "__main__":

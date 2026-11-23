@@ -665,7 +665,7 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
 
         mfa_code = (await get_mfa_code()).strip()
         if not mfa_code:
-            raise AuthenticationError("MFA code is required")
+            raise AuthenticationError("MFA code is required", reason="mfa")
         await _fill(driver, "#idTxtBx_SAOTCC_OTC", mfa_code)
         await _click(driver, "#idChkBx_SAOTCC_TD")
         await _click(driver, "#idSubmit_SAOTCC_Continue")
@@ -716,11 +716,13 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
             raise
         except TimeoutError as exc:
             _logger.exception("SharePoint sign-in timed out")
-            raise AuthenticationError("SharePoint sign-in timed out.") from exc
+            raise AuthenticationError(
+                "SharePoint sign-in timed out.", reason="timeout"
+            ) from exc
         except Exception as exc:
             _logger.exception("SharePoint browser authentication failed")
             raise AuthenticationError(
-                "SharePoint browser authentication failed"
+                "SharePoint browser authentication failed", reason="sharepoint"
             ) from exc
 
 

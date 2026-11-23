@@ -321,10 +321,11 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                 "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
                 new=AsyncMock(),
             ),
-            pytest.raises(AuthenticationError, match="MFA code is required"),
+            pytest.raises(AuthenticationError, match="MFA code is required") as ctx,
         ):
             asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
 
+        assert ctx.value.reason == "mfa"
         assert not any("#idTxtBx_SAOTCC_OTC" in s for s in driver.scripts)
         assert driver.closed is True
 
@@ -351,6 +352,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
         ):
             asyncio.run(auth_timeout.fetch_storage_state("jdoe", "pw", _mfa_code))
         assert isinstance(exc_info.value.__cause__, TimeoutError)
+        assert exc_info.value.reason == "timeout"
         assert any(r.exc_info is not None for r in log_cm.records)
         assert timeout_driver.closed is True
 
@@ -373,6 +375,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
         ):
             asyncio.run(auth_err.fetch_storage_state("jdoe", "pw", _mfa_code))
         assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert exc_info.value.reason == "sharepoint"
         assert any(r.exc_info is not None for r in log_cm.records)
         assert err_driver.closed is True
 

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from idat_sync.application.ports import CredentialStoreError, IDATSyncError
 from idat_sync.ui.base import AppFrame
+from idat_sync.ui.error_format import format_ui_error
 
 if TYPE_CHECKING:
     from idat_sync.application.auth_service import AuthService
@@ -31,7 +32,7 @@ class LoginFrame(AppFrame):
         try:
             self.auth.logout()
         except CredentialStoreError as exc:
-            self.error = str(exc)
+            self.error = format_ui_error(exc)
 
     def _set_is_login(self, value: bool) -> None:  # noqa: FBT001
         self.is_login = value
@@ -106,6 +107,6 @@ class LoginFrame(AppFrame):
                 await self.auth.login(user, pwd, self.get_mfa_code)
             except IDATSyncError as exc:
                 _logger.error("Login error: %s", exc)  # noqa: TRY400
-                self.error = str(exc)
+                self.error = format_ui_error(exc)
             else:
                 self.app.switch_to_sync()

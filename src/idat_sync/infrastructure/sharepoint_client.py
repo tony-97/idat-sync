@@ -12,6 +12,7 @@ from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_result import ClientResult
 from office365.runtime.http.http_method import HttpMethod
 from office365.runtime.http.request_options import RequestOptions
+from office365.runtime.retry import TRANSIENT_TRANSPORT_EXCEPTIONS
 from office365.runtime.transport.httpx_transport import HttpxTransport
 from office365.sharepoint.client_context import ClientContext
 from office365.sharepoint.files.file import File
@@ -90,7 +91,9 @@ class SharepointClient:
             raise
         if not personal_site.url:
             await client.aclose()
-            raise CredentialsExpiredError("SharePoint login expired")
+            raise CredentialsExpiredError(
+                "SharePoint login expired", service="SharePoint"
+            )
         return client
 
     async def aclose(self) -> None:
@@ -184,11 +187,32 @@ class SharepointClient:
             status_code = getattr(response, "status_code", None)
             if status_code in (401, 403):
                 raise CredentialsExpiredError(
-                    f"HTTP {status_code}: SharePoint credentials expired."
+                    f"HTTP {status_code}: SharePoint credentials expired.",
+                    service="SharePoint",
                 ) from exc
-            raise RemoteServiceError(f"SharePoint error: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise RemoteServiceError(f"SharePoint request failed: {exc}") from exc
+            raise RemoteServiceError(
+                f"SharePoint error: {exc}",
+                service="SharePoint",
+                status_code=status_code if isinstance(status_code, int) else None,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code in (401, 403):
+                raise CredentialsExpiredError(
+                    f"HTTP {status_code}: SharePoint credentials expired.",
+                    service="SharePoint",
+                ) from exc
+            raise RemoteServiceError(
+                f"SharePoint request failed: {exc}",
+                service="SharePoint",
+                status_code=status_code,
+            ) from exc
+        except (httpx.HTTPError, *TRANSIENT_TRANSPORT_EXCEPTIONS) as exc:
+            raise RemoteServiceError(
+                f"SharePoint request failed: {exc}",
+                service="SharePoint",
+                is_network=True,
+            ) from exc
         except BaseException:
             if not entered and isinstance(coro, Coroutine):
                 coro.close()
@@ -210,7 +234,9 @@ class SharepointClient:
     ) -> ClientResult[SearchResult]:
         """Search personal SharePoint for recordings matching ``course_name``."""
         if self.search_client is None:
-            raise CredentialsExpiredError("SharePoint login expired")
+            raise CredentialsExpiredError(
+                "SharePoint login expired", service="SharePoint"
+            )
         return await self._await_query(
             self.search_client.search.query(
                 course_name,

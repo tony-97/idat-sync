@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
 
 from idat_sync.application.events import (
@@ -25,6 +26,7 @@ from idat_sync.bootstrap import create_sync_service
 from idat_sync.domain.course import Course, get_course_term, get_in_progress_course_ids
 from idat_sync.ui.base import AppFrame
 from idat_sync.ui.course_tree import CourseTree, RowStatus
+from idat_sync.ui.error_format import format_ui_error
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -33,6 +35,8 @@ if TYPE_CHECKING:
     from idat_sync.application.sync_service import IDATSync
     from idat_sync.config import SyncConfig
     from idat_sync.ui.app import MainApp
+
+_logger = logging.getLogger(__name__)
 
 
 class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
@@ -171,29 +175,42 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         finally:
             self.app.switch_to_login()
 
-    async def _ensure_sync_service(self) -> IDATSync:
-        created = self.idat_sync is None
-        if created:
+    async def _init_sync_service(self) -> IDATSync:
+        if self.idat_sync is None:
             self.idat_sync = await create_sync_service(self.credentials, self.config)
         if self.idat_sync is None:
             raise IDATSyncError("Sync service failed to initialize")
+        if not self.courses_loaded:
+            courses = await self.idat_sync.list_courses()
+            self._populate_courses(courses)
+        return self.idat_sync
+
+    async def _ensure_sync_service(self) -> IDATSync:
+        created = self.idat_sync is None
         try:
-            if not self.courses_loaded:
-                courses = await self.idat_sync.list_courses()
-                self._populate_courses(courses)
-        except (IDATSyncError, asyncio.CancelledError):
+            return await self._init_sync_service()
+        except IDATSyncError as exc:
+            _logger.error("Sync setup failed: %s", exc)  # noqa: TRY400
             if created:
                 await self.aclose()
             raise
-        return self.idat_sync
+        except asyncio.CancelledError:
+            if created:
+                await self.aclose()
+            raise
+
+    def _with_log_hint(self, message: str) -> str:
+        return f"{message}. Check {self.config.log_file.name} for details."
 
     def _set_error_status(self, exc: IDATSyncError) -> None:
-        self.error = str(exc)
+        summary = format_ui_error(exc)
         self.auth_expired = isinstance(exc, CredentialsExpiredError)
         if self.auth_expired:
-            self.status = f"Credentials expired: {exc}. Click Logout to sign in again."
+            self.error = summary
+            self.status = "Credentials expired. Sign in again."
         else:
-            self.status = f"Sync error: {exc}"
+            self.error = self._with_log_hint(summary)
+            self.status = f"Sync error: {summary}"
         self._notify()
 
     async def load_idat_sync(self, credentials: Credentials) -> None:
@@ -245,7 +262,9 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         self._notify()
 
     def _on_download_failed(self, path: Path, error: IDATSyncError) -> None:
-        self.course_tree.set_file_status(path, RowStatus.FAILED, error=str(error))
+        self.course_tree.set_file_status(
+            path, RowStatus.FAILED, error=format_ui_error(error)
+        )
         self._notify()
 
     def _on_course_completed(self, course: Course, error: IDATSyncError | None) -> None:
@@ -301,7 +320,14 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
                 first_error = event.error
             self._handle_event(event)
         if first_error is not None:
-            self.error = str(first_error)
+            failed_count = self.course_tree.activity_to_dict()["failed_count"]
+            if failed_count > 0:
+                noun = "file" if failed_count == 1 else "files"
+                self.error = self._with_log_hint(
+                    f"{failed_count} {noun} failed to download"
+                )
+            else:
+                self.error = self._with_log_hint(format_ui_error(first_error))
             self.status = "Sync completed with errors."
         else:
             self.error = ""
