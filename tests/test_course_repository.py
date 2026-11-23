@@ -25,6 +25,8 @@ from idat_sync.domain.course import (
     CourseModule,
     CourseSection,
     ModuleContent,
+    course_term_sort_key,
+    get_course_term,
     get_in_progress_course_ids,
 )
 
@@ -725,6 +727,15 @@ class TestInProgressCourseDetection(unittest.TestCase):
             Course(id=5, name="Course E", category="III.01.2026-II"),
             Course(id=6, name="Course F", category="IV.01.2026-III"),
         ]
+        assert get_course_term(courses[0]) == "2025-IIA"
+        assert get_course_term(courses[1]) == "2025-IIA"
+        assert get_course_term(courses[5]) == "2026-III"
+        assert (
+            course_term_sort_key(courses[5])
+            > course_term_sort_key(courses[2])
+            > course_term_sort_key(courses[0])
+            > course_term_sort_key(Course(id=99, name="General", category=""))
+        )
         assert get_in_progress_course_ids(courses) == {6}
         assert get_in_progress_course_ids(courses[:2]) == {1, 2}
 
@@ -734,6 +745,8 @@ class TestInProgressCourseDetection(unittest.TestCase):
             Course(id=10, name="IV.01.2026-III PATRONES", category=""),
             Course(id=11, name="III.01.2026-II REDES", category=""),
         ]
+        assert get_course_term(courses[0]) == "2026-III"
+        assert get_course_term(Course(id=99, name="General", category="")) == "Other"
         assert get_in_progress_course_ids(courses) == {10}
         assert (
             get_in_progress_course_ids([Course(id=99, name="General", category="")])

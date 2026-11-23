@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -18,6 +19,7 @@ from idat_sync.application.events import (
     SyncEvent,
     TaskDownloadCompleted,
     TaskDownloadFailed,
+    TaskDownloadProgress,
     TaskDownloadStarted,
     log_sync_event,
 )
@@ -33,6 +35,7 @@ from idat_sync.application.task_orchestrator import TaskChannel, TaskOrchestrato
 from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
 from idat_sync.domain.path_utils import PathDisambiguator, safe_filename
+from idat_sync.domain.sync import ContentSyncState
 
 _logger = logging.getLogger("idat_sync")
 
@@ -82,11 +85,9 @@ class _CourseStreamRun:  # pylint: disable=too-few-public-methods,too-many-insta
         task = self._sync.download_manager.create_download_task(item)
         if task is None:
             return
-        is_pending = self._sync.download_manager.is_pending(item, self.local_mtimes)
-        self.event_queue.put_nowait(
-            CourseFileDiscovered(self.course, item.path, is_pending)
-        )
-        if is_pending:
+        state = self._sync.download_manager.classify_content(item, self.local_mtimes)
+        self.event_queue.put_nowait(CourseFileDiscovered(self.course, item.path, state))
+        if state is not ContentSyncState.SYNCED:
             self._pending_count += 1
             self.channel.enqueue(task)
         else:
@@ -125,16 +126,37 @@ class _CourseStreamRun:  # pylint: disable=too-few-public-methods,too-many-insta
 
     async def _run_single_task(self, task: DownloadTask) -> None:
         self.event_queue.put_nowait(TaskDownloadStarted(task.path))
+        finished = False
+        last_emit: float | None = None
+        interval = self._sync.progress_interval
+
+        def _on_progress(downloaded: int, total: int | None) -> None:
+            nonlocal last_emit
+            if finished:
+                return
+            now = time.monotonic()
+            if last_emit is not None and now - last_emit < interval:
+                return
+            last_emit = now
+            self.event_queue.put_nowait(
+                TaskDownloadProgress(task.path, downloaded, total)
+            )
+
         try:
-            await task.download()
+            await task.download(on_progress=_on_progress)
         except CredentialsExpiredError as exc:
+            finished = True
             self.event_queue.put_nowait(TaskDownloadFailed(task.path, exc))
             raise
         except (RemoteServiceError, FileSystemError) as exc:
+            finished = True
             self.errors.append(exc)
             self.event_queue.put_nowait(TaskDownloadFailed(task.path, exc))
         else:
+            finished = True
             self.event_queue.put_nowait(TaskDownloadCompleted(task.path))
+        finally:
+            finished = True
 
     async def run(self) -> None:
         """Execute discovery and all group workers concurrently until completion."""
@@ -159,6 +181,7 @@ class IDATSync:
         recordings_folder_name: str,
         *,
         closers: Sequence[Callable[[], Awaitable[None]]] = (),
+        progress_interval: float = 0.15,
     ) -> None:
         """Initialize the sync service with its repository, managers, and closers."""
         self.course_repository = course_repository
@@ -167,6 +190,7 @@ class IDATSync:
         self.file_system = file_system
         self.recordings_folder_name = recordings_folder_name
         self._closers = list(closers)
+        self.progress_interval = progress_interval
 
     async def aclose(self) -> None:
         """Close all registered async resources, raising the first error if any."""

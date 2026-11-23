@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
     from idat_sync.application.exceptions import IDATSyncError
     from idat_sync.domain.course import Course
+    from idat_sync.domain.sync import ContentSyncState
 
 _logger = logging.getLogger("idat_sync")
 
@@ -29,7 +30,7 @@ class CourseFileDiscovered:
 
     course: Course
     path: Path
-    is_pending: bool
+    state: ContentSyncState
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,15 @@ class TaskDownloadStarted:
     """Emitted before downloading a single content item."""
 
     path: Path
+
+
+@dataclass(frozen=True)
+class TaskDownloadProgress:
+    """Emitted periodically with byte progress for an active download task."""
+
+    path: Path
+    downloaded: int
+    total: int | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +86,7 @@ SyncEvent = (
     | CourseFileDiscovered
     | CourseDiscoveryCompleted
     | TaskDownloadStarted
+    | TaskDownloadProgress
     | TaskDownloadCompleted
     | TaskDownloadFailed
     | CourseSyncCompleted
@@ -87,12 +98,12 @@ def log_sync_event(event: SyncEvent) -> None:
     match event:
         case CourseSyncStarted(course=course):
             _logger.info("Syncing course '%s'...", course.name)
-        case CourseFileDiscovered(course=course, path=path, is_pending=is_pending):
+        case CourseFileDiscovered(course=course, path=path, state=state):
             _logger.debug(
                 "Course '%s': discovered %s (%s)",
                 course.name,
                 path,
-                "pending" if is_pending else "synced",
+                state.lower(),
             )
         case CourseDiscoveryCompleted(
             course=course, synced_count=synced_count, pending_count=pending_count
@@ -105,6 +116,8 @@ def log_sync_event(event: SyncEvent) -> None:
             )
         case TaskDownloadStarted(path=path):
             _logger.info("Downloading %s", path)
+        case TaskDownloadProgress():
+            pass
         case TaskDownloadCompleted(path=path):
             _logger.info("Downloaded %s", path)
         case TaskDownloadFailed(path=path, error=error):
@@ -123,6 +136,7 @@ __all__ = [
     "SyncEvent",
     "TaskDownloadCompleted",
     "TaskDownloadFailed",
+    "TaskDownloadProgress",
     "TaskDownloadStarted",
     "log_sync_event",
 ]

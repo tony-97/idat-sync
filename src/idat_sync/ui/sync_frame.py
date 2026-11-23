@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 from idat_sync.application.events import (
@@ -12,6 +13,7 @@ from idat_sync.application.events import (
     SyncEvent,
     TaskDownloadCompleted,
     TaskDownloadFailed,
+    TaskDownloadProgress,
     TaskDownloadStarted,
 )
 from idat_sync.application.ports import (
@@ -20,7 +22,7 @@ from idat_sync.application.ports import (
     IDATSyncError,
 )
 from idat_sync.bootstrap import create_sync_service
-from idat_sync.domain.course import Course, get_in_progress_course_ids
+from idat_sync.domain.course import Course, get_course_term, get_in_progress_course_ids
 from idat_sync.ui.base import AppFrame
 from idat_sync.ui.course_tree import CourseTree, RowStatus
 
@@ -53,7 +55,11 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         self.courses_loaded = False
         self.folder_path = ""
         self.status = "Loading courses..."
+        self.error = ""
+        self.auth_expired = False
         self.is_syncing = False
+        self._cancel_requested = False
+        self._sync_task: asyncio.Task[Any] | None = None
         self.course_tree = CourseTree()
 
     def _set_is_syncing(self, value: bool) -> None:  # noqa: FBT001
@@ -62,12 +68,8 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
 
     @property
     def can_sync(self) -> bool:
-        """Return True when idle, folder is set, and sync can proceed."""
-        return (
-            not self.is_syncing
-            and bool(self.folder_path.strip())
-            and (bool(self.selected_course_ids) or not self.courses_loaded)
-        )
+        """Return True when idle and a target folder has been selected."""
+        return not self.is_syncing and bool(self.folder_path.strip())
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize sync view state for the WebView frontend."""
@@ -75,9 +77,13 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
             "view": "sync",
             "folder_path": self.folder_path,
             "status": self.status,
+            "error": self.error,
+            "auth_expired": self.auth_expired,
+            "courses_loaded": self.courses_loaded,
             "is_syncing": self.is_syncing,
             "can_sync": self.can_sync,
             "courses": self.course_tree.to_dict(),
+            "activity": self.course_tree.activity_to_dict(),
         }
 
     def set_folder_path(self, path: str) -> None:
@@ -103,6 +109,8 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
             courses, self.selected_course_ids, in_progress=self.in_progress_ids
         )
         self.courses_loaded = True
+        self.error = ""
+        self.auth_expired = False
         self.status = f"Loaded {len(self.courses)} courses."
         self._notify()
 
@@ -128,6 +136,24 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         else:
             self.selected_course_ids.add(course_id)
         self._refresh_selection()
+
+    def toggle_term(self, term: str) -> None:
+        """Tri-state toggle all courses belonging to parsed ``term``."""
+        term_ids = {c.id for c in self.courses if get_course_term(c) == term}
+        if not term_ids:
+            return
+        if term_ids.issubset(self.selected_course_ids):
+            self.selected_course_ids -= term_ids
+        else:
+            self.selected_course_ids |= term_ids
+        self._refresh_selection()
+
+    def cancel_sync(self) -> None:
+        """Cancel the active sync task without closing ``self.idat_sync``."""
+        task = self._sync_task
+        if task is not None and not task.done():
+            self._cancel_requested = True
+            task.cancel()
 
     async def aclose(self) -> None:
         """Cancel active tasks and close the underlying IDATSync service."""
@@ -155,14 +181,16 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
             if not self.courses_loaded:
                 courses = await self.idat_sync.list_courses()
                 self._populate_courses(courses)
-        except IDATSyncError:
+        except (IDATSyncError, asyncio.CancelledError):
             if created:
                 await self.aclose()
             raise
         return self.idat_sync
 
     def _set_error_status(self, exc: IDATSyncError) -> None:
-        if isinstance(exc, CredentialsExpiredError):
+        self.error = str(exc)
+        self.auth_expired = isinstance(exc, CredentialsExpiredError)
+        if self.auth_expired:
             self.status = f"Credentials expired: {exc}. Click Logout to sign in again."
         else:
             self.status = f"Sync error: {exc}"
@@ -171,6 +199,8 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
     async def load_idat_sync(self, credentials: Credentials) -> None:
         """Initialize the sync service and load the user's course list."""
         self.credentials = credentials
+        self.error = ""
+        self.auth_expired = False
         async with self._busy(self._set_is_syncing):
             try:
                 await self._ensure_sync_service()
@@ -179,15 +209,19 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
                 self.courses_loaded = False
                 self._set_error_status(exc)
 
+    async def retry_load(self) -> None:
+        """Retry startup initialization after a load error."""
+        if self.courses_loaded or self.is_syncing:
+            return
+        await self.load_idat_sync(self.credentials)
+
     def _on_course_started(self, course: Course, course_dir: Path) -> None:
         self.course_tree.start_course(course.id, course_dir)
         self.status = f"Fetching contents for {course.name}..."
         self._notify()
 
     def _on_file_discovered(self, event: CourseFileDiscovered) -> None:
-        self.course_tree.add_file(
-            event.course.id, event.path, is_pending=event.is_pending
-        )
+        self.course_tree.add_file(event.course.id, event.path, event.state)
         self._notify()
 
     def _on_discovery_completed(self, course: Course) -> None:
@@ -199,12 +233,19 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         self.status = f"Downloading {path.name}..."
         self._notify()
 
+    def _on_download_progress(self, event: TaskDownloadProgress) -> None:
+        payload = self.course_tree.set_file_progress(
+            event.path, event.downloaded, event.total
+        )
+        if payload is not None and self.app is not None:
+            self.app.push_progress(payload)
+
     def _on_download_completed(self, path: Path) -> None:
         self.course_tree.set_file_status(path, RowStatus.COMPLETED)
         self._notify()
 
-    def _on_download_failed(self, path: Path) -> None:
-        self.course_tree.set_file_status(path, RowStatus.FAILED)
+    def _on_download_failed(self, path: Path, error: IDATSyncError) -> None:
+        self.course_tree.set_file_status(path, RowStatus.FAILED, error=str(error))
         self._notify()
 
     def _on_course_completed(self, course: Course, error: IDATSyncError | None) -> None:
@@ -222,36 +263,76 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
                 self._on_discovery_completed(course)
             case TaskDownloadStarted(path=path):
                 self._on_download_started(path)
+            case TaskDownloadProgress():
+                self._on_download_progress(event)
             case TaskDownloadCompleted(path=path):
                 self._on_download_completed(path)
-            case TaskDownloadFailed(path=path):
-                self._on_download_failed(path)
+            case TaskDownloadFailed(path=path, error=error):
+                self._on_download_failed(path, error)
             case CourseSyncCompleted(course=course, error=error):
                 self._on_course_completed(course, error)
 
-    async def _run_sync(self, path: str) -> None:
+    def _resolve_targets(self, target_ids: set[int] | None) -> list[Course]:
+        if target_ids is not None:
+            return [c for c in self.courses if c.id in target_ids]
+        if self.selected_course_ids:
+            return [c for c in self.courses if c.id in self.selected_course_ids]
+        if self.in_progress_ids:
+            return [c for c in self.courses if c.id in self.in_progress_ids]
+        return list(self.courses)
+
+    async def _run_sync(self, path: str, target_ids: set[int] | None) -> None:
         idat_sync = await self._ensure_sync_service()
-        selected = [c for c in self.courses if c.id in self.selected_course_ids]
-        if not selected:
+        targets = self._resolve_targets(target_ids)
+        if not targets:
             return
-        self.course_tree.reset_for_sync([c.id for c in selected])
+        self.error = ""
+        self.auth_expired = False
+        self.course_tree.reset_for_sync([c.id for c in targets])
         self._notify()
 
-        has_errors = False
-        async for event in idat_sync.sync_courses(path, selected, refresh=True):
-            if isinstance(event, CourseSyncCompleted) and event.error is not None:
-                has_errors = True
+        first_error: IDATSyncError | None = None
+        async for event in idat_sync.sync_courses(path, targets, refresh=True):
+            if (
+                isinstance(event, CourseSyncCompleted)
+                and event.error is not None
+                and first_error is None
+            ):
+                first_error = event.error
             self._handle_event(event)
-        self.status = "Sync completed with errors." if has_errors else "Sync done."
+        if first_error is not None:
+            self.error = str(first_error)
+            self.status = "Sync completed with errors."
+        else:
+            self.error = ""
+            self.status = "Sync done."
         self._notify()
 
-    async def do_sync(self) -> None:
-        """Run synchronization for all selected courses."""
+    async def _execute_sync(self, target_ids: set[int] | None) -> None:
         path = self.folder_path.strip()
         if not path or self.is_syncing:
             return
+        self._cancel_requested = False
         async with self._busy(self._set_is_syncing):
+            self._sync_task = asyncio.current_task()
             try:
-                await self._run_sync(path)
+                await self._run_sync(path, target_ids)
+            except asyncio.CancelledError:
+                if not self._cancel_requested:
+                    raise
+                self.course_tree.cancel_sync()
+                self.status = "Sync cancelled."
+                self._notify()
             except IDATSyncError as exc:
                 self._set_error_status(exc)
+            finally:
+                self._sync_task = None
+                self._cancel_requested = False
+
+    async def do_sync(self) -> None:
+        """Run synchronization for selected courses (falling back to active/all)."""
+        await self._execute_sync(None)
+
+    async def sync_course(self, course_id: int) -> None:
+        """Run synchronization for a single ``course_id`` on demand."""
+        await self._execute_sync({course_id})

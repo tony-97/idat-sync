@@ -21,6 +21,7 @@ from idat_sync.application.ports import (
     CredentialsExpiredError,
     Downloader,
     FileSystemError,
+    ProgressCallback,
     RemoteServiceError,
 )
 from idat_sync.domain.content import (
@@ -69,11 +70,17 @@ class MoodleDownloader(Downloader[MoodleContent]):
         """Initialize the downloader with a MoodleClient."""
         self.moodle_client = client
 
-    async def download(self, content: MoodleContent) -> None:
+    async def download(
+        self,
+        content: MoodleContent,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         """Download ``content`` atomically using the Moodle client."""
         await _atomic_download(
             content.path,
-            lambda f: self.moodle_client.download_file(content.url, f),
+            lambda f: self.moodle_client.download_file(
+                content.url, f, on_progress=on_progress
+            ),
         )
 
 
@@ -86,11 +93,17 @@ class SharepointDownloader(Downloader[SharepointContent]):
         """Initialize the downloader with a SharepointClient."""
         self.sharepoint_client = client
 
-    async def download(self, content: SharepointContent) -> None:
+    async def download(
+        self,
+        content: SharepointContent,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         """Download ``content`` atomically using the SharePoint client."""
         await _atomic_download(
             content.path,
-            lambda f: self.sharepoint_client.download_file(content.file, f),
+            lambda f: self.sharepoint_client.download_file(
+                content.file, f, on_progress=on_progress
+            ),
         )
 
 
@@ -103,8 +116,13 @@ class StringDownloader(Downloader[StringContent]):
         """Return whether ``content`` renders to non-empty UTF-8 bytes."""
         return content.rendered_bytes() is not None
 
-    async def download(self, content: StringContent) -> None:
+    async def download(
+        self,
+        content: StringContent,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         """Write rendered bytes of ``content`` atomically to disk."""
+        del on_progress
         data = content.rendered_bytes() or b""
 
         async def _write(f: BinaryIO) -> None:
@@ -169,8 +187,46 @@ class RecordingDownloader(Downloader[RecordingContent]):
             )
         return "\n".join(lines)
 
+    @staticmethod
+    def _make_progress_hook(
+        cancel_event: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+        on_progress: ProgressCallback | None,
+    ) -> Callable[[dict[str, Any]], None]:
+        completed_bytes = 0
+
+        def _progress_hook(status: dict[str, Any]) -> None:
+            nonlocal completed_bytes
+            if cancel_event.is_set():
+                raise DownloadCancelled("Download cancelled")
+            if on_progress is None:
+                return
+            state = status.get("status")
+            downloaded = int(status.get("downloaded_bytes") or 0)
+            raw_total = status.get("total_bytes") or status.get("total_bytes_estimate")
+            total = int(raw_total) if raw_total is not None else None
+            if state == "downloading":
+                loop.call_soon_threadsafe(
+                    on_progress,
+                    completed_bytes + downloaded,
+                    completed_bytes + total if total is not None else None,
+                )
+            elif state == "finished":
+                completed_bytes += total if total is not None else downloaded
+                loop.call_soon_threadsafe(
+                    on_progress,
+                    completed_bytes,
+                    completed_bytes if total is not None else None,
+                )
+
+        return _progress_hook
+
     def _download_sync(
-        self, content: RecordingContent, cancel_event: threading.Event
+        self,
+        content: RecordingContent,
+        cancel_event: threading.Event,
+        loop: asyncio.AbstractEventLoop,
+        on_progress: ProgressCallback | None,
     ) -> None:
         _logger.info("Downloading share url: %s", content.url)
         os_target = windows_long_path(content.path)
@@ -185,18 +241,15 @@ class RecordingDownloader(Downloader[RecordingContent]):
             if platform.system() == "Windows"
             else os.path.abspath(os_target)  # noqa: PTH100
         )
-
-        def _progress_hook(_status: dict[str, Any]) -> None:
-            if cancel_event.is_set():
-                raise DownloadCancelled("Download cancelled")
-
         ydl_opts: dict[str, Any] = {
             "cookiefile": io.StringIO(self.cookies),
             "format_sort": ["proto:dash"],
             "postprocessors": [{"key": "FFmpegMetadata"}],
             "format": "bestvideo+bestaudio/bestvideo",
             "outtmpl": output_path_template,
-            "progress_hooks": [_progress_hook],
+            "progress_hooks": [
+                self._make_progress_hook(cancel_event, loop, on_progress)
+            ],
         }
         meipass = getattr(sys, "_MEIPASS", None)
         if getattr(sys, "frozen", False) and meipass is not None:
@@ -219,12 +272,19 @@ class RecordingDownloader(Downloader[RecordingContent]):
                 f"Failed to write recording '{content.path}': {exc}"
             ) from exc
 
-    async def download(self, content: RecordingContent) -> None:
+    async def download(
+        self,
+        content: RecordingContent,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         """Download ``content`` in a worker thread, supporting cancellation."""
         cancel_event = threading.Event()
+        loop = asyncio.get_running_loop()
         async with self.rate_limiter:
             try:
-                await asyncio.to_thread(self._download_sync, content, cancel_event)
+                await asyncio.to_thread(
+                    self._download_sync, content, cancel_event, loop, on_progress
+                )
             except asyncio.CancelledError:
                 cancel_event.set()
                 raise

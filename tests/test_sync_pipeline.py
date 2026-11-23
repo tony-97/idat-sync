@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
+from idat_sync import domain as domain_mod
 from idat_sync.application import events as events_mod
 from idat_sync.application import ports
 from idat_sync.application.auth_service import AuthService
@@ -33,6 +34,7 @@ from idat_sync.application.events import (
     SyncEvent,
     TaskDownloadCompleted,
     TaskDownloadFailed,
+    TaskDownloadProgress,
     TaskDownloadStarted,
 )
 from idat_sync.application.ports import (
@@ -55,6 +57,7 @@ from idat_sync.bootstrap import (
     create_sync_service,
 )
 from idat_sync.config import SyncConfig
+from idat_sync.domain import sync as domain_sync
 from idat_sync.domain.content import (
     MoodleContent,
     RecordingContent,
@@ -74,7 +77,7 @@ from idat_sync.domain.path_utils import (
     safe_path_segment,
     safe_suffixed_segment,
 )
-from idat_sync.domain.sync import is_content_pending
+from idat_sync.domain.sync import ContentSyncState, classify_content
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import (
     MoodleDownloader,
@@ -240,6 +243,89 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert task.downloader is self.recording_downloader
         assert task.content is rec
 
+    async def test_recording_downloader_reports_cumulative_dash_progress(self):
+        """Bridge yt-dlp DASH video+audio progress onto the caller's event loop."""
+        ticks: list[tuple[int, int | None, int]] = []
+        main_thread = threading.get_ident()
+
+        def _on_progress(downloaded: int, total: int | None) -> None:
+            ticks.append((downloaded, total, threading.get_ident()))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "Grabaciones" / "video.mp4"
+            rec = RecordingContent(
+                target,
+                1700000000,
+                "https://idat628-my.sharepoint.com/:v:/r/personal/video.mp4",
+            )
+
+            def _fake_ydl(opts):
+                hook = opts["progress_hooks"][0]
+
+                class _FakeYdl:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_args):
+                        return False
+
+                    def download(self, _urls):
+                        """Emit simulated video, audio, and indeterminate ticks."""
+                        hook(
+                            {
+                                "status": "downloading",
+                                "downloaded_bytes": 200,
+                                "total_bytes_estimate": 400,
+                            }
+                        )
+                        hook(
+                            {
+                                "status": "finished",
+                                "downloaded_bytes": 400,
+                                "total_bytes_estimate": 400,
+                            }
+                        )
+                        hook(
+                            {
+                                "status": "downloading",
+                                "downloaded_bytes": 50,
+                                "total_bytes": 100,
+                            }
+                        )
+                        hook(
+                            {
+                                "status": "finished",
+                                "downloaded_bytes": 100,
+                                "total_bytes": 100,
+                            }
+                        )
+                        hook(
+                            {
+                                "status": "downloading",
+                                "downloaded_bytes": 30,
+                                "total_bytes": None,
+                                "total_bytes_estimate": None,
+                            }
+                        )
+
+                return _FakeYdl()
+
+            with patch(
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                side_effect=_fake_ydl,
+            ):
+                await self.recording_downloader.download(rec, on_progress=_on_progress)
+            await asyncio.sleep(0)
+
+        assert [(d, t) for d, t, _ in ticks] == [
+            (200, 400),
+            (400, 400),
+            (450, 500),
+            (500, 500),
+            (530, None),
+        ]
+        assert all(tid == main_thread for _, _, tid in ticks)
+
     async def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(
         self,
     ):
@@ -284,7 +370,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 """Handle YouTube URLs."""
                 return "youtube.com" in content.url
 
-            async def download(self, content: RecordingContent) -> None:
+            async def download(self, content: RecordingContent) -> None:  # pylint: disable=arguments-differ
                 """Record downloaded content."""
                 downloaded.append(content)
 
@@ -308,6 +394,29 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         channel.close()
         await asyncio.gather(*channel.create_workers())
         assert downloaded == [yt_rec]
+        assert hasattr(ports, "ProgressCallback")
+
+        seen_progress: list[tuple[int, int | None]] = []
+
+        class ProgressAwareDownloader(Downloader[RecordingContent]):
+            """Downloader accepting on_progress callback."""
+
+            content_type = RecordingContent
+
+            async def download(
+                self,
+                _content: RecordingContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
+                """Emit progress when provided."""
+                if on_progress is not None:
+                    on_progress(50, 100)
+
+        p_task = DownloadTask(yt_rec, ProgressAwareDownloader())
+        await p_task.download()
+        assert not seen_progress
+        await p_task.download(on_progress=lambda d, t: seen_progress.append((d, t)))
+        assert seen_progress == [(50, 100)]
 
     def test_safe_filename_at_domain_path_utils_seam(self):
         """Sanitize accents, Windows reserved names, and length in safe_filename."""
@@ -377,8 +486,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert fs.read_bytes(tmp_path / "missing.txt") is None
 
             mgr = DownloadManager(self.downloaders, file_system=fs)
+            assert not hasattr(DownloadManager, "is_pending")
             content = MoodleContent(test_file, 1234567890, "http://a")
-            assert not mgr.is_pending(content, mtimes)
+            assert mgr.classify_content(content, mtimes) is ContentSyncState.SYNCED
 
             unchanged_html = tmp_path / "info.html"
             unchanged_html.write_text("<p>Same</p>", encoding="utf-8")
@@ -388,14 +498,21 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             empty_html.write_text("<p>Kept</p>", encoding="utf-8")
 
             html_mtimes = fs.scan_mtimes(tmp_path)
-            assert not mgr.is_pending(
-                StringContent(unchanged_html, 0, ["  <p>Same</p>  "]), html_mtimes
+            assert (
+                mgr.classify_content(
+                    StringContent(unchanged_html, 0, ["  <p>Same</p>  "]), html_mtimes
+                )
+                is ContentSyncState.SYNCED
             )
-            assert mgr.is_pending(
-                StringContent(changed_html, 0, ["<p>New</p>"]), html_mtimes
+            assert (
+                mgr.classify_content(
+                    StringContent(changed_html, 0, ["<p>New</p>"]), html_mtimes
+                )
+                is ContentSyncState.OUTDATED
             )
-            assert not mgr.is_pending(
-                StringContent(empty_html, 0, ["   "]), html_mtimes
+            assert (
+                mgr.classify_content(StringContent(empty_html, 0, ["   "]), html_mtimes)
+                is ContentSyncState.SYNCED
             )
 
     def test_local_filesystem_adapter_translates_os_errors(self):
@@ -535,7 +652,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         with pytest.raises(TypeError, match="file_system"):
             DownloadManager(self.downloaders)  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
 
-    async def test_downloaders_delegate_to_clients_and_use_injected_personal_host(  # pylint: disable=too-many-locals
+    async def test_downloaders_delegate_to_clients_and_use_injected_personal_host(  # pylint: disable=too-many-locals,too-many-statements
         self,
     ):
         """Delegate downloads to injected clients and honor personal host."""
@@ -578,14 +695,17 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
+            moodle_cb = MagicMock()
 
-            async def _write_moodle(_url, dest):
+            async def _write_moodle(_url, dest, on_progress=None):
+                assert on_progress is moodle_cb
                 dest.write(b"moodle-bytes")
 
             mock_moodle.download_file.side_effect = _write_moodle
             moodle_target = tmp / "nested" / "a.pdf"
             await moodle_dl.download(
-                MoodleContent(moodle_target, 0, "https://moodle/a.pdf")
+                MoodleContent(moodle_target, 0, "https://moodle/a.pdf"),
+                on_progress=moodle_cb,
             )
             assert moodle_target.read_bytes() == b"moodle-bytes"
             mock_moodle.download_file.assert_called_once()
@@ -593,13 +713,18 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert mock_moodle.download_file.call_args.args[1].closed
 
             mock_file = MagicMock()
+            sp_cb = MagicMock()
 
-            async def _write_sp(_file, dest):
+            async def _write_sp(_file, dest, on_progress=None):
+                assert on_progress is sp_cb
                 dest.write(b"sp-bytes")
 
             mock_sp.download_file.side_effect = _write_sp
             sp_target = tmp / "nested_sp" / "b.pdf"
-            await sp_dl.download(SharepointContent(sp_target, 0, mock_file))
+            await sp_dl.download(
+                SharepointContent(sp_target, 0, mock_file),
+                on_progress=sp_cb,
+            )
             assert sp_target.read_bytes() == b"sp-bytes"
             mock_sp.download_file.assert_called_once()
             assert mock_sp.download_file.call_args.args[0] is mock_file
@@ -613,13 +738,15 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             sp_target = tmp / "sp" / "b.pdf"
             observed_paths: list[str] = []
 
-            async def ok_moodle(_url, fh):
+            async def ok_moodle(_url, fh, on_progress=None):
+                del on_progress
                 observed_paths.append(fh.name)
                 assert fh.name.endswith(".part")
                 assert not moodle_target.exists()
                 fh.write(b"ok")
 
-            async def failing_sp(_file, fh):
+            async def failing_sp(_file, fh, on_progress=None):
+                del on_progress
                 observed_paths.append(fh.name)
                 fh.write(b"partial")
                 raise RemoteServiceError("network drop")
@@ -651,8 +778,13 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             content_type = RecordingContent
 
-            async def download(self, _content: RecordingContent) -> None:
+            async def download(
+                self,
+                _content: RecordingContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
                 """No-op download."""
+                del on_progress
 
         mock_course_gw = MagicMock(spec=CourseGateway)
         mock_course_gw.populate_course_sections = AsyncMock(side_effect=lambda c: c)
@@ -679,7 +811,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         mock_rec_gw.fetch_recordings.assert_called_once_with("Algorithms")
         assert (
             CourseFileDiscovered(
-                course, Path("target_dir") / "Videos" / "rec.mp4", is_pending=True
+                course, Path("target_dir") / "Videos" / "rec.mp4", ContentSyncState.NEW
             )
             in events
         )
@@ -927,7 +1059,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 self.label = label
                 self.gate = gate
 
-            async def download(self, content: StringContent) -> None:
+            async def download(
+                self,
+                content: StringContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
+                del on_progress
                 if content.path.name == "fail.txt":
                     raise CredentialsExpiredError("401 expired")
                 if self.gate:
@@ -1040,8 +1177,13 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             def __init__(self) -> None:
                 self.downloaded: list[Path] = []
 
-            async def download(self, content: StringContent) -> None:
+            async def download(
+                self,
+                content: StringContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
                 """Record downloaded path."""
+                del on_progress
                 self.downloaded.append(content.path)
 
         mock_course_gw = MagicMock(spec=CourseGateway)
@@ -1112,8 +1254,13 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 self.downloaded: list[Path] = []
                 self.bugs_fatal = False
 
-            async def download(self, content: StringContent) -> None:
+            async def download(
+                self,
+                content: StringContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
                 """Raise configured error or record success."""
+                del on_progress
                 if content.path.name == "remote_err.html":
                     raise RemoteServiceError("upstream 502")
                 if content.path.name == "fs_err.html":
@@ -1191,8 +1338,13 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 """Handle auth.html only."""
                 return content.path.name == "auth.html"
 
-            async def download(self, _content: StringContent) -> None:
+            async def download(
+                self,
+                _content: StringContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
                 """Wait for sibling + discovery, then raise CredentialsExpiredError."""
+                del on_progress
                 await sibling_started.wait()
                 await discovery_started.wait()
                 raise CredentialsExpiredError("401 expired")
@@ -1206,8 +1358,13 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 self.cancelled = False
                 self.finished = False
 
-            async def download(self, _content: MoodleContent) -> None:
+            async def download(
+                self,
+                _content: MoodleContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
                 """Sleep until cancelled."""
+                del on_progress
                 sibling_started.set()
                 try:
                     await asyncio.sleep(5)
@@ -1300,8 +1457,13 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             content_type = StringContent
 
-            async def download(self, _content: StringContent) -> None:
+            async def download(
+                self,
+                _content: StringContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
                 """Signal start and sleep until cancelled."""
+                del on_progress
                 nonlocal worker_cancelled
                 worker_started.set()
                 try:
@@ -1429,13 +1591,19 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             missing_file = course_dir / "S1" / "missing.html"
             assert events[0] == CourseSyncStarted(c_lazy, course_dir)
             assert events[-1] == CourseSyncCompleted(c_lazy, None)
-            assert CourseFileDiscovered(c_lazy, synced_file, is_pending=False) in events
-            assert CourseFileDiscovered(c_lazy, missing_file, is_pending=True) in events
+            assert (
+                CourseFileDiscovered(c_lazy, synced_file, ContentSyncState.SYNCED)
+                in events
+            )
+            assert (
+                CourseFileDiscovered(c_lazy, missing_file, ContentSyncState.NEW)
+                in events
+            )
             assert CourseDiscoveryCompleted(c_lazy, 1, 1) in events
             assert TaskDownloadStarted(missing_file) in events
             assert TaskDownloadCompleted(missing_file) in events
             assert events.index(
-                CourseFileDiscovered(c_lazy, missing_file, is_pending=True)
+                CourseFileDiscovered(c_lazy, missing_file, ContentSyncState.NEW)
             ) < events.index(TaskDownloadStarted(missing_file))
             assert all(
                 not (
@@ -1446,7 +1614,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             with pytest.raises(TypeError, match="progress_listener"):
                 sync.sync_course(c_lazy, course_dir, progress_listener=None)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
-    def test_sync_events_contract_log_sync_event_and_ports_cleanup(self):
+    def test_sync_events_contract_log_sync_event_and_ports_cleanup(self):  # pylint: disable=too-many-locals
         """Verify SyncEvent immutability and log_sync_event log levels."""
         assert not hasattr(ports, "SyncProgressPort")
         assert hasattr(events_mod, "SyncEvent")
@@ -1462,7 +1630,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         file_discovered = events_mod.CourseFileDiscovered(
             course=course,
             path=Path("/tmp/Algebra/b.pdf"),  # noqa: S108
-            is_pending=True,
+            state=ContentSyncState.NEW,
         )
         discovery_done = events_mod.CourseDiscoveryCompleted(
             course=course,
@@ -1470,6 +1638,11 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             pending_count=1,
         )
         t_start = events_mod.TaskDownloadStarted(path=Path("/tmp/Algebra/b.pdf"))  # noqa: S108
+        t_prog = events_mod.TaskDownloadProgress(
+            path=Path("/tmp/Algebra/b.pdf"),  # noqa: S108
+            downloaded=512,
+            total=1024,
+        )
         t_done = events_mod.TaskDownloadCompleted(path=Path("/tmp/Algebra/b.pdf"))  # noqa: S108
         t_fail = events_mod.TaskDownloadFailed(
             path=Path("/tmp/Algebra/b.pdf"),  # noqa: S108
@@ -1487,6 +1660,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             file_discovered,
             discovery_done,
             t_start,
+            t_prog,
             t_done,
             t_fail,
             c_ok,
@@ -1501,6 +1675,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             events_mod.log_sync_event(file_discovered)
             events_mod.log_sync_event(discovery_done)
             events_mod.log_sync_event(t_start)
+            events_mod.log_sync_event(t_prog)
             events_mod.log_sync_event(t_done)
             events_mod.log_sync_event(c_ok)
             events_mod.log_sync_event(t_fail)
@@ -1584,16 +1759,21 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             target = Path(tmpdir) / "sub" / "note.html"
             part_path = target.with_name("note.html.part")
 
+            progress_calls: list[tuple[int, int | None]] = []
             with patch.object(
                 Path, "replace", autospec=True, wraps=Path.replace
             ) as mock_replace:
-                await dl.download(StringContent(target, 0, ["  <p>Hola</p>  "]))
+                await dl.download(
+                    StringContent(target, 0, ["  <p>Hola</p>  "]),
+                    on_progress=lambda d, t: progress_calls.append((d, t)),
+                )
 
             mock_replace.assert_called_once_with(
                 windows_long_path(part_path), windows_long_path(target)
             )
             assert target.read_text(encoding="utf-8") == "<p>Hola</p>"
             assert not part_path.exists()
+            assert not progress_calls
 
             with (
                 patch.object(Path, "replace", side_effect=OSError("disk error")),
@@ -1682,7 +1862,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             def __init__(self) -> None:
                 self.downloaded: list[Path] = []
 
-            async def download(self, content: MoodleContent) -> None:
+            async def download(
+                self,
+                content: MoodleContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
+                del on_progress
                 self.downloaded.append(content.path)
                 release_recordings.set()
 
@@ -1694,7 +1879,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             def __init__(self) -> None:
                 self.downloaded: list[Path] = []
 
-            async def download(self, content: RecordingContent) -> None:
+            async def download(
+                self,
+                content: RecordingContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
+                del on_progress
                 self.downloaded.append(content.path)
 
         course = Course(
@@ -1789,7 +1979,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         for p in discovered_paths:
             assert len(p.name) <= 100
             assert events.index(
-                CourseFileDiscovered(course, p, is_pending=True)
+                CourseFileDiscovered(course, p, ContentSyncState.NEW)
             ) < events.index(TaskDownloadStarted(p))
         assert Path("Course/Sec/Mod-[1]/Parte 1/guia.pdf") in discovered_paths
         assert Path("Course/Sec/Mod-[1]/parte 1/guia (2).pdf") in discovered_paths
@@ -1800,7 +1990,166 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert CourseDiscoveryCompleted(course, 0, 9) in events
         assert events[-1] == CourseSyncCompleted(course, None)
 
-    async def test_windows_long_paths_work_across_filesystem_and_downloaders(self):  # pylint: disable=too-many-locals
+    async def test_idat_sync_throttles_progress_and_blocks_late_callbacks(self):  # pylint: disable=too-many-locals,too-many-statements
+        """Throttle TaskDownloadProgress per task and ignore callbacks after finish."""
+        mod = CourseModule(
+            id=10,
+            name="M1",
+            contents=[
+                ModuleContent("outdated.pdf", "https://a/1", 200),
+                ModuleContent("new.pdf", "https://a/2", 200),
+            ],
+        )
+        course = Course(
+            id=7,
+            name="Progress",
+            sections=[CourseSection(id=1, name="S1", modules=[mod])],
+        )
+        captured_cbs: list[ports.ProgressCallback] = []
+        clock = [10.00]
+
+        class FakeProgressDownloader(Downloader[MoodleContent]):
+            """Emit rapid ticks and save callback for post-completion invocation."""
+
+            content_type = MoodleContent
+
+            async def download(
+                self,
+                content: MoodleContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
+                assert on_progress is not None
+                captured_cbs.append(on_progress)
+                if content.path.name == "outdated.pdf":
+                    for ts, done in (
+                        (10.00, 100),
+                        (10.05, 200),
+                        (10.10, 300),
+                        (10.16, 400),
+                    ):
+                        clock[0] = ts
+                        on_progress(done, 1000)
+                else:
+                    clock[0] = 20.00
+                    on_progress(50, None)
+                    raise RemoteServiceError("boom")
+
+        mock_strategy = MagicMock(spec=UrlContentStrategy)
+        mock_strategy.can_handle.return_value = True
+        mock_strategy.list_url_content = AsyncMock(
+            side_effect=lambda url, fn, ts: [MoodleContent(Path(fn), ts, url)]
+        )
+        mock_course_gw = MagicMock(spec=CourseGateway)
+        mock_rec_gw = MagicMock(spec=RecordingGateway)
+        mock_rec_gw.fetch_recordings = AsyncMock(return_value=[])
+        repo = CourseRepository(mock_course_gw, mock_rec_gw, [mock_strategy])
+
+        outdated_path = Path("Course/S1/M1-[10]/outdated.pdf")
+        new_path = Path("Course/S1/M1-[10]/new.pdf")
+        mock_fs = MagicMock(spec=FileSystemPort)
+        mock_fs.scan_mtimes.return_value = {outdated_path: 100}
+
+        dl = FakeProgressDownloader()
+        sync = IDATSync(
+            repo,
+            DownloadManager([dl], file_system=mock_fs),
+            TaskOrchestrator([[dl]]),
+            mock_fs,
+            recordings_folder_name="Grabaciones",
+            progress_interval=0.15,
+        )
+
+        with patch(
+            "idat_sync.application.sync_service.time.monotonic",
+            side_effect=lambda: clock[0],
+        ):
+            events = [ev async for ev in sync.sync_course(course, Path("Course"))]
+
+        # Fire stale callbacks after sync finished
+        clock[0] = 99.0
+        for cb in captured_cbs:
+            cb(999, 1000)
+
+        assert (
+            CourseFileDiscovered(course, outdated_path, ContentSyncState.OUTDATED)
+            in events
+        )
+        assert CourseFileDiscovered(course, new_path, ContentSyncState.NEW) in events
+
+        outdated_progress = [
+            e
+            for e in events
+            if isinstance(e, TaskDownloadProgress) and e.path == outdated_path
+        ]
+        assert outdated_progress == [
+            TaskDownloadProgress(outdated_path, 100, 1000),
+            TaskDownloadProgress(outdated_path, 400, 1000),
+        ]
+        assert (
+            events.index(TaskDownloadStarted(outdated_path))
+            < events.index(outdated_progress[0])
+            < events.index(outdated_progress[1])
+            < events.index(TaskDownloadCompleted(outdated_path))
+        )
+        assert TaskDownloadProgress(new_path, 50, None) in events
+        assert all(
+            not (isinstance(e, TaskDownloadProgress) and e.downloaded == 999)
+            for e in events
+        )
+
+        # Also verify stale callbacks after cancellation emit nothing
+        cancel_started = asyncio.Event()
+        cancel_cbs: list[ports.ProgressCallback] = []
+        cancel_mod = CourseModule(
+            id=11,
+            name="M1",
+            contents=[ModuleContent("slow.pdf", "https://a/3", 100)],
+        )
+        c_cancel = Course(
+            id=8,
+            name="CancelProgress",
+            sections=[CourseSection(id=1, name="S1", modules=[cancel_mod])],
+        )
+
+        class HangingProgressDownloader(Downloader[MoodleContent]):
+            """Hold download open until cancelled while saving callback."""
+
+            content_type = MoodleContent
+
+            async def download(
+                self,
+                content: MoodleContent,
+                on_progress: ports.ProgressCallback | None = None,
+            ) -> None:
+                del content
+                assert on_progress is not None
+                cancel_cbs.append(on_progress)
+                cancel_started.set()
+                await asyncio.Future()
+
+        hang_dl = HangingProgressDownloader()
+        cancel_sync = IDATSync(
+            repo,
+            DownloadManager([hang_dl], file_system=mock_fs),
+            TaskOrchestrator([[hang_dl]]),
+            mock_fs,
+            recordings_folder_name="Grabaciones",
+            progress_interval=0.0,
+        )
+
+        async def consume_cancel() -> None:
+            async for ev in cancel_sync.sync_course(c_cancel, Path("CancelCourse")):
+                assert not isinstance(ev, TaskDownloadProgress)
+
+        cancel_task = asyncio.create_task(consume_cancel())
+        await asyncio.wait_for(cancel_started.wait(), timeout=2.0)
+        cancel_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancel_task
+        assert len(cancel_cbs) == 1
+        cancel_cbs[0](123, 1000)
+
+    async def test_windows_long_paths_work_across_filesystem_and_downloaders(self):  # pylint: disable=too-many-locals,too-many-statements
         """Support >260 char Windows paths across filesystem and all downloaders."""
         tmpdir = tempfile.mkdtemp()
         try:
@@ -1822,7 +2171,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             mock_moodle = MagicMock()
 
-            async def write_moodle(_url: str, dest) -> None:
+            async def write_moodle(_url: str, dest, on_progress=None) -> None:
+                del on_progress
                 dest.write(b"moodle-bytes")
 
             mock_moodle.download_file = AsyncMock(side_effect=write_moodle)
@@ -1832,7 +2182,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             mock_sp = MagicMock()
 
-            async def write_sp(_file_obj, dest) -> None:
+            async def write_sp(_file_obj, dest, on_progress=None) -> None:
+                del on_progress
                 dest.write(b"sp-bytes")
 
             mock_sp.download_file = AsyncMock(side_effect=write_sp)
@@ -1893,22 +2244,35 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 ctx.__enter__.return_value.download.side_effect = fake_download
                 return ctx
 
+            progress_ticks: list[tuple[int, int | None]] = []
+
             with patch(
                 "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
                 side_effect=fake_ydl_factory,
             ):
-                task = asyncio.create_task(dl.download(rec))
+                task = asyncio.create_task(
+                    dl.download(
+                        rec,
+                        on_progress=lambda d, t: progress_ticks.append((d, t)),
+                    )
+                )
                 await asyncio.to_thread(started.wait, 2.0)
 
                 assert len(captured_hooks) == 1
-                captured_hooks[0]({"status": "downloading"})
+                captured_hooks[0]({"status": "downloading", "downloaded_bytes": 128})
+                await asyncio.sleep(0)
+                assert progress_ticks == [(128, None)]
 
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
                 with pytest.raises(DownloadCancelled):
-                    captured_hooks[0]({"status": "downloading"})
+                    captured_hooks[0](
+                        {"status": "downloading", "downloaded_bytes": 256}
+                    )
+                await asyncio.sleep(0)
+                assert progress_ticks == [(128, None)]
                 release.set()
 
     def test_safe_path_segment_and_suffixed_segment_ignore_fake_long_extensions(self):
@@ -2011,7 +2375,7 @@ class TestPathDisambiguator(unittest.TestCase):
 class TestContentPendingClassification(unittest.TestCase):
     """Tests for domain and DownloadManager pending-item classification."""
 
-    def test_is_content_pending_pure_in_memory(self):
+    def test_classify_content_pure_in_memory(self):
         """Classify missing, outdated, and synced Content items purely in memory."""
         p_missing = Path("semana1/missing.pdf")
         p_outdated = Path("semana1/outdated.pdf")
@@ -2026,26 +2390,43 @@ class TestContentPendingClassification(unittest.TestCase):
             p_zero_mtime: 50,
         }
 
-        assert is_content_pending(
-            MoodleContent(p_missing, 100, "http://a/1"), local_mtimes
+        assert (
+            classify_content(MoodleContent(p_missing, 100, "http://a/1"), local_mtimes)
+            is ContentSyncState.NEW
         )
-        assert is_content_pending(
-            MoodleContent(p_outdated, 150, "http://a/2"), local_mtimes
+        assert (
+            classify_content(MoodleContent(p_outdated, 150, "http://a/2"), local_mtimes)
+            is ContentSyncState.OUTDATED
         )
-        assert not is_content_pending(
-            MoodleContent(p_synced_equal, 100, "http://a/3"), local_mtimes
+        assert (
+            classify_content(
+                MoodleContent(p_synced_equal, 100, "http://a/3"), local_mtimes
+            )
+            is ContentSyncState.SYNCED
         )
-        assert not is_content_pending(
-            MoodleContent(p_synced_newer, 100, "http://a/4"), local_mtimes
+        assert (
+            classify_content(
+                MoodleContent(p_synced_newer, 100, "http://a/4"), local_mtimes
+            )
+            is ContentSyncState.SYNCED
         )
-        assert not is_content_pending(
-            StringContent(p_zero_mtime, 0, ["<p>Hi</p>"]), local_mtimes
+        assert (
+            classify_content(
+                StringContent(p_zero_mtime, 0, ["<p>Hi</p>"]), local_mtimes
+            )
+            is ContentSyncState.SYNCED
         )
+        assert ContentSyncState.SYNCED == "Synced"
+        assert ContentSyncState.NEW == "New"
+        assert ContentSyncState.OUTDATED == "Outdated"
+        assert not hasattr(domain_sync, "is_content_pending")
+        assert not hasattr(domain_mod, "is_content_pending")
 
-    def test_download_manager_is_pending_delegates_to_filesystem_port(self):
-        """Classify pending Content items including StringContent byte comparison."""
+    def test_download_manager_classify_content_delegates_to_filesystem_port(self):
+        """Classify Content items including StringContent byte comparison."""
         mock_fs = MagicMock(spec=FileSystemPort)
         manager = DownloadManager([], file_system=mock_fs)
+        assert not hasattr(DownloadManager, "is_pending")
 
         p_missing = Path("missing.pdf")
         p_outdated = Path("outdated.pdf")
@@ -2070,26 +2451,47 @@ class TestContentPendingClassification(unittest.TestCase):
         }
         mock_fs.read_bytes.side_effect = bytes_by_path.get
 
-        assert manager.is_pending(
-            MoodleContent(p_missing, 100, "http://a/1"), local_mtimes
+        assert (
+            manager.classify_content(
+                MoodleContent(p_missing, 100, "http://a/1"), local_mtimes
+            )
+            is ContentSyncState.NEW
         )
-        assert manager.is_pending(
-            MoodleContent(p_outdated, 150, "http://a/2"), local_mtimes
+        assert (
+            manager.classify_content(
+                MoodleContent(p_outdated, 150, "http://a/2"), local_mtimes
+            )
+            is ContentSyncState.OUTDATED
         )
-        assert not manager.is_pending(
-            MoodleContent(p_synced, 150, "http://a/3"), local_mtimes
+        assert (
+            manager.classify_content(
+                MoodleContent(p_synced, 150, "http://a/3"), local_mtimes
+            )
+            is ContentSyncState.SYNCED
         )
-        assert not manager.is_pending(
-            StringContent(p_same_html, 0, ["  <p>Same</p>  "]), local_mtimes
+        assert (
+            manager.classify_content(
+                StringContent(p_same_html, 0, ["  <p>Same</p>  "]), local_mtimes
+            )
+            is ContentSyncState.SYNCED
         )
-        assert manager.is_pending(
-            StringContent(p_changed_html, 0, ["<p>New</p>"]), local_mtimes
+        assert (
+            manager.classify_content(
+                StringContent(p_changed_html, 0, ["<p>New</p>"]), local_mtimes
+            )
+            is ContentSyncState.OUTDATED
         )
-        assert manager.is_pending(
-            StringContent(p_unreadable_html, 0, ["<p>New</p>"]), local_mtimes
+        assert (
+            manager.classify_content(
+                StringContent(p_unreadable_html, 0, ["<p>New</p>"]), local_mtimes
+            )
+            is ContentSyncState.OUTDATED
         )
-        assert not manager.is_pending(
-            StringContent(p_empty_html, 0, ["   "]), local_mtimes
+        assert (
+            manager.classify_content(
+                StringContent(p_empty_html, 0, ["   "]), local_mtimes
+            )
+            is ContentSyncState.SYNCED
         )
         mock_fs.scan_mtimes.assert_not_called()
         mock_fs.ensure_dir.assert_not_called()

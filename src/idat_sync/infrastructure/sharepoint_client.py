@@ -23,6 +23,7 @@ from office365.sharepoint.search.result import SearchResult
 from idat_sync.application.ports import (
     CookieData,
     CredentialsExpiredError,
+    ProgressCallback,
     RemoteServiceError,
 )
 from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
@@ -280,7 +281,24 @@ class SharepointClient:
         folders = await self._await_query(folder.get_folders().execute_query_async())
         return list(folders)
 
-    async def download_file(self, file: File, dest: BinaryIO) -> None:
+    async def download_file(
+        self,
+        file: File,
+        dest: BinaryIO,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         """Stream ``file`` contents into ``dest``."""
         file.set_property("Id", file.unique_id, persist_changes=False)
-        await self._await_query(file.download_session_async(dest, use_path=False))
+        progress = (
+            (lambda snap: on_progress(snap.done, snap.total))
+            if on_progress is not None
+            else None
+        )
+        await self._await_query(
+            file.download_session_async(
+                dest,
+                chunk_size=16 * 1024,
+                use_path=False,
+                progress=progress,
+            )
+        )

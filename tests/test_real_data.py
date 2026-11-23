@@ -31,7 +31,7 @@ from idat_sync.domain.path_utils import (
     safe_filename,
     safe_path_segment,
 )
-from idat_sync.domain.sync import is_content_pending
+from idat_sync.domain.sync import ContentSyncState, classify_content
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import MoodleDownloader
 from idat_sync.infrastructure.moodle_adapter import MoodleAdapter
@@ -425,7 +425,7 @@ class TestRealCourseContentsFixture(unittest.IsolatedAsyncioTestCase):
                 key = resolved_path.as_posix().casefold()
                 assert key not in unique_paths
                 unique_paths.add(key)
-                assert is_content_pending(item, {})
+                assert classify_content(item, {}) is ContentSyncState.NEW
                 all_remote_contents.append(item)
 
         assert len(all_remote_contents) > 0

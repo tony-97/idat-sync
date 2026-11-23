@@ -345,10 +345,87 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             headers=REQUEST_HEADER,
         )
         mock_response.raise_for_status.assert_called_once_with()
-        mock_response.aiter_bytes.assert_called_once_with(chunk_size=1024 * 256)
+        mock_response.aiter_bytes.assert_called_once_with(chunk_size=1024 * 16)
         assert dest.getvalue() == b"chunk1-chunk2"
         mock_sleep.assert_not_awaited()
         assert client.rate_limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
+
+    @patch(
+        "idat_sync.infrastructure.rate_limiter.asyncio.sleep",
+        new_callable=AsyncMock,
+    )
+    @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
+    async def test_download_file_reports_progress_for_numeric_and_missing_length(
+        self, mock_client_cls, mock_sleep
+    ):
+        """Report cumulative (downloaded, total) or (downloaded, None) on chunks."""
+
+        async def _aiter_bytes(chunk_size: int):  # noqa: ARG001  # pylint: disable=unused-argument
+            for chunk in (b"chunk1-", b"", b"chunk2"):
+                yield chunk
+
+        for headers, expected in (
+            ({"Content-Length": "13"}, [(7, 13), (13, 13)]),
+            ({}, [(7, None), (13, None)]),
+            ({"Content-Length": "invalid"}, [(7, None), (13, None)]),
+        ):
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.headers = headers
+            mock_response.aiter_bytes = MagicMock(side_effect=_aiter_bytes)
+            stream_cm = MagicMock()
+            stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
+            stream_cm.__aexit__ = AsyncMock(return_value=None)
+            _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+            client = self._make_client(delay=0.0)
+            ticks: list[tuple[int, int | None]] = []
+            dest = io.BytesIO()
+
+            await client.download_file(
+                "https://aulavirtual.idat.edu.pe/pluginfile.php/1/a.pdf",
+                dest,
+                on_progress=lambda d, t, out=ticks: out.append((d, t)),
+            )
+            assert dest.getvalue() == b"chunk1-chunk2"
+            assert ticks == expected
+        mock_sleep.assert_not_awaited()
+
+    @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
+    async def test_download_file_emits_intermediate_progress_for_sub_256kb_stream(
+        self, mock_client_cls
+    ):
+        """Emit intermediate progress ticks before EOF on files smaller than 256 KB."""
+        total_size = 180 * 1024
+
+        class _ChunkedStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for _ in range(18):
+                    yield b"x" * (10 * 1024)
+
+            async def aclose(self) -> None:
+                pass
+
+        real_response = httpx.Response(
+            200,
+            headers={"Content-Length": str(total_size)},
+            stream=_ChunkedStream(),
+            request=httpx.Request("GET", "https://aulavirtual.idat.edu.pe/doc.pdf"),
+        )
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=real_response)
+        stream_cm.__aexit__ = AsyncMock(return_value=None)
+        _mock_async_client(mock_client_cls, stream_cm=stream_cm)
+
+        ticks: list[tuple[int, int | None]] = []
+        dest = io.BytesIO()
+        await self._make_client(delay=0.0).download_file(
+            "https://aulavirtual.idat.edu.pe/doc.pdf",
+            dest,
+            on_progress=lambda d, t: ticks.append((d, t)),
+        )
+        assert len(dest.getvalue()) == total_size
+        intermediate = [d for d, t in ticks if 0 < d < total_size == t]
+        assert len(intermediate) >= 5
 
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
     async def test_download_file_exits_stream_before_limiter_aexit(

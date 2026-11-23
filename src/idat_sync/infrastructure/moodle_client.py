@@ -5,7 +5,11 @@ from typing import Any, BinaryIO, Self
 
 import httpx
 
-from idat_sync.application.ports import CredentialsExpiredError, RemoteServiceError
+from idat_sync.application.ports import (
+    CredentialsExpiredError,
+    ProgressCallback,
+    RemoteServiceError,
+)
 from idat_sync.infrastructure.rate_limiter import AsyncRateLimiter
 
 REQUEST_HEADER = {
@@ -171,7 +175,20 @@ class MoodleClient:
             return result
         return []
 
-    async def download_file(self, url: str, dest: BinaryIO) -> None:
+    @staticmethod
+    def _parse_content_length(headers: Any) -> int | None:  # noqa: ANN401
+        raw_len = headers.get("Content-Length")
+        if isinstance(raw_len, str) and raw_len.strip().isdigit():
+            val = int(raw_len)
+            return val if val > 0 else None
+        return None
+
+    async def download_file(
+        self,
+        url: str,
+        dest: BinaryIO,
+        on_progress: ProgressCallback | None = None,
+    ) -> None:
         """Stream an authenticated Moodle file into dest under the rate limiter."""
         target_url = httpx.URL(url).copy_merge_params(
             {"wstoken": self.token, "token": self.token}
@@ -198,20 +215,26 @@ class MoodleClient:
                     try:
                         response.raise_for_status()
                     except httpx.HTTPStatusError as exc:
-                        raw_url = (
-                            exc.request.url
-                            if isinstance(exc.request.url, httpx.URL)
-                            else target_url
+                        err_url = (
+                            (
+                                exc.request.url
+                                if isinstance(exc.request.url, httpx.URL)
+                                else target_url
+                            )
+                            .copy_remove_param("wstoken")
+                            .copy_remove_param("token")
                         )
-                        err_url = raw_url.copy_remove_param(
-                            "wstoken"
-                        ).copy_remove_param("token")
                         raise RemoteServiceError(
                             f"HTTP {response.status_code} for url '{err_url}'"
                         ) from None
-                    async for part in response.aiter_bytes(chunk_size=1024 * 256):
+                    total = self._parse_content_length(response.headers)
+                    downloaded = 0
+                    async for part in response.aiter_bytes(chunk_size=1024 * 16):
                         if part:
                             dest.write(part)
+                            downloaded += len(part)
+                            if on_progress is not None:
+                                on_progress(downloaded, total)
             except httpx.RequestError:
                 raise RemoteServiceError(
                     f"Network error downloading '{safe_url}'"

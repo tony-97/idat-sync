@@ -30,7 +30,7 @@ def _folder_dialog_type() -> Any:  # noqa: ANN401
 
 
 def load_ui_html() -> str:
-    """Load the bundled single-file static Astro HTML UI asset."""
+    """Load the bundled single-file SolidJS HTML UI asset."""
     return (
         importlib.resources.files("idat_sync.ui")
         .joinpath("index.html")
@@ -109,6 +109,11 @@ class _JsApi:
         if frame := self._sync_frame():
             frame.toggle_course(int(course_id))
 
+    def toggle_term(self, term: str) -> None:
+        """Tri-state toggle all courses in ``term`` on SyncFrame."""
+        if frame := self._sync_frame():
+            frame.toggle_term(term)
+
     def logout(self) -> None:
         """Close SyncFrame resources and return to LoginFrame."""
         if frame := self._sync_frame():
@@ -118,6 +123,21 @@ class _JsApi:
         """Start course synchronization on SyncFrame."""
         if frame := self._sync_frame():
             self._schedule(frame.do_sync())
+
+    def sync_course(self, course_id: int | str) -> None:
+        """Start single-course synchronization on SyncFrame."""
+        if frame := self._sync_frame():
+            self._schedule(frame.sync_course(int(course_id)))
+
+    def cancel_sync(self) -> None:
+        """Cancel the active synchronization task on SyncFrame."""
+        if frame := self._sync_frame():
+            self._call_on_loop(frame.cancel_sync)
+
+    def retry_load(self) -> None:
+        """Retry startup course loading on SyncFrame."""
+        if frame := self._sync_frame():
+            self._schedule(frame.retry_load())
 
 
 class MainApp:
@@ -151,6 +171,13 @@ class MainApp:
             return
         payload = json.dumps(self.get_state())
         self.window.evaluate_js(f"window.__onPythonState({payload})")
+
+    def push_progress(self, payload: dict[str, Any]) -> None:
+        """Push a targeted per-file progress update to any attached WebView window."""
+        if self.window is None:
+            return
+        encoded = json.dumps(payload)
+        self.window.evaluate_js(f"window.__onFileProgress({encoded})")
 
     def pick_folder(self) -> str:
         """Open a desktop folder dialog or return the Android Downloads fallback."""
@@ -223,8 +250,8 @@ class MainApp:
                     "IDAT Sync",
                     html=load_ui_html(),
                     js_api=_JsApi(self),
-                    width=760,
-                    height=560,
+                    width=1100,
+                    height=720,
                 )
             events = getattr(self.window, "events", None)
             if events is not None and hasattr(events, "closing"):

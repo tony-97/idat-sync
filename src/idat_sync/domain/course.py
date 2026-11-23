@@ -50,17 +50,40 @@ class Course:
     category: str = ""
 
 
-def _parse_course_term(course: Course) -> tuple[int, int, str] | None:
-    """Extract a sortable (year, roman_term, suffix) key from category or name."""
+def _match_course_term(course: Course) -> re.Match[str] | None:
+    """Match the academic term token from ``course.category`` or ``course.name``."""
     source = course.category.strip()
     if not source:
         parts = course.name.split(None, 1)
         source = parts[0] if parts else ""
-    match = _TERM_PATTERN.search(source)
+    return _TERM_PATTERN.search(source)
+
+
+def _parse_course_term(course: Course) -> tuple[int, int, str] | None:
+    """Extract a sortable (year, roman_term, suffix) key from category or name."""
+    match = _match_course_term(course)
     if not match:
         return None
     year_str, roman, suffix = match.groups()
     return (int(year_str), _ROMAN_TERMS[roman], suffix)
+
+
+def course_term_sort_key(course: Course) -> tuple[int, int, int, str]:
+    """Return a sortable ``(has_term, year, roman_rank, suffix)`` key."""
+    parsed = _parse_course_term(course)
+    if parsed is None:
+        return (0, 0, 0, "")
+    year, roman, suffix = parsed
+    return (1, year, roman, suffix)
+
+
+def get_course_term(course: Course) -> str:
+    """Return the normalized ``<YEAR>-<ROMAN><SUFFIX>`` term label or ``"Other"``."""
+    match = _match_course_term(course)
+    if not match:
+        return "Other"
+    year_str, roman, suffix = match.groups()
+    return f"{year_str}-{roman}{suffix}"
 
 
 def get_in_progress_course_ids(courses: Sequence[Course]) -> set[int]:
@@ -81,5 +104,7 @@ __all__ = [
     "CourseModule",
     "CourseSection",
     "ModuleContent",
+    "course_term_sort_key",
+    "get_course_term",
     "get_in_progress_course_ids",
 ]

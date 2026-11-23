@@ -29,6 +29,7 @@ from idat_sync.application.events import (
     CourseSyncStarted,
     TaskDownloadCompleted,
     TaskDownloadFailed,
+    TaskDownloadProgress,
     TaskDownloadStarted,
 )
 from idat_sync.application.ports import (
@@ -45,6 +46,7 @@ from idat_sync.application.ports import (
 from idat_sync.application.sync_service import IDATSync
 from idat_sync.config import WEBVIEW_USER_AGENT, SyncConfig
 from idat_sync.domain.course import Course, CourseSection
+from idat_sync.domain.sync import ContentSyncState
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.ui.app import AppFrame, MainApp
 from idat_sync.ui.course_tree import CourseTree, RowStatus
@@ -802,6 +804,7 @@ class _SyncStubMaster:
         self.window = window
         self.switched_to_login = 0
         self.push_count = 0
+        self.progress_payloads: list[dict[str, object]] = []
 
     def switch_to_login(self) -> None:
         """Count transitions to LoginFrame."""
@@ -810,6 +813,10 @@ class _SyncStubMaster:
     def push_state(self) -> None:
         """Count state pushes."""
         self.push_count += 1
+
+    def push_progress(self, payload: dict[str, object]) -> None:
+        """Record targeted file progress payloads."""
+        self.progress_payloads.append(payload)
 
     def pick_folder(self) -> str:
         """Simulate a cancelled desktop dialog."""
@@ -873,12 +880,16 @@ class TestSyncFrame(unittest.TestCase):
                     err_p = c_dir / "S1" / "broken.pdf"
                     yield CourseSyncStarted(current_course, c_dir)
                     yield CourseFileDiscovered(
-                        current_course, synced_p, is_pending=False
+                        current_course, synced_p, ContentSyncState.SYNCED
                     )
-                    yield CourseFileDiscovered(current_course, ok_p, is_pending=True)
+                    yield CourseFileDiscovered(
+                        current_course, ok_p, ContentSyncState.NEW
+                    )
                     yield TaskDownloadStarted(ok_p)
                     yield TaskDownloadCompleted(ok_p)
-                    yield CourseFileDiscovered(current_course, err_p, is_pending=True)
+                    yield CourseFileDiscovered(
+                        current_course, err_p, ContentSyncState.OUTDATED
+                    )
                     yield CourseDiscoveryCompleted(current_course, 1, 2)
                     yield TaskDownloadStarted(err_p)
                     yield TaskDownloadFailed(err_p, FileSystemError("disk full"))
@@ -930,7 +941,8 @@ class TestSyncFrame(unittest.TestCase):
                     }
 
                     frame.clear_selection()
-                    assert frame.can_sync is False
+                    assert frame.can_sync is True
+                    assert frame.selected_course_ids == set()
                     frame.select_all()
                     assert frame.can_sync is True
                     assert all(r["checked"] for r in frame.course_tree.to_dict())
@@ -939,9 +951,9 @@ class TestSyncFrame(unittest.TestCase):
                     assert rows[0]["checked"] is True
                     assert rows[1]["checked"] is False
                     frame.toggle_course(current_course.id)
-                    assert frame.can_sync is False
+                    assert current_course.id not in frame.selected_course_ids
                     frame.toggle_course(current_course.id)
-                    assert frame.can_sync is True
+                    assert current_course.id in frame.selected_course_ids
 
                     async def fail_sync_courses(
                         _root_folder, _courses, *, refresh=False
@@ -1124,7 +1136,7 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_main_app_initial_frame_switching_and_state_push(self):
+    def test_main_app_initial_frame_switching_and_state_push(self):  # pylint: disable=too-many-statements
         """Select initial frame from credentials, switch views, and push JSON state."""
         with tempfile.TemporaryDirectory() as tmpdir:
             creds_path = Path(tmpdir) / "credentials.json"
@@ -1145,6 +1157,28 @@ class TestSyncFrame(unittest.TestCase):
                     js_call.removeprefix("window.__onPythonState(").removesuffix(")")
                 )
                 assert payload["view"] == "login"
+
+                mock_window.evaluate_js.reset_mock()
+                prog_payload = {
+                    "id": "file:1:a.pdf",
+                    "downloaded": 512,
+                    "total": 1024,
+                    "percent": 50,
+                    "speed_bps": 1024.0,
+                }
+                app.push_progress(prog_payload)
+                mock_window.evaluate_js.assert_called_once()
+                prog_call = mock_window.evaluate_js.call_args.args[0]
+                assert prog_call.startswith("window.__onFileProgress(")
+                assert prog_call.endswith(")")
+                assert (
+                    json.loads(
+                        prog_call.removeprefix("window.__onFileProgress(").removesuffix(
+                            ")"
+                        )
+                    )
+                    == prog_payload
+                )
 
                 app.auth.credential_store.save(
                     {
@@ -1253,7 +1287,7 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_main_app_run_starts_webview_with_bundled_html_and_ua(self):
+    def test_main_app_run_starts_webview_with_bundled_html_and_ua(self):  # pylint: disable=too-many-locals
         """Load bundled index.html via importlib.resources and start webview."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = SyncConfig(session_file=Path(tmpdir) / "missing_credentials.json")
@@ -1291,10 +1325,27 @@ class TestSyncFrame(unittest.TestCase):
             fake_webview.create_window.assert_called_once()
             create_kwargs = fake_webview.create_window.call_args.kwargs
             assert create_kwargs["html"] == expected_html
+            assert create_kwargs["width"] == 1100
+            assert create_kwargs["height"] == 720
             js_api = create_kwargs["js_api"]
             assert js_api.get_state()["view"] == "login"
             assert not hasattr(js_api, "set_folder_path")
+            for method_name in (
+                "toggle_term",
+                "sync_course",
+                "cancel_sync",
+                "retry_load",
+            ):
+                assert callable(getattr(js_api, method_name))
             fake_webview.start.assert_called_once_with(user_agent=WEBVIEW_USER_AGENT)
+
+    def test_bundled_html_is_non_empty_and_has_no_external_cdn_links(self):
+        """Assert bundled index.html is self-contained without Google Fonts CDN."""
+        html = app_module.load_ui_html()
+        assert html.strip()
+        assert "fonts.googleapis.com" not in html
+        assert "__onPythonState" in html
+        assert "__onFileProgress" in html
 
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Cancel active load_idat_sync and do_sync tasks on SyncFrame.aclose."""
@@ -1395,6 +1446,7 @@ class TestSyncFrame(unittest.TestCase):
 
                 await frame.do_sync()
                 assert frame.status == "Sync completed with errors."
+                assert frame.error == "boom"
 
                 async def ok_sync_courses(_path, _selected, *, refresh=False):
                     _ = refresh
@@ -1403,6 +1455,185 @@ class TestSyncFrame(unittest.TestCase):
                 mock_service.sync_courses = ok_sync_courses
                 await frame.do_sync()
                 assert frame.status == "Sync done."
+                assert not frame.error
+
+        asyncio.run(exercise())
+
+    def test_sync_frame_cancel_sync_ignores_load_idat_sync(self):
+        """Do not cancel load_idat_sync when cancel_sync is invoked during loading."""
+        creds: Credentials = {
+            "token": "tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+                loading = asyncio.Event()
+                release = asyncio.Event()
+                c1 = Course(id=1, name="Course 1")
+
+                mock_service = MagicMock(spec=IDATSync)
+                mock_service.aclose = AsyncMock()
+
+                async def slow_list_courses() -> list[Course]:
+                    loading.set()
+                    await release.wait()
+                    return [c1]
+
+                mock_service.list_courses = AsyncMock(side_effect=slow_list_courses)
+
+                with patch(
+                    "idat_sync.ui.sync_frame.create_sync_service",
+                    new_callable=AsyncMock,
+                    return_value=mock_service,
+                ):
+                    load_task = asyncio.create_task(frame.load_idat_sync(creds))
+                    await asyncio.wait_for(loading.wait(), timeout=2.0)
+                    frame.cancel_sync()
+                    release.set()
+                    await load_task
+
+                assert frame.courses_loaded is True
+                assert frame.idat_sync is mock_service
+                assert not frame.is_syncing
+                mock_service.aclose.assert_not_awaited()
+
+        asyncio.run(exercise())
+
+    def test_sync_frame_term_toggle_single_course_progress_cancel_and_retry(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
+        """Verify toggle_term, sync_course, fallback, push_progress, cancel, retry."""
+        creds: Credentials = {
+            "token": "tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+        c_old_a = Course(id=1, name="A", category="I.01.2025-IIA")
+        c_old_b = Course(id=2, name="B", category="I.03.2025-IIA")
+        c_cur = Course(id=3, name="C", category="IV.01.2026-III")
+
+        async def exercise() -> None:  # noqa: PLR0915  # pylint: disable=too-many-locals,too-many-statements
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+
+                mock_service = MagicMock(spec=IDATSync)
+                mock_service.aclose = AsyncMock()
+                mock_service.list_courses = AsyncMock(
+                    return_value=[c_old_a, c_old_b, c_cur]
+                )
+
+                # 1. Startup error -> retry_load recovers
+                attempts = 0
+
+                async def flaky_factory(_c, _cfg):
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts == 1:
+                        raise CredentialsExpiredError("expired token")
+                    return mock_service
+
+                with patch(
+                    "idat_sync.ui.sync_frame.create_sync_service",
+                    side_effect=flaky_factory,
+                ):
+                    await frame.load_idat_sync(creds)
+                    state = frame.to_dict()
+                    assert state["courses_loaded"] is False
+                    assert state["auth_expired"] is True
+                    assert "expired token" in state["error"]
+
+                    await frame.retry_load()
+                    state = frame.to_dict()
+                    assert state["courses_loaded"] is True
+                    assert state["auth_expired"] is False
+                    assert not state["error"]
+                    assert [c["id"] for c in state["courses"]] == [3, 1, 2]
+                    assert state["courses"][0]["term"] == "2026-III"
+                    assert state["courses"][1]["term"] == "2025-IIA"
+                    assert state["courses"][2]["term"] == "2025-IIA"
+
+                # 2. toggle_term tri-state
+                frame.toggle_term("2025-IIA")
+                assert {1, 2}.issubset(frame.selected_course_ids)
+                frame.toggle_term("2025-IIA")
+                assert not ({1, 2} & frame.selected_course_ids)
+
+                # 3. do_sync fallback when selection is empty -> in_progress_ids
+                frame.set_folder_path(tmpdir)
+                frame.clear_selection()
+                synced_course_batches: list[list[int]] = []
+
+                async def prog_sync_courses(_root, courses, *, refresh=False):
+                    _ = refresh
+                    synced_course_batches.append([c.id for c in courses])
+                    c = courses[0]
+                    c_dir = Path(tmpdir) / c.name
+                    p1 = c_dir / "S1" / "f1.pdf"
+                    yield CourseSyncStarted(c, c_dir)
+                    yield CourseFileDiscovered(c, p1, ContentSyncState.NEW)
+                    yield CourseDiscoveryCompleted(c, 0, 1)
+                    yield TaskDownloadStarted(p1)
+                    push_before = master.push_count
+                    yield TaskDownloadProgress(p1, 500, 1000)
+                    yield TaskDownloadProgress(p1, 1000, 1000)
+                    assert master.push_count == push_before
+                    yield TaskDownloadCompleted(p1)
+                    yield CourseSyncCompleted(c, None)
+
+                mock_service.sync_courses.side_effect = prog_sync_courses
+                await frame.do_sync()
+                assert synced_course_batches == [[3]]
+                assert [p["percent"] for p in master.progress_payloads] == [50, 99]
+
+                # 4. sync_course runs single course even after prior completion
+                await frame.sync_course(1)
+                assert synced_course_batches == [[3], [1]]
+
+                # 5. cancel_sync cancels active sync without closing idat_sync
+                dl_started = asyncio.Event()
+
+                async def cancellable_sync(_root, courses, *, refresh=False):
+                    _ = refresh
+                    c = courses[0]
+                    c_dir = Path(tmpdir) / c.name
+                    p_done = c_dir / "S1" / "done.pdf"
+                    p_dl = c_dir / "S1" / "active.pdf"
+                    p_wait = c_dir / "S1" / "wait.pdf"
+                    yield CourseSyncStarted(c, c_dir)
+                    yield CourseFileDiscovered(c, p_done, ContentSyncState.NEW)
+                    yield CourseFileDiscovered(c, p_dl, ContentSyncState.OUTDATED)
+                    yield CourseFileDiscovered(c, p_wait, ContentSyncState.NEW)
+                    yield CourseDiscoveryCompleted(c, 0, 3)
+                    yield TaskDownloadStarted(p_done)
+                    yield TaskDownloadCompleted(p_done)
+                    yield TaskDownloadStarted(p_dl)
+                    yield TaskDownloadProgress(p_dl, 250, 1000)
+                    dl_started.set()
+                    await asyncio.Future()
+
+                mock_service.sync_courses.side_effect = cancellable_sync
+                sync_task = asyncio.create_task(frame.sync_course(3))
+                await asyncio.wait_for(dl_started.wait(), timeout=2.0)
+                frame.cancel_sync()
+                await sync_task
+
+                assert frame.idat_sync is mock_service
+                mock_service.aclose.assert_not_awaited()
+                assert frame.is_syncing is False
+                assert frame.status == "Sync cancelled."
+                c3_row = frame.to_dict()["courses"][0]
+                statuses = {
+                    f["name"]: (f["status"], f["percent"])
+                    for f in c3_row["children"][0]["children"]
+                }
+                assert statuses == {
+                    "done.pdf": ("Completed", 100),
+                    "active.pdf": ("Outdated", 0),
+                    "wait.pdf": ("New", 0),
+                }
 
         asyncio.run(exercise())
 
@@ -1500,7 +1731,7 @@ class TestCourseTree(unittest.TestCase):
             "...",
         )
 
-        ct.add_file(1, synced_p, is_pending=False)
+        ct.add_file(1, synced_p, ContentSyncState.SYNCED)
         row = ct.to_dict()[0]
         assert row["open"] is True
         assert (row["status"], row["progress"]) == (
@@ -1508,7 +1739,7 @@ class TestCourseTree(unittest.TestCase):
             "1/1+",
         )
 
-        ct.add_file(1, pending_p, is_pending=True)
+        ct.add_file(1, pending_p, ContentSyncState.NEW)
         assert (ct.to_dict()[0]["status"], ct.to_dict()[0]["progress"]) == (
             RowStatus.FETCHING_AND_SYNCING,
             "1/2+",
@@ -1521,7 +1752,7 @@ class TestCourseTree(unittest.TestCase):
             "2/2+",
         )
 
-        ct.add_file(1, late_p, is_pending=True)
+        ct.add_file(1, late_p, ContentSyncState.OUTDATED)
         row = ct.to_dict()[0]
         assert (row["status"], row["progress"]) == (
             RowStatus.FETCHING_AND_SYNCING,
@@ -1578,10 +1809,10 @@ class TestCourseTree(unittest.TestCase):
         synced_p = c_dir / "S1" / "done.pdf"
         pending_p = c_dir / "S1" / "todo.pdf"
         ct.start_course(2, c_dir)
-        ct.add_file(2, synced_p, is_pending=False)
-        ct.add_file(2, pending_p, is_pending=True)
+        ct.add_file(2, synced_p, ContentSyncState.SYNCED)
+        ct.add_file(2, pending_p, ContentSyncState.NEW)
         s1 = ct.to_dict()[0]["children"][0]
-        assert (s1["status"], s1["progress"]) == (RowStatus.PENDING, "50%")
+        assert (s1["status"], s1["progress"]) == (RowStatus.NEW, "50%")
 
         ct.set_file_status(pending_p, RowStatus.DOWNLOADING)
         assert ct.to_dict()[0]["children"][0]["status"] == RowStatus.DOWNLOADING
@@ -1598,9 +1829,9 @@ class TestCourseTree(unittest.TestCase):
             selected={1, 2},
         )
         ct.start_course(1, Path("Course One"))
-        ct.add_file(1, Path("Course One/S1/Sub/a.pdf"), is_pending=False)
+        ct.add_file(1, Path("Course One/S1/Sub/a.pdf"), ContentSyncState.SYNCED)
         ct.start_course(2, Path("Course Two"))
-        ct.add_file(2, Path("Course Two/S1/b.pdf"), is_pending=False)
+        ct.add_file(2, Path("Course Two/S1/b.pdf"), ContentSyncState.SYNCED)
 
         rows = ct.to_dict()
         c1_s1 = rows[0]["children"][0]
@@ -1617,12 +1848,12 @@ class TestCourseTree(unittest.TestCase):
         ct.set_courses([Course(id=1, name="Course One")], selected={1})
         c_dir = Path("Course One")
         ct.start_course(1, c_dir)
-        ct.add_file(1, c_dir / "old.pdf", is_pending=False)
+        ct.add_file(1, c_dir / "old.pdf", ContentSyncState.SYNCED)
         ct.finish_discovery(1)
         assert ct.to_dict()[0]["progress"] == "100%"
 
         ct.start_course(1, c_dir)
-        ct.add_file(1, c_dir / "new.pdf", is_pending=True)
+        ct.add_file(1, c_dir / "new.pdf", ContentSyncState.NEW)
         ct.finish_discovery(1)
         row = ct.to_dict()[0]
         assert row["progress"] == "0%"
@@ -1637,6 +1868,84 @@ class TestCourseTree(unittest.TestCase):
         row = ct.to_dict()[0]
         assert row["status"] == RowStatus.FAILED
         assert row["progress"] == "..."
+
+    def test_course_tree_terms_ordering(self):
+        """Order courses newest-term-first with in_progress and term metadata."""
+        ct = CourseTree()
+        c_old = Course(id=1, name="Old", category="I.01.2025-IIA")
+        c_mid = Course(id=2, name="Mid", category="II.01.2025-III")
+        c_cur = Course(id=3, name="Cur", category="IV.01.2026-III")
+        ordered = ct.set_courses([c_old, c_mid, c_cur], selected={3}, in_progress={3})
+        assert [c.id for c in ordered] == [3, 2, 1]
+        rows = ct.to_dict()
+        assert [(r["id"], r["term"], r["in_progress"]) for r in rows] == [
+            (3, "2026-III", True),
+            (2, "2025-III", False),
+            (1, "2025-IIA", False),
+        ]
+
+    def test_course_tree_progress_speed_cancel_and_activity(self):  # noqa: PLR0915  # pylint: disable=too-many-locals,too-many-statements
+        """Track stable file IDs, speed_bps, cancel_sync, and activity projection."""
+        ct = CourseTree()
+        c_cur = Course(id=3, name="Cur", category="IV.01.2026-III")
+        ct.set_courses([c_cur], selected={3}, in_progress={3})
+
+        c_dir = Path("Cur")
+        p_sync = c_dir / "S1" / "s.pdf"
+        p_new = c_dir / "S1" / "n.pdf"
+        p_out = c_dir / "S1" / "o.pdf"
+        p_fail = c_dir / "S1" / "f.pdf"
+        ct.start_course(3, c_dir)
+        ct.add_file(3, p_sync, ContentSyncState.SYNCED)
+        ct.add_file(3, p_new, ContentSyncState.NEW)
+        ct.add_file(3, p_out, ContentSyncState.OUTDATED)
+        ct.add_file(3, p_fail, ContentSyncState.NEW)
+
+        ct.set_file_status(p_new, RowStatus.DOWNLOADING)
+        clock = [100.0]
+        with patch(
+            "idat_sync.ui.course_tree.time.monotonic", side_effect=lambda: clock[0]
+        ):
+            p1 = ct.set_file_progress(p_new, 200, 1000)
+            clock[0] = 101.0
+            p2 = ct.set_file_progress(p_new, 1000, 1000)
+            clock[0] = 102.0
+            ct.set_file_status(p_out, RowStatus.DOWNLOADING)
+            p3 = ct.set_file_progress(p_out, 256, None)
+
+        assert p1 is not None
+        assert p2 is not None
+        assert p3 is not None
+        assert p1["id"] == "file:3:S1/n.pdf"
+        assert p1["percent"] == 20
+        assert p2["percent"] == 99
+        assert p2["speed_bps"] is not None
+        assert p2["speed_bps"] > 0
+        assert p3["percent"] is None
+
+        ct.set_file_status(p_new, RowStatus.COMPLETED)
+        ct.set_file_status(p_fail, RowStatus.FAILED, error="disk full")
+
+        activity = ct.activity_to_dict()
+        assert activity["total_pending"] == 3
+        assert activity["completed"] == 1
+        assert activity["skipped"] == 1
+        assert activity["failed_count"] == 1
+        assert len(activity["downloading"]) == 1
+        assert len(activity["finished"]) == 1
+        assert activity["failed"][0]["error"] == "disk full"
+
+        ct.cancel_sync()
+        files_by_name = {
+            f["name"]: f for f in ct.to_dict()[0]["children"][0]["children"]
+        }
+        assert files_by_name["s.pdf"]["status"] == "Synced"
+        assert files_by_name["n.pdf"]["status"] == "Completed"
+        assert files_by_name["n.pdf"]["percent"] == 100
+        assert files_by_name["o.pdf"]["status"] == "Outdated"
+        assert not files_by_name["o.pdf"]["percent"]
+        assert files_by_name["f.pdf"]["status"] == "Failed"
+        assert files_by_name["f.pdf"]["error"] == "disk full"
 
 
 if __name__ == "__main__":

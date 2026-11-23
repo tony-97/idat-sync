@@ -691,11 +691,45 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
             "Id", "uid-123", persist_changes=False
         )
         mock_guest_file.download_session_async.assert_awaited_once_with(
-            dest, use_path=False
+            dest, chunk_size=16 * 1024, use_path=False, progress=None
         )
         assert mock_sleep.call_count == 6
         for call in mock_sleep.call_args_list:
             assert 0.0 < call.args[0] <= 1.75
+
+    @patch("idat_sync.infrastructure.sharepoint_client.ClientContext")
+    async def test_sharepoint_client_download_file_translates_progress(
+        self, mock_ctx_cls
+    ):
+        """Translate SDK Progress(done, total) snapshots into on_progress callback."""
+        mock_ctx_cls.return_value = _make_sharepoint_ctx(
+            "https://contoso-my.sharepoint.com/personal/user"
+        )
+        client = await SharepointClient.create(
+            cookies=[],
+            sharepoint_personal_host="contoso-my.sharepoint.com",
+            academic_site_url="https://contoso.sharepoint.com/sites/ACAD",
+            rate_limiter=AsyncRateLimiter(0.0),
+        )
+        mock_guest_file = MagicMock(unique_id="uid-123")
+        ticks: list[tuple[int, int | None]] = []
+
+        async def _fake_download_session(_dest, *, chunk_size, use_path, progress=None):
+            assert chunk_size == 16 * 1024
+            assert use_path is False
+            assert progress is not None
+            progress(MagicMock(done=256, total=1024))
+            progress(MagicMock(done=1024, total=1024))
+
+        mock_guest_file.download_session_async = AsyncMock(
+            side_effect=_fake_download_session
+        )
+        await client.download_file(
+            mock_guest_file,
+            io.BytesIO(),
+            on_progress=lambda d, t: ticks.append((d, t)),
+        )
+        assert ticks == [(256, 1024), (1024, 1024)]
 
     @patch(
         "idat_sync.infrastructure.rate_limiter.asyncio.sleep",

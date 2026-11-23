@@ -5,7 +5,7 @@ from pathlib import Path
 
 from idat_sync.application.ports import Downloader, DownloadTask, FileSystemPort
 from idat_sync.domain.content import Content, StringContent
-from idat_sync.domain.sync import is_content_pending
+from idat_sync.domain.sync import ContentSyncState, classify_content
 
 
 class DownloadManager:
@@ -27,16 +27,21 @@ class DownloadManager:
                 return task
         return None
 
-    def is_pending(self, content: Content, local_mtimes: Mapping[Path, int]) -> bool:
-        """Return True when ``content`` must be downloaded or rewritten."""
-        if is_content_pending(content, local_mtimes):
-            return True
-        return (
+    def classify_content(
+        self, content: Content, local_mtimes: Mapping[Path, int]
+    ) -> ContentSyncState:
+        """Classify ``content`` as NEW, OUTDATED, or SYNCED against local state."""
+        state = classify_content(content, local_mtimes)
+        if state is not ContentSyncState.SYNCED:
+            return state
+        if (
             isinstance(content, StringContent)
             and not content.last_modified
             and (rendered := content.rendered_bytes()) is not None
             and self.file_system.read_bytes(content.path) != rendered
-        )
+        ):
+            return ContentSyncState.OUTDATED
+        return ContentSyncState.SYNCED
 
 
 __all__ = ["DownloadManager"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
@@ -17,11 +18,13 @@ from idat_sync.application.exceptions import (
 from idat_sync.domain.content import Content
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Mapping
     from pathlib import Path
 
     from idat_sync.domain.content import RecordingContent
     from idat_sync.domain.course import Course
+
+ProgressCallback = Callable[[int, int | None], None]
 
 
 class CookieData(TypedDict, total=False):
@@ -60,9 +63,12 @@ class DownloadTask[C: Content]:
         """Return the target relative path for this download task."""
         return self.content.path
 
-    async def download(self) -> None:
+    async def download(self, on_progress: ProgressCallback | None = None) -> None:
         """Execute the download via the bound downloader."""
-        await self.downloader.download(self.content)
+        if on_progress is None:
+            await self.downloader.download(self.content)
+        else:
+            await self.downloader.download(self.content, on_progress=on_progress)
 
 
 class Downloader[C: Content](ABC):
@@ -81,7 +87,9 @@ class Downloader[C: Content](ABC):
         return None
 
     @abstractmethod
-    async def download(self, content: C) -> None:
+    async def download(
+        self, content: C, on_progress: ProgressCallback | None = None
+    ) -> None:
         """Download ``content`` to its target destination."""
 
 
@@ -190,6 +198,7 @@ __all__ = [
     "FileSystemPort",
     "IDATSyncError",
     "MoodleTokenPort",
+    "ProgressCallback",
     "RecordingGateway",
     "RemoteServiceError",
     "SharepointAuthPort",

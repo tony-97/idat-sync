@@ -42,6 +42,6 @@ repo = CourseRepository(
   - `SharepointBrowserAuth` tests: inject a fake `WebViewDriver` (and patch `asyncio.sleep` / native `webview` or Android JNI entrypoints only for driver adapter tests).
   - `JsonCredentialStore` tests: tested against real temporary files (`tempfile.TemporaryDirectory()` and unreadable-file `PermissionError`).
   - `*Adapter` tests (`MoodleAdapter`, `MoodleTokenAdapter`, `SharepointApiAdapter`): inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (`Course`, `CourseSection`, `CourseModule`, `RecordingContent`) or port return values, never raw dicts or SDK objects.
-  - Domain seam: `is_content_pending`, `PathDisambiguator`, `safe_filename`, `Content.in_folder` tested purely in memory without disk I/O.
+  - Domain seam: `ContentSyncState`, `classify_content`, `get_course_term`, `get_in_progress_course_ids`, `PathDisambiguator`, `safe_filename`, `Content.in_folder` tested purely in memory without disk I/O.
   - Application orchestration seam: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync` tested with fake ports and stubs.
   - Architecture boundary seam: AST inspection verifying zero forbidden imports in `domain/` and `application/`, zero `idat_sync.infrastructure` imports in `ui/`, zero `idat_sync.utils` and `idat_sync.infrastructure.auth` imports (`src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` removed), zero `playwright` and `tkinter` imports across `src/idat_sync/`, and `webview` isolated to `ui/app.py` and `infrastructure/sharepoint_auth.py`.

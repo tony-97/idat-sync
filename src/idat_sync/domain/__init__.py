@@ -12,17 +12,21 @@ from idat_sync.domain.course import (
     CourseModule,
     CourseSection,
     ModuleContent,
+    course_term_sort_key,
+    get_course_term,
+    get_in_progress_course_ids,
 )
 from idat_sync.domain.path_utils import (
     WINDOWS_RESERVED,
     PathDisambiguator,
     safe_filename,
 )
-from idat_sync.domain.sync import is_content_pending
+from idat_sync.domain.sync import ContentSyncState, classify_content
 
 __all__ = [
     "WINDOWS_RESERVED",
     "Content",
+    "ContentSyncState",
     "Course",
     "CourseModule",
     "CourseSection",
@@ -32,6 +36,9 @@ __all__ = [
     "RecordingContent",
     "SharepointContent",
     "StringContent",
-    "is_content_pending",
+    "classify_content",
+    "course_term_sort_key",
+    "get_course_term",
+    "get_in_progress_course_ids",
     "safe_filename",
 ]
