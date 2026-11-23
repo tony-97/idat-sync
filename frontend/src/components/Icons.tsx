@@ -10,6 +10,8 @@ const PATHS = {
   logout: "M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4M15 8l4 4-4 4M19 12H9",
   shield: "M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6zm-3 9 2 2 4-4",
   alert: "M12 9v4m0 4h.01M10.3 3.9 1.8 18.4A2 2 0 0 0 3.5 21h17a2 2 0 0 0 1.7-2.6L13.7 3.9a2 2 0 0 0-3.4 0z",
+  sidebar: "M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zm6-2v18",
+  activity: "M22 12h-4l-3 9L9 3l-3 9H2",
 } as const;
 
 export type IconName = keyof typeof PATHS;

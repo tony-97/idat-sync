@@ -1448,6 +1448,33 @@ class TestSyncFrame(unittest.TestCase):
         assert "__onPythonState" in html
         assert "__onFileProgress" in html
 
+    def test_bundled_html_layout_and_responsive_panels(self):
+        """Assert full-width bars, zero .selbar/.ctog, and toggleable panels."""
+        html = app_module.load_ui_html()
+        assert ".selbar" not in html
+        assert "selbar" not in html
+        assert ".ctog" not in html
+        assert "ctog" not in html
+        assert (
+            html.count("grid-column:1/-1") >= 2
+            or html.count("grid-column: 1 / -1") >= 2
+            or (
+                ".pathbar{grid-area:1/1/auto/-1}" in html
+                and "grid-area:3/1/auto/-1" in html
+            )
+        )
+        assert ".sbt>b{" in html or ".sbt > b {" in html
+        assert "text-overflow:ellipsis" in html
+        assert ".sbt>span{" in html or ".sbt > span {" in html
+        assert ".chd{" in html
+        assert "max-width:639px" in html or "max-width: 639px" in html
+        assert "Active term" in html
+        assert "Clear" in html
+        assert "Courses by term" in html
+        assert "Toggle courses" in html
+        assert "Toggle activity" in html
+        assert "min-width: 960px" in html or "min-width:960px" in html
+
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Cancel active load_idat_sync and do_sync tasks on SyncFrame.aclose."""
         creds: Credentials = {

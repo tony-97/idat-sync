@@ -50,7 +50,7 @@ export const ActivityPanel: Component<ActivityPanelProps> = (props) => {
               </Show>
               <button
                 type="button"
-                class="btn ico mo"
+                class="btn ico"
                 title="Close"
                 onClick={props.onClose}
               >

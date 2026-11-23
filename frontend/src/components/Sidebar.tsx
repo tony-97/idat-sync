@@ -11,6 +11,12 @@ import { Icon } from "./Icons";
 
 interface SidebarProps {
   activeCourseId: () => number | null;
+  desktopOpen: () => boolean;
+  mobileOpen: () => boolean;
+  activityOpen: () => boolean;
+  onToggleSidebar: () => void;
+  onCloseMobile: () => void;
+  onToggleActivity: () => void;
   onSelectCourse: (id: number) => void;
 }
 
@@ -44,7 +50,6 @@ function courseBadge(course: CourseNode): { cls: string; text: string; ok?: bool
 }
 
 export const Sidebar: Component<SidebarProps> = (props) => {
-  const [mobileOpen, setMobileOpen] = createSignal(false);
   const [collapsedTerms, setCollapsedTerms] = createSignal<Record<string, boolean>>({});
 
   const termGroups = createMemo(() => groupCoursesByTerm(appState.courses));
@@ -64,24 +69,43 @@ export const Sidebar: Component<SidebarProps> = (props) => {
     () => appState.courses.filter((c) => c.checked).length,
   );
 
-  const activeCourse = createMemo(
-    () =>
-      appState.courses.find((c) => c.id === props.activeCourseId()) ??
-      appState.courses[0] ??
-      null,
-  );
+  const activityBadgeCount = createMemo(() => {
+    const act = appState.activity;
+    return act.downloading.length + act.queued.length + act.failed.length;
+  });
+
+  const activityBadgeClass = createMemo(() => {
+    const act = appState.activity;
+    if (act.failed.length > 0 && act.downloading.length === 0 && act.queued.length === 0) {
+      return "bdg err";
+    }
+    return "bdg acc";
+  });
 
   return (
     <>
       <div class="pathbar">
-        <span class="pi">
-          <Icon name="folder" size={20} />
-        </span>
-        <div class="pp">
-          <small>Local folder</small>
-          <b title={appState.folder_path}>{appState.folder_path}</b>
-        </div>
-        <div class="pactions">
+        <button
+          type="button"
+          class={`btn pbtn${props.desktopOpen() ? " d-on" : ""}${props.mobileOpen() ? " m-on" : ""}`}
+          title="Toggle courses"
+          onClick={props.onToggleSidebar}
+        >
+          <Icon name="sidebar" size={15} />
+          <span>Courses</span>
+          <span class="bdg">
+            {selectedCount()}/{appState.courses.length}
+          </span>
+        </button>
+
+        <div class="pathfolder">
+          <span class="pi">
+            <Icon name="folder" size={20} />
+          </span>
+          <div class="pp">
+            <small>Local folder</small>
+            <b title={appState.folder_path}>{appState.folder_path}</b>
+          </div>
           <button
             type="button"
             class="btn"
@@ -89,6 +113,21 @@ export const Sidebar: Component<SidebarProps> = (props) => {
             onClick={() => callApi("browse_folder")}
           >
             Change
+          </button>
+        </div>
+
+        <div class="pactions">
+          <button
+            type="button"
+            class={`btn pbtn${props.activityOpen() ? " on" : ""}`}
+            title="Toggle activity"
+            onClick={props.onToggleActivity}
+          >
+            <Icon name="activity" size={15} />
+            <span>Activity</span>
+            <Show when={activityBadgeCount() > 0}>
+              <span class={activityBadgeClass()}>{activityBadgeCount()}</span>
+            </Show>
           </button>
           <button
             type="button"
@@ -110,68 +149,49 @@ export const Sidebar: Component<SidebarProps> = (props) => {
         </div>
       </div>
 
-      <nav class={`courses${mobileOpen() ? " open" : ""}`}>
-        <Show when={activeCourse()}>
-          {(cur) => (
-            <button
-              type="button"
-              class="ctog"
-              onClick={() => setMobileOpen((v) => !v)}
-            >
-              <span
-                class="dot"
-                style={{ background: courseColor(cur().id) }}
-              />
-              <span class="cn">
-                <b>{cur().name}</b>
-                <small>{cur().term} · tap to switch course</small>
-              </span>
-              <span class="chv">
-                <Icon name="chev" />
-              </span>
-            </button>
-          )}
-        </Show>
+      <div
+        class={`scrim${props.mobileOpen() ? " on" : ""}`}
+        onClick={props.onCloseMobile}
+      />
 
-        <Show when={selectedCount() > 0}>
-          <div class="selbar">
-            <span>
-              <b>
-                {selectedCount()} course{selectedCount() === 1 ? "" : "s"}
-              </b>{" "}
-              selected
-            </span>
-            <button
-              type="button"
-              class="btn pri"
-              disabled={!appState.can_sync}
-              onClick={() => callApi("sync")}
-            >
-              <Icon name="dl" size={14} />
-              Sync
-            </button>
-            <button
-              type="button"
-              class="btn"
-              disabled={appState.is_syncing}
-              onClick={() => callApi("clear_selection")}
-            >
-              Clear
-            </button>
-          </div>
-        </Show>
-
+      <nav
+        class={`courses${props.mobileOpen() ? " open" : ""}${props.desktopOpen() ? "" : " collapsed"}`}
+      >
         <div class="cl">
           <div class="chd">
-            <b>Courses by term</b>
-            <button
-              type="button"
-              class="lnk"
-              disabled={appState.is_syncing}
-              onClick={() => callApi("select_in_progress")}
-            >
-              Active term
-            </button>
+            <div class="chd-l">
+              <b>Courses by term</b>
+              <span class="bdg">
+                {selectedCount()}/{appState.courses.length}
+              </span>
+              <button
+                type="button"
+                class="btn ico mo"
+                title="Close"
+                onClick={props.onCloseMobile}
+              >
+                <Icon name="x" size={14} />
+              </button>
+            </div>
+            <div class="chd-r">
+              <button
+                type="button"
+                class="lnk"
+                disabled={appState.is_syncing}
+                onClick={() => callApi("select_in_progress")}
+              >
+                Active term
+              </button>
+              <span class="sep">·</span>
+              <button
+                type="button"
+                class="lnk"
+                disabled={selectedCount() === 0 || appState.is_syncing}
+                onClick={() => callApi("clear_selection")}
+              >
+                Clear
+              </button>
+            </div>
           </div>
 
           <For each={termGroups()}>
@@ -243,7 +263,6 @@ export const Sidebar: Component<SidebarProps> = (props) => {
                               class={`course${props.activeCourseId() === course.id ? " on" : ""}`}
                               onClick={() => {
                                 props.onSelectCourse(course.id);
-                                setMobileOpen(false);
                               }}
                             >
                               <span

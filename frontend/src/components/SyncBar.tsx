@@ -3,7 +3,7 @@ import { appState, callApi } from "../bridge";
 import { Icon } from "./Icons";
 
 interface SyncBarProps {
-  onOpenSheet: () => void;
+  onToggleActivity: () => void;
 }
 
 export const SyncBar: Component<SyncBarProps> = (props) => {
@@ -16,9 +16,7 @@ export const SyncBar: Component<SyncBarProps> = (props) => {
   return (
     <div
       class={`syncbar${appState.is_syncing ? " run" : appState.error ? " err" : ""}`}
-      onClick={() => {
-        if (appState.is_syncing) props.onOpenSheet();
-      }}
+      onClick={() => props.onToggleActivity()}
     >
       <Show
         when={appState.is_syncing}
@@ -46,7 +44,10 @@ export const SyncBar: Component<SyncBarProps> = (props) => {
                   type="button"
                   class="btn pri"
                   disabled={!appState.can_sync}
-                  onClick={() => callApi("sync")}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    callApi("sync");
+                  }}
                 >
                   <Icon name="dl" size={14} />
                   Sync
@@ -73,7 +74,10 @@ export const SyncBar: Component<SyncBarProps> = (props) => {
                       type="button"
                       class="btn pri"
                       disabled={!appState.can_sync}
-                      onClick={() => callApi("sync")}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        callApi("sync");
+                      }}
                     >
                       Retry
                     </button>
@@ -82,7 +86,10 @@ export const SyncBar: Component<SyncBarProps> = (props) => {
                   <button
                     type="button"
                     class="btn pri"
-                    onClick={() => callApi("retry_load")}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      callApi("retry_load");
+                    }}
                   >
                     Retry
                   </button>
@@ -92,7 +99,10 @@ export const SyncBar: Component<SyncBarProps> = (props) => {
               <button
                 type="button"
                 class="btn danger"
-                onClick={() => callApi("logout")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  callApi("logout");
+                }}
               >
                 Sign out
               </button>
@@ -131,10 +141,10 @@ export const SyncBar: Component<SyncBarProps> = (props) => {
         >
           Cancel
         </button>
-        <span class="chev">
-          <Icon name="chev" />
-        </span>
       </Show>
+      <span class="chev">
+        <Icon name="chev" />
+      </span>
     </div>
   );
 };

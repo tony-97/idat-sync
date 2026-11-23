@@ -16,8 +16,21 @@ export const App: Component = () => {
   const [activeCourseId, setActiveCourseId] = createSignal<number | null>(null);
   const [filter, setFilter] = createSignal<FileFilter>("all");
   const [closedFolders, setClosedFolders] = createSignal<Record<string, boolean>>({});
-  const [sheetOpen, setSheetOpen] = createSignal(false);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = createSignal(true);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = createSignal(false);
+  const [activityOpen, setActivityOpen] = createSignal(false);
   const [flashFileId, setFlashFileId] = createSignal<string | null>(null);
+
+  const isDesktop = () => window.matchMedia("(min-width: 960px)").matches;
+
+  let wasSyncing = false;
+  createEffect(() => {
+    const syncing = appState.is_syncing;
+    if (!wasSyncing && syncing && isDesktop()) {
+      setActivityOpen(true);
+    }
+    wasSyncing = syncing;
+  });
 
   createEffect(() => {
     const courses = appState.courses;
@@ -42,11 +55,31 @@ export const App: Component = () => {
     setClosedFolders((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
+  const toggleSidebar = () => {
+    if (isDesktop()) {
+      setDesktopSidebarOpen((v) => !v);
+    } else {
+      setMobileSidebarOpen((v) => {
+        const next = !v;
+        if (next) setActivityOpen(false);
+        return next;
+      });
+    }
+  };
+
+  const toggleActivity = () => {
+    setActivityOpen((v) => {
+      const next = !v;
+      if (next && !isDesktop()) setMobileSidebarOpen(false);
+      return next;
+    });
+  };
+
   const jumpToFile = (courseId: number, fileId: string) => {
     setActiveCourseId(courseId);
     setFilter("all");
     setClosedFolders({});
-    setSheetOpen(false);
+    if (!isDesktop()) setActivityOpen(false);
     setFlashFileId(fileId);
     queueMicrotask(() => {
       const el = document.querySelector(`[data-file-id="${CSS.escape(fileId)}"]`);
@@ -66,12 +99,19 @@ export const App: Component = () => {
         <div class="body">
           <Sidebar
             activeCourseId={activeCourseId}
+            desktopOpen={desktopSidebarOpen}
+            mobileOpen={mobileSidebarOpen}
+            activityOpen={activityOpen}
+            onToggleSidebar={toggleSidebar}
+            onCloseMobile={() => setMobileSidebarOpen(false)}
+            onToggleActivity={toggleActivity}
             onSelectCourse={(id) => {
               setActiveCourseId(id);
               setFilter("all");
+              setMobileSidebarOpen(false);
             }}
           />
-          <SyncBar onOpenSheet={() => setSheetOpen(true)} />
+          <SyncBar onToggleActivity={toggleActivity} />
           <CourseMain
             course={activeCourse}
             filter={filter}
@@ -81,8 +121,8 @@ export const App: Component = () => {
             flashFileId={flashFileId}
           />
           <ActivityPanel
-            open={sheetOpen}
-            onClose={() => setSheetOpen(false)}
+            open={activityOpen}
+            onClose={() => setActivityOpen(false)}
             onJumpToFile={jumpToFile}
           />
         </div>
