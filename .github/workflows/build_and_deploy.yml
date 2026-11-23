@@ -103,14 +103,15 @@ jobs:
       - name: Fix MacOS app bundle
         if: matrix.os == 'macos-latest'
         run: |
-          # Clean garbage files and linker stubs that break macOS codesign
+          # Clean garbage files, extended attributes, and linker stubs that break macOS codesign
           find dist/idat_sync.app -name ".DS_Store" -delete
           find dist/idat_sync.app -name "._*" -delete
           find dist/idat_sync.app -name "*.tbd" -delete
+          xattr -cr dist/idat_sync.app
 
           # Delete broken PyInstaller signatures and ad-hoc sign the app bundle
           find dist/idat_sync.app -type d -name "_CodeSignature" -exec rm -rf {} +
-          codesign -s - --force --options runtime dist/idat_sync.app
+          codesign --force --deep -s - dist/idat_sync.app
 
       - name: Create DMG
         if: matrix.os == 'macos-latest'
