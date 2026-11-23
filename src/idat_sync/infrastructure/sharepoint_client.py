@@ -44,6 +44,7 @@ class SharepointClient:
         "Name",
         "ServerRelativeUrl",
         "TimeLastModified",
+        "UniqueId",
     ]
 
     def __init__(

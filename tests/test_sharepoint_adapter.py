@@ -18,6 +18,7 @@ from office365.runtime.client_runtime_context import ClientRuntimeContext
 from office365.runtime.http.http_method import HttpMethod
 from office365.runtime.http.request_options import RequestOptions
 from office365.runtime.paths.resource_path import ResourcePath
+from office365.runtime.transport.httpx_transport import HttpxTransport
 from office365.sharepoint.files.file import File
 from office365.sharepoint.folders.folder import Folder
 
@@ -1286,6 +1287,67 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             pending2.beforeExecute(post_req2)
             mock_digest2.assert_not_called()
             assert post_req2.headers.get("X-RequestDigest") == "digest-token-1"
+
+    async def test_fetch_folder_files_populates_unique_id_for_download(self):
+        """Select UniqueId on folder files so download_file addresses GetFileById."""
+        site_url = "https://idat628.sharepoint.com/sites/Academic"
+        folder_uid = "8b447506-868f-4a0b-8607-c5f4737cad3a"
+        file_uid = "6ac3e822-8aa9-4d88-98dd-aacb8033800e"
+        seen_urls: list[str] = []
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            seen_urls.append(url)
+            if "/Files" in url and "/$value" not in url:
+                fields = {
+                    f.strip()
+                    for f in request.url.params.get("$select", "").split(",")
+                    if f.strip()
+                }
+                item = {
+                    "Name": "slides.pptx",
+                    "ServerRelativeUrl": "/sites/Academic/Folder/slides.pptx",
+                    "TimeLastModified": "2025-05-12T10:00:00Z",
+                }
+                if not fields or "UniqueId" in fields:
+                    item["UniqueId"] = file_uid
+                return httpx.Response(
+                    200,
+                    json={"d": {"results": [item]}},
+                    headers={"content-type": "application/json;odata=verbose"},
+                )
+            if url.endswith(f"/GetFileById('{file_uid}')/$value"):
+                return httpx.Response(
+                    200,
+                    content=b"pptx-bytes",
+                    headers={"Content-Length": "10"},
+                    request=request,
+                )
+            return httpx.Response(400, text="Bad Request", request=request)
+
+        transport = HttpxTransport(
+            async_client=httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        )
+        with patch(
+            "idat_sync.infrastructure.sharepoint_client.HttpxTransport",
+            return_value=transport,
+        ):
+            async with SharepointClient(
+                cookies=[
+                    {"name": "FedAuth", "value": "tok", "domain": ".sharepoint.com"}
+                ],  # type: ignore[arg-type]
+                sharepoint_personal_host="idat628-my.sharepoint.com",
+                academic_site_url=site_url,
+                rate_limiter=AsyncRateLimiter(0.0),
+            ) as client:
+                folder = client.get_client(site_url).web.get_folder_by_id(folder_uid)
+                files = await client.fetch_folder_files(folder)
+                dest = io.BytesIO()
+                await client.download_file(files[0], dest)
+
+        assert dest.getvalue() == b"pptx-bytes"
+        assert len(seen_urls) == 2
+        assert seen_urls[1].endswith(f"/GetFileById('{file_uid}')/$value")
 
 
 if __name__ == "__main__":

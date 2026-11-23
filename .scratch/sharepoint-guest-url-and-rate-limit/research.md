@@ -100,3 +100,11 @@ Because `SharepointClient._await_query` acquires `async with self.rate_limiter:`
   await self._await_query(file.download_session_async(dest, use_path=False))
   ```
   This marks `"Id"` as available in `file.properties` so `download_session_async` issues only the single `GET .../$value` stream request.
+
+---
+
+### 4. Follow-Up Bug: HTTP 400 on `.../Files(%3Ckey%3E)/$value` When Downloading Folder Files
+
+- **Symptom**: Downloading files enumerated via `SharepointClient.fetch_folder_files(folder)` failed with `HTTP 400 Bad Request` on `GET .../_api/Web/GetFolderById('<folder_uid>')/Files(%3Ckey%3E)/$value`.
+- **Root cause**: `Folder.get_files().select(self.properties_to_retrieve)` merges `{"Id", "Name", "ServerRelativeUrl"}` with `properties_to_retrieve`, which only contained `["Name", "ServerRelativeUrl", "TimeLastModified"]`. Because SharePoint `SP.File` has no `Id` property and `UniqueId` was omitted from `$select`, SharePoint returned no `UniqueId`. Each `File` created by `EntityCollection.create_typed_object` kept its placeholder `EntityPath(None, .../Files)` (`/Files(<key>)`) instead of having `File.set_property("UniqueId", ...)` rewrite `_resource_path` to `/Web/GetFileById('<UniqueId>')`, and `file.unique_id` remained `None`.
+- **Fix**: Include `"UniqueId"` in `SharepointClient.properties_to_retrieve` so `fetch_folder_files` (and `fetch_file_by_id`) select `UniqueId`, allowing `File.set_property("UniqueId", ...)` to populate `file.unique_id` and rewrite `_resource_path` to `/Web/GetFileById('<UniqueId>')` before `download_file` streams `/$value`.
