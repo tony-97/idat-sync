@@ -300,15 +300,25 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
             return [c for c in self.courses if c.id in self.in_progress_ids]
         return list(self.courses)
 
-    async def _run_sync(self, path: str, target_ids: set[int] | None) -> None:
-        idat_sync = await self._ensure_sync_service()
-        targets = self._resolve_targets(target_ids)
-        if not targets:
-            return
+    def _prepare_sync_run(self, targets: Sequence[Course]) -> None:
         self.error = ""
         self.auth_expired = False
+        self.status = "Starting sync..."
         self.course_tree.reset_for_sync([c.id for c in targets])
-        self._notify()
+
+    async def _run_sync(
+        self,
+        path: str,
+        target_ids: set[int] | None,
+        targets: list[Course] | None,
+    ) -> None:
+        idat_sync = await self._ensure_sync_service()
+        if targets is None:
+            targets = self._resolve_targets(target_ids)
+            if not targets:
+                return
+            self._prepare_sync_run(targets)
+            self._notify()
 
         first_error: IDATSyncError | None = None
         async for event in idat_sync.sync_courses(path, targets, refresh=True):
@@ -338,11 +348,21 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
         path = self.folder_path.strip()
         if not path or self.is_syncing:
             return
+        targets: list[Course] | None = None
+        if self.courses_loaded:
+            targets = self._resolve_targets(target_ids)
+            if not targets:
+                return
+            self._prepare_sync_run(targets)
+        else:
+            self.error = ""
+            self.auth_expired = False
+            self.status = "Loading courses..."
         self._cancel_requested = False
         async with self._busy(self._set_is_syncing):
             self._sync_task = asyncio.current_task()
             try:
-                await self._run_sync(path, target_ids)
+                await self._run_sync(path, target_ids, targets)
             except asyncio.CancelledError:
                 if not self._cancel_requested:
                     raise

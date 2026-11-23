@@ -1474,6 +1474,12 @@ class TestSyncFrame(unittest.TestCase):
         assert "Toggle courses" in html
         assert "Toggle activity" in html
         assert "min-width: 960px" in html or "min-width:960px" in html
+        assert (
+            "grid-template-rows:auto minmax(0,1fr) auto" in html
+            or "grid-template-rows: auto minmax(0, 1fr) auto" in html
+            or "grid-template:auto minmax(0,1fr) auto/" in html
+        )
+        assert ".mni{" in html or ".mni {" in html
 
     def test_sync_frame_on_close_cancels_load_and_sync_tasks(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Cancel active load_idat_sync and do_sync tasks on SyncFrame.aclose."""
@@ -1830,6 +1836,96 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
+    def test_sync_frame_resets_activity_and_status_when_syncing_new_course(self):
+        """Reset activity and status immediately when syncing a new course."""
+        creds: Credentials = {
+            "token": "tok",
+            "sharepoint_storage_state": {"cookies": []},
+        }
+        c1, c2 = (
+            Course(id=1, name="Course One", category="IV.01.2026-III"),
+            Course(id=2, name="Course Two", category="IV.01.2026-III"),
+        )
+
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
+                snapshots: list[dict[str, object]] = []
+                master = _SyncStubMaster()
+                frame = SyncFrame(master, creds, cfg)  # type: ignore[arg-type]
+                master.push_state = lambda: snapshots.append(frame.to_dict())  # type: ignore[method-assign]
+                frame._populate_courses([c1, c2])  # noqa: SLF001  # pylint: disable=protected-access
+                frame.set_folder_path(tmpdir)
+
+                async def first_course_sync(_root, courses, *, refresh=False):
+                    _ = refresh
+                    c = courses[0]
+                    c_dir = Path(tmpdir) / c.name
+                    p_done, p_fail = c_dir / "S1" / "done.pdf", c_dir / "S1" / "bad.pdf"
+                    yield CourseSyncStarted(c, c_dir)
+                    yield CourseFileDiscovered(
+                        c, c_dir / "S1" / "already.pdf", ContentSyncState.SYNCED
+                    )
+                    yield CourseFileDiscovered(c, p_done, ContentSyncState.NEW)
+                    yield CourseFileDiscovered(c, p_fail, ContentSyncState.NEW)
+                    yield CourseDiscoveryCompleted(c, 1, 2)
+                    yield TaskDownloadStarted(p_done)
+                    yield TaskDownloadCompleted(p_done)
+                    yield TaskDownloadFailed(
+                        p_fail,
+                        RemoteServiceError(
+                            "http 500", service="Moodle", status_code=500
+                        ),
+                    )
+                    yield CourseSyncCompleted(c, RemoteServiceError("partial"))
+
+                mock_service = MagicMock(spec=IDATSync)
+                mock_service.sync_courses.side_effect = first_course_sync
+                frame.idat_sync = mock_service
+                await frame.sync_course(1)
+                assert frame.to_dict()["activity"]["total_pending"] == 2
+
+                snapshots.clear()
+                during_fetch: dict[str, object] = {}
+
+                async def second_course_sync(_root, courses, *, refresh=False):
+                    _ = refresh
+                    c = courses[0]
+                    yield CourseSyncStarted(c, Path(tmpdir) / c.name)
+                    during_fetch.update(frame.to_dict()["activity"])
+                    yield CourseSyncCompleted(
+                        c,
+                        RemoteServiceError(
+                            "moodle timeout", service="Moodle", is_network=True
+                        ),
+                    )
+
+                mock_service.sync_courses.side_effect = second_course_sync
+                await frame.sync_course(2)
+
+                empty_activity = {
+                    "total_pending": 0,
+                    "completed": 0,
+                    "skipped": 0,
+                    "failed_count": 0,
+                    "percent": 0,
+                    "downloading": [],
+                    "queued": [],
+                    "finished": [],
+                    "failed": [],
+                }
+                assert snapshots[0]["is_syncing"] is True
+                assert snapshots[0]["status"] != "Sync completed with errors."
+                assert snapshots[0]["activity"] == empty_activity
+                assert during_fetch == empty_activity
+                assert frame.error == (
+                    f"Moodle connection error. Check {cfg.log_file.name} for details."
+                )
+                c1_row = next(r for r in frame.to_dict()["courses"] if r["id"] == 1)
+                assert len(c1_row["children"]) == 1
+
+        asyncio.run(exercise())
+
 
 class TestAppFrameBusy(unittest.TestCase):
     """Tests for pure-Python AppFrame._busy and aclose lifecycle."""
@@ -2139,6 +2235,51 @@ class TestCourseTree(unittest.TestCase):
         assert not files_by_name["o.pdf"]["percent"]
         assert files_by_name["f.pdf"]["status"] == "Failed"
         assert files_by_name["f.pdf"]["error"] == "disk full"
+
+    def test_course_tree_reset_for_sync_scopes_activity_to_current_run(self):
+        """Scope activity_to_dict to the latest sync run while keeping other trees."""
+        ct = CourseTree()
+        c1 = Course(id=1, name="Course One")
+        c2 = Course(id=2, name="Course Two")
+        ct.set_courses([c1, c2], selected={1})
+
+        ct.reset_for_sync([1])
+        ct.start_course(1, Path("Course One"))
+        p_done = Path("Course One/S1/a.pdf")
+        p_sync = Path("Course One/S1/b.pdf")
+        p_wait = Path("Course One/S1/c.pdf")
+        ct.add_file(1, p_done, ContentSyncState.NEW)
+        ct.add_file(1, p_sync, ContentSyncState.SYNCED)
+        ct.add_file(1, p_wait, ContentSyncState.OUTDATED)
+        ct.set_file_status(p_done, RowStatus.COMPLETED)
+        assert ct.activity_to_dict()["total_pending"] == 2
+        assert ct.activity_to_dict()["skipped"] == 1
+
+        # Starting a new sync targeting only Course 2 resets Activity immediately
+        ct.reset_for_sync([2])
+        act = ct.activity_to_dict()
+        assert act == {
+            "total_pending": 0,
+            "completed": 0,
+            "skipped": 0,
+            "failed_count": 0,
+            "percent": 0,
+            "downloading": [],
+            "queued": [],
+            "finished": [],
+            "failed": [],
+        }
+
+        # Course 1's children remain intact for browsing while Course 2 syncs
+        ct.start_course(2, Path("Course Two"))
+        ct.add_file(2, Path("Course Two/S1/new.pdf"), ContentSyncState.NEW)
+        act2 = ct.activity_to_dict()
+        assert act2["total_pending"] == 1
+        assert [item["course_id"] for item in act2["queued"]] == [2]
+        assert act2["finished"] == []
+        assert act2["skipped"] == 0
+        c1_row = next(r for r in ct.to_dict() if r["id"] == 1)
+        assert len(c1_row["children"]) == 1
 
 
 class TestErrorFormat(unittest.TestCase):

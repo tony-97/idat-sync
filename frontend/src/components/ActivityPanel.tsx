@@ -137,10 +137,12 @@ export const ActivityPanel: Component<ActivityPanelProps> = (props) => {
                       class="dot"
                       style={{ background: courseColor(item.course_id) }}
                     />
-                    <span class="mn" title={item.name}>
-                      {item.name}
-                    </span>
-                    <small>{item.course_name}</small>
+                    <div class="mni">
+                      <span class="mn" title={item.name}>
+                        {item.name}
+                      </span>
+                      <small title={item.course_name}>{item.course_name}</small>
+                    </div>
                   </div>
                 )}
               </For>

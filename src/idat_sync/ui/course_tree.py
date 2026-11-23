@@ -255,6 +255,7 @@ class CourseTree:
         """Initialize an empty course tree."""
         self._nodes: dict[int, _CourseNode] = {}
         self._file_to_course: dict[Path, tuple[int, _FileNode]] = {}
+        self._activity_course_ids: set[int] = set()
 
     @staticmethod
     def _format_progress(node: _CourseNode) -> tuple[RowStatus, str]:
@@ -282,6 +283,7 @@ class CourseTree:
         )
         self._nodes.clear()
         self._file_to_course.clear()
+        self._activity_course_ids.clear()
         for course in ordered:
             self._nodes[course.id] = _CourseNode(
                 course_id=course.id,
@@ -298,7 +300,8 @@ class CourseTree:
             node.checked = course_id in selected
 
     def reset_for_sync(self, course_ids: Sequence[int]) -> None:
-        """Clear children and mark ``course_ids`` as Queued at 0%."""
+        """Clear children, scope activity to ``course_ids``, and mark Queued at 0%."""
+        self._activity_course_ids = set(course_ids)
         for course_id in course_ids:
             if (node := self._nodes.get(course_id)) is None:
                 continue
@@ -314,6 +317,7 @@ class CourseTree:
         """Initialize incremental discovery state for ``course_id``."""
         if (node := self._nodes.get(course_id)) is None:
             return
+        self._activity_course_ids.add(course_id)
         self._clear_course_children(node)
         node.course_dir = course_dir
         node.discovering = True
@@ -432,7 +436,9 @@ class CourseTree:
             "failed": [],
         }
         skipped = 0
-        for node in self._nodes.values():
+        for course_id, node in self._nodes.items():
+            if course_id not in self._activity_course_ids:
+                continue
             for f in node.iter_files():
                 if f.status is RowStatus.SYNCED:
                     skipped += 1
