@@ -102,6 +102,20 @@ class SyncFrame(AppFrame):  # pylint: disable=too-many-instance-attributes
             return chosen
         return self.folder_path
 
+    def open_file(self, file_id: str) -> None:
+        """Open a Synced/Completed file in the native OS default application."""
+        path = self.course_tree.resolve_openable_file(file_id)
+        if path is None:
+            return
+        try:
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            self.app.open_path(path)
+        except OSError as exc:
+            _logger.error("Failed to open file %s: %s", path, exc)  # noqa: TRY400
+            self.error = "Could not open file"
+            self._notify()
+
     def _refresh_selection(self) -> None:
         self.course_tree.refresh_selection(self.selected_course_ids)
         self._notify()

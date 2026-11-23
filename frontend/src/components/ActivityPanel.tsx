@@ -188,7 +188,11 @@ export const ActivityPanel: Component<ActivityPanelProps> = (props) => {
               </h3>
               <For each={act().finished.slice(-6).reverse()}>
                 {(item) => (
-                  <div class="mini">
+                  <button
+                    type="button"
+                    class="mini clickable"
+                    onClick={() => callApi("open_file", item.id)}
+                  >
                     <span
                       class="dot"
                       style={{ background: courseColor(item.course_id) }}
@@ -199,7 +203,7 @@ export const ActivityPanel: Component<ActivityPanelProps> = (props) => {
                     <span class="ck">
                       <Icon name="check" size={13} />
                     </span>
-                  </div>
+                  </button>
                 )}
               </For>
             </div>

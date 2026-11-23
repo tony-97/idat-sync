@@ -860,6 +860,8 @@ class _SyncStubMaster:
         self.switched_to_login = 0
         self.push_count = 0
         self.progress_payloads: list[dict[str, object]] = []
+        self.opened_paths: list[Path] = []
+        self.open_error: OSError | None = None
 
     def switch_to_login(self) -> None:
         """Count transitions to LoginFrame."""
@@ -877,9 +879,85 @@ class _SyncStubMaster:
         """Simulate a cancelled desktop dialog."""
         return ""
 
+    def open_path(self, path: Path) -> None:
+        """Record opened paths or raise a configured OSError."""
+        if self.open_error is not None:
+            raise self.open_error
+        self.opened_paths.append(path)
+
 
 class TestSyncFrame(unittest.TestCase):
     """Tests for pure-Python SyncFrame selection, sync progress, and cancellation."""
+
+    def test_sync_frame_open_file_handles_ready_non_ready_missing_and_os_error(self):
+        """Open existing ready files even mid-sync, ignore non-ready, surface errors."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            course_dir = Path(tmpdir) / "Course One"
+            (course_dir / "S1").mkdir(parents=True)
+            synced_file = course_dir / "S1" / "synced.pdf"
+            synced_file.write_bytes(b"ok")
+            completed_file = course_dir / "S1" / "done.pdf"
+            completed_file.write_bytes(b"ok")
+            missing_file = course_dir / "S1" / "gone.pdf"
+            new_file = course_dir / "S1" / "new.pdf"
+
+            master = _SyncStubMaster()
+            config = SyncConfig(session_file=Path(tmpdir) / "session.json")
+            creds: Credentials = {
+                "token": "tok",
+                "sharepoint_storage_state": {"cookies": [], "origins": []},
+            }
+            frame = SyncFrame(master, credentials=creds, config=config)  # type: ignore[arg-type]
+            frame.course_tree.set_courses(
+                [Course(id=1, name="Course One")], selected={1}
+            )
+            frame.course_tree.start_course(1, course_dir)
+            frame.course_tree.add_file(1, synced_file, ContentSyncState.SYNCED)
+            frame.course_tree.add_file(1, completed_file, ContentSyncState.NEW)
+            frame.course_tree.add_file(1, missing_file, ContentSyncState.NEW)
+            frame.course_tree.add_file(1, new_file, ContentSyncState.NEW)
+            frame.course_tree.set_file_status(completed_file, RowStatus.COMPLETED)
+            frame.course_tree.set_file_status(missing_file, RowStatus.COMPLETED)
+
+            frame.is_syncing = True
+            frame.status = "Downloading other.pdf..."
+
+            # Synced and Completed files open even while is_syncing is True
+            frame.open_file("file:1:S1/synced.pdf")
+            frame.open_file("file:1:S1/done.pdf")
+            assert master.opened_paths == [
+                synced_file.resolve(),
+                completed_file.resolve(),
+            ]
+            assert frame.error == ""
+            assert frame.status == "Downloading other.pdf..."
+
+            # Non-ready row is silently ignored
+            pushes_before = master.push_count
+            frame.open_file("file:1:S1/new.pdf")
+            assert len(master.opened_paths) == 2
+            assert frame.error == ""
+            assert master.push_count == pushes_before
+
+            # Missing file logs error, sets frame.error, preserves status & row states
+            with self.assertLogs("idat_sync.ui.sync_frame", level="ERROR") as logs:
+                frame.open_file("file:1:S1/gone.pdf")
+            assert any("gone.pdf" in msg for msg in logs.output)
+            assert frame.error == "Could not open file"
+            assert frame.status == "Downloading other.pdf..."
+            assert (
+                frame.course_tree.resolve_openable_file("file:1:S1/gone.pdf")
+                == missing_file.resolve()
+            )
+
+            # OSError from app.open_path logs error, sets frame.error, preserves status
+            frame.error = ""
+            master.open_error = OSError("no associated app")
+            with self.assertLogs("idat_sync.ui.sync_frame", level="ERROR") as logs:
+                frame.open_file("file:1:S1/synced.pdf")
+            assert any("no associated app" in msg for msg in logs.output)
+            assert frame.error == "Could not open file"
+            assert frame.status == "Downloading other.pdf..."
 
     def test_sync_frame_treeview_selection_progress_and_error_recovery(self):  # noqa: PLR0915  # pylint: disable=too-many-statements
         """Verify SyncFrame course ordering, tree progress, selection, and logout."""
@@ -2282,6 +2360,52 @@ class TestCourseTree(unittest.TestCase):
         c1_row = next(r for r in ct.to_dict() if r["id"] == 1)
         assert len(c1_row["children"]) == 1
 
+    def test_course_tree_resolve_openable_file(self):
+        """Resolve only Synced/Completed files strictly contained in course_dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            course_dir = Path(tmpdir) / "Course One"
+            ct = CourseTree()
+            ct.set_courses([Course(id=1, name="Course One")], selected={1})
+            ct.start_course(1, course_dir)
+
+            p_synced = course_dir / "S1" / "synced.pdf"
+            p_completed = course_dir / "S1" / "done.pdf"
+            p_new = course_dir / "S1" / "new.pdf"
+            p_downloading = course_dir / "S1" / "dl.pdf"
+            p_failed = course_dir / "S1" / "fail.pdf"
+            p_escape = Path(tmpdir) / "outside.pdf"
+
+            ct.add_file(1, p_synced, ContentSyncState.SYNCED)
+            ct.add_file(1, p_completed, ContentSyncState.NEW)
+            ct.add_file(1, p_new, ContentSyncState.NEW)
+            ct.add_file(1, p_downloading, ContentSyncState.NEW)
+            ct.add_file(1, p_failed, ContentSyncState.NEW)
+            ct.add_file(1, p_escape, ContentSyncState.SYNCED)
+
+            ct.set_file_status(p_completed, RowStatus.COMPLETED)
+            ct.set_file_status(p_downloading, RowStatus.DOWNLOADING)
+            ct.set_file_status(p_failed, RowStatus.FAILED, error="boom")
+
+            assert (
+                ct.resolve_openable_file("file:1:S1/synced.pdf") == p_synced.resolve()
+            )
+            assert (
+                ct.resolve_openable_file("file:1:S1/done.pdf") == p_completed.resolve()
+            )
+            assert ct.resolve_openable_file("file:1:S1/new.pdf") is None
+            assert ct.resolve_openable_file("file:1:S1/dl.pdf") is None
+            assert ct.resolve_openable_file("file:1:S1/fail.pdf") is None
+            assert ct.resolve_openable_file("file:1:missing.pdf") is None
+            assert ct.resolve_openable_file("unknown") is None
+            assert ct.resolve_openable_file(f"file:1:{p_escape.as_posix()}") is None
+            # Also verify .. traversal embedded in rel_path is rejected
+            ct.add_file(
+                1,
+                course_dir / "S1" / ".." / ".." / "outside.pdf",
+                ContentSyncState.SYNCED,
+            )
+            assert ct.resolve_openable_file("file:1:S1/../../outside.pdf") is None
+
 
 class TestErrorFormat(unittest.TestCase):
     """Tests for pure-Python UI error summarization in idat_sync.ui.error_format."""
@@ -2420,6 +2544,133 @@ class TestErrorFormat(unittest.TestCase):
                 assert result == expected
                 assert "http://" not in result.lower()
                 assert "https://" not in result.lower()
+
+
+class TestMainAppOpenPath(unittest.TestCase):
+    """Tests for _JsApi.open_file forwarding and MainApp.open_path platform dispatch."""
+
+    def _make_app(self, tmpdir: str) -> app_module.MainApp:
+        creds_file = Path(tmpdir) / "session.json"
+        creds_file.write_text(
+            '{"token": "tok", "sharepoint_storage_state": '
+            '{"cookies": [{"name": "a"}], "origins": []}}',
+            encoding="utf-8",
+        )
+        config = SyncConfig(session_file=creds_file)
+        app = app_module.MainApp(config)
+        self.addCleanup(app.loop.close)
+        return app
+
+    def test_js_api_open_file_forwards_to_sync_frame(self):
+        """Forward _JsApi.open_file(file_id) to SyncFrame.open_file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = self._make_app(tmpdir)
+            api = app_module._JsApi(app)  # noqa: SLF001
+            assert isinstance(app.active_frame, SyncFrame)
+            with patch.object(app.active_frame, "open_file") as mock_open:
+                api.open_file("file:1:S1/a.pdf")
+                mock_open.assert_called_once_with("file:1:S1/a.pdf")
+
+    def test_open_path_dispatches_desktop_platforms(self):
+        """Dispatch Windows, macOS, and Linux native openers."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = self._make_app(tmpdir)
+            sample = Path(tmpdir) / "notes.pdf"
+
+            with (
+                patch.object(app_module, "is_android", return_value=False),
+                patch.object(app_module.sys, "platform", "win32"),
+                patch.object(app_module.os, "startfile", create=True) as mock_start,
+            ):
+                app.open_path(sample)
+                mock_start.assert_called_once_with(str(sample))
+
+            with (
+                patch.object(app_module, "is_android", return_value=False),
+                patch.object(app_module.sys, "platform", "darwin"),
+                patch.object(app_module.subprocess, "Popen") as mock_popen,
+            ):
+                app.open_path(sample)
+                mock_popen.assert_called_once_with(["open", str(sample)])
+
+            with (
+                patch.object(app_module, "is_android", return_value=False),
+                patch.object(app_module.sys, "platform", "linux"),
+                patch.object(app_module.subprocess, "Popen") as mock_popen,
+            ):
+                app.open_path(sample)
+                mock_popen.assert_called_once_with(["xdg-open", str(sample)])
+
+    def test_open_path_dispatches_android_fileprovider_intent(self):
+        """Launch Android ACTION_VIEW Intent with FileProvider URI and read grant."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = self._make_app(tmpdir)
+            sample = Path(tmpdir) / "slides.pdf"
+
+            activity = MagicMock()
+            activity.getPackageName.return_value = "pe.edu.idat.idatsync"
+            python_activity = MagicMock(mActivity=activity)
+            java_file_cls = MagicMock(side_effect=lambda p: f"JavaFile({p})")
+            file_provider_cls = MagicMock()
+            file_provider_cls.getUriForFile.return_value = "content://uri/slides.pdf"
+
+            intent_instance = MagicMock()
+            intent_cls = MagicMock(return_value=intent_instance)
+            intent_cls.ACTION_VIEW = "android.intent.action.VIEW"
+            intent_cls.FLAG_GRANT_READ_URI_PERMISSION = 1
+
+            classes = {
+                "org.kivy.android.PythonActivity": python_activity,
+                "java.io.File": java_file_cls,
+                "androidx.core.content.FileProvider": file_provider_cls,
+                "android.content.Intent": intent_cls,
+            }
+            fake_jnius = MagicMock(autoclass=MagicMock(side_effect=classes.__getitem__))
+
+            with (
+                patch.object(app_module, "is_android", return_value=True),
+                patch.object(
+                    app_module.importlib, "import_module", return_value=fake_jnius
+                ),
+            ):
+                app.open_path(sample)
+
+            java_file_cls.assert_called_once_with(str(sample))
+            file_provider_cls.getUriForFile.assert_called_once_with(
+                activity,
+                "pe.edu.idat.idatsync.fileprovider",
+                f"JavaFile({sample})",
+            )
+            intent_cls.assert_called_once_with("android.intent.action.VIEW")
+            intent_instance.setDataAndType.assert_called_once_with(
+                "content://uri/slides.pdf", "application/pdf"
+            )
+            intent_instance.addFlags.assert_called_once_with(1)
+            activity.startActivity.assert_called_once_with(intent_instance)
+
+
+class TestOpenFilePackaging(unittest.TestCase):
+    """Packaging and bundle checks for opening downloaded files."""
+
+    def test_buildozer_spec_configures_android_fileprovider(self):
+        """Assert buildozer.spec declares androidx.core:core and FileProvider config."""
+        root = Path(__file__).resolve().parents[1]
+        spec_text = (root / "buildozer.spec").read_text(encoding="utf-8")
+        assert "androidx.core:core" in spec_text
+        assert "android.manifest.application_arguments" in spec_text or (
+            "android.add_resources" in spec_text
+        )
+        assert "file_provider_paths.xml" in spec_text or "file_paths.xml" in spec_text
+        paths_xml = root / "android" / "res" / "xml" / "file_paths.xml"
+        assert paths_xml.is_file()
+        xml_text = paths_xml.read_text(encoding="utf-8")
+        assert "external-path" in xml_text
+        assert "files-path" in xml_text
+
+    def test_bundled_html_wires_open_file(self):
+        """Assert the compiled SolidJS bundle wires the open_file JS API call."""
+        html = app_module.load_ui_html()
+        assert "open_file" in html
 
 
 if __name__ == "__main__":

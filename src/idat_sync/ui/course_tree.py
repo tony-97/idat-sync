@@ -487,6 +487,21 @@ class CourseTree:
             **buckets,
         }
 
+    def resolve_openable_file(self, file_id: str) -> Path | None:
+        """Resolve ``file_id`` to a Path if done and contained in ``course_dir``."""
+        for node in self._nodes.values():
+            if node.course_dir is None:
+                continue
+            for file_node in node.iter_files():
+                if file_node.id != file_id:
+                    continue
+                if not file_node.is_done:
+                    return None
+                base = node.course_dir.resolve()
+                target = (node.course_dir / file_node.rel_path).resolve()
+                return target if target.is_relative_to(base) else None
+        return None
+
     def to_dict(self) -> list[dict[str, Any]]:
         """Serialize all course rows and their nested folder/file trees."""
         return [node.to_dict() for node in self._nodes.values()]

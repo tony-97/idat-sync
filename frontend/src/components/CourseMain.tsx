@@ -66,12 +66,25 @@ function getStatusMeta(status: RowStatus): StatusMeta {
 
 const FileRow: Component<{ file: FileNode; flash: boolean }> = (props) => {
   const isDownloading = () => props.file.status === "Downloading";
+  const canOpen = () =>
+    props.file.status === "Synced" || props.file.status === "Completed";
   const meta = () => getStatusMeta(props.file.status);
 
   return (
     <div
-      class={`file${props.flash ? " flash" : ""}`}
+      class={`file${props.flash ? " flash" : ""}${canOpen() ? " clickable" : ""}`}
       data-file-id={props.file.id}
+      role={canOpen() ? "button" : undefined}
+      tabIndex={canOpen() ? 0 : undefined}
+      onClick={() => {
+        if (canOpen()) callApi("open_file", props.file.id);
+      }}
+      onKeyDown={(e) => {
+        if (canOpen() && (e.key === "Enter" || e.key === " ")) {
+          e.preventDefault();
+          callApi("open_file", props.file.id);
+        }
+      }}
     >
       <span
         class="ext"

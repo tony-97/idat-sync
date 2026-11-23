@@ -7,7 +7,10 @@ import contextlib
 import importlib
 import importlib.resources
 import json
+import mimetypes
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -139,6 +142,11 @@ class _JsApi:
         if frame := self._sync_frame():
             self._schedule(frame.retry_load())
 
+    def open_file(self, file_id: str) -> None:
+        """Open a downloaded file in the native OS default application."""
+        if frame := self._sync_frame():
+            frame.open_file(file_id)
+
 
 class MainApp:
     """Root application coordinator managing LoginFrame, SyncFrame, and WebView."""
@@ -198,6 +206,35 @@ class MainApp:
         if not selected:
             return ""
         return selected[0] if isinstance(selected, (list, tuple)) else str(selected)
+
+    def open_path(self, path: Path) -> None:
+        """Launch ``path`` in the native OS default application."""
+        if is_android():
+            try:
+                jnius = importlib.import_module("jnius")
+                activity = jnius.autoclass("org.kivy.android.PythonActivity").mActivity
+                java_file = jnius.autoclass("java.io.File")(str(path))
+                file_provider = jnius.autoclass("androidx.core.content.FileProvider")
+                uri = file_provider.getUriForFile(
+                    activity,
+                    f"{activity.getPackageName()}.fileprovider",
+                    java_file,
+                )
+                intent_cls = jnius.autoclass("android.content.Intent")
+                intent = intent_cls(intent_cls.ACTION_VIEW)
+                mime_type = mimetypes.guess_type(path.name)[0] or "*/*"
+                intent.setDataAndType(uri, mime_type)
+                intent.addFlags(intent_cls.FLAG_GRANT_READ_URI_PERMISSION)
+                activity.startActivity(intent)
+            except Exception as exc:
+                raise OSError(str(exc)) from exc
+            return
+        if sys.platform == "win32":
+            os.startfile(str(path))  # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])  # noqa: S603, S607
+        else:
+            subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607
 
     def switch_to_sync(self) -> None:
         """Switch the active view to SyncFrame when Credentials exist."""

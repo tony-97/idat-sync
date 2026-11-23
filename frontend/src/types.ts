@@ -125,6 +125,7 @@ export interface PywebviewApi {
   sync_course(courseId: number): Promise<void> | void;
   cancel_sync(): Promise<void> | void;
   retry_load(): Promise<void> | void;
+  open_file(fileId: string): Promise<void> | void;
   logout(): Promise<void> | void;
 }
 
