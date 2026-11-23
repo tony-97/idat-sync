@@ -261,6 +261,7 @@ export const Sidebar: Component<SidebarProps> = (props) => {
                             <button
                               type="button"
                               class={`course${props.activeCourseId() === course.id ? " on" : ""}`}
+                              title={course.name}
                               onClick={() => {
                                 props.onSelectCourse(course.id);
                               }}

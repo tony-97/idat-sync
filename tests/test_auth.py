@@ -1428,6 +1428,7 @@ class TestSyncFrame(unittest.TestCase):
             assert create_kwargs["html"] == expected_html
             assert create_kwargs["width"] == 1100
             assert create_kwargs["height"] == 720
+            assert create_kwargs["min_size"] == (400, 500)
             js_api = create_kwargs["js_api"]
             assert js_api.get_state()["view"] == "login"
             assert not hasattr(js_api, "set_folder_path")

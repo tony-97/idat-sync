@@ -252,6 +252,7 @@ class MainApp:
                     js_api=_JsApi(self),
                     width=1100,
                     height=720,
+                    min_size=(400, 500),
                 )
             events = getattr(self.window, "events", None)
             if events is not None and hasattr(events, "closing"):
