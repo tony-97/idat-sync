@@ -197,14 +197,14 @@ jobs:
           path: |
             .buildozer
             ${{ runner.temp }}/buildozer-cache
-          key: buildozer-docker-${{ hashFiles('buildozer.spec') }}
+          key: buildozer-docker-v2-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            buildozer-docker-
-          save-always: true
+            buildozer-docker-v2-
 
       - name: Build APK with Buildozer (Docker)
         run: |
           mkdir -p "${{ runner.temp }}/buildozer-cache"
+          rm -rf .buildozer/android/platform/build-*/build/venv
           set +e
           docker run --rm \
             -v "${{ github.workspace }}:/home/user/hostcwd" \
