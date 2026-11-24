@@ -208,7 +208,11 @@ jobs:
             buildozer-${{ runner.os }}-
 
       - name: Build APK with Buildozer
-        run: buildozer android debug
+        env:
+          JAVA_HOME: ${{ env.JAVA_HOME_17_X64 }}
+        run: |
+          export PATH="$JAVA_HOME/bin:$PATH"
+          buildozer android debug
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v7
