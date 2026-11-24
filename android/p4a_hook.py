@@ -8,7 +8,7 @@ PROVIDER_XML = (
 ).read_text(encoding="utf-8").strip()
 
 
-def before_apk_assemble(_toolchain) -> None:
+def before_apk_assemble(_toolchain: object) -> None:
     """Insert the FileProvider <provider> element inside <application>."""
     manifest = MANIFEST_PATH.read_text(encoding="utf-8")
     if "androidx.core.content.FileProvider" in manifest:

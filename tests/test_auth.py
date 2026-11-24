@@ -4,6 +4,7 @@
 import ast
 import asyncio
 import importlib.resources
+import importlib.util
 import inspect
 import json
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import types
 import unittest
+import xml.etree.ElementTree as ET  # noqa: S405
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2659,14 +2661,11 @@ class TestOpenFilePackaging(unittest.TestCase):
 
     def test_p4a_hook_injects_valid_fileprovider_xml(self):
         """Assert android/p4a_hook.py injects a valid <provider> into <application>."""
-        import importlib.util
-        import tempfile
-        import xml.etree.ElementTree as ET
-
         root = Path(__file__).resolve().parents[1]
         hook_path = root / "android" / "p4a_hook.py"
         spec = importlib.util.spec_from_file_location("p4a_hook", hook_path)
-        assert spec and spec.loader
+        assert spec
+        assert spec.loader
         hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hook)
 
@@ -2680,16 +2679,22 @@ class TestOpenFilePackaging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / "AndroidManifest.xml"
             manifest.write_text(sample_manifest, encoding="utf-8")
-            with unittest.mock.patch.object(hook, "MANIFEST_PATH", manifest):
+            with patch.object(hook, "MANIFEST_PATH", manifest):
                 hook.before_apk_assemble(None)
-                hook.before_apk_assemble(None)  # idempotent
+                hook.before_apk_assemble(None)
 
-            parsed = ET.fromstring(manifest.read_text(encoding="utf-8"))
+            parsed = ET.fromstring(manifest.read_text(encoding="utf-8"))  # noqa: S314
             providers = parsed.findall("./application/provider")
             assert len(providers) == 1
             ns = "{http://schemas.android.com/apk/res/android}"
-            assert providers[0].attrib[f"{ns}name"] == "androidx.core.content.FileProvider"
-            assert providers[0].attrib[f"{ns}authorities"] == "${applicationId}.fileprovider"
+            assert (
+                providers[0].attrib[f"{ns}name"]
+                == "androidx.core.content.FileProvider"
+            )
+            assert (
+                providers[0].attrib[f"{ns}authorities"]
+                == "${applicationId}.fileprovider"
+            )
 
     def test_bundled_html_wires_open_file(self):
         """Assert the compiled SolidJS bundle wires the open_file JS API call."""
