@@ -2,7 +2,7 @@
 title = IDAT Sync
 package.name = idatsync
 package.domain = pe.edu.idat
-source.dir = .
+source.dir = src
 source.include_exts = py,png,jpg,html,jar,js,css
 version = 1.0.0
 requirements = python3,kivy,android,pyjnius,openssl,certifi,bottle,typing_extensions,pywebview,httpx,office365-rest-python-client>=3.3.1,charset-normalizer==3.3.2,platformdirs,yt-dlp,ffmpeg
@@ -22,4 +22,4 @@ android.accept_sdk_license = True
 
 [buildozer]
 log_level = 2
-warn_on_root = 1
+warn_on_root = 0
