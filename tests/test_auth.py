@@ -2643,19 +2643,53 @@ class TestOpenFilePackaging(unittest.TestCase):
     """Packaging and bundle checks for opening downloaded files."""
 
     def test_buildozer_spec_configures_android_fileprovider(self):
-        """Assert buildozer.spec declares androidx.core:core and FileProvider config."""
+        """Assert buildozer.spec declares androidx.core:core and FileProvider hook."""
         root = Path(__file__).resolve().parents[1]
         spec_text = (root / "buildozer.spec").read_text(encoding="utf-8")
         assert "androidx.core:core" in spec_text
-        assert "android.manifest.application_arguments" in spec_text or (
-            "android.add_resources" in spec_text
-        )
-        assert "file_provider_paths.xml" in spec_text or "file_paths.xml" in spec_text
+        assert "android.extra_manifest_application_arguments" not in spec_text
+        assert "p4a.hook = android/p4a_hook.py" in spec_text
+        assert "android.add_resources" in spec_text
+        assert "file_paths.xml" in spec_text
         paths_xml = root / "android" / "res" / "xml" / "file_paths.xml"
         assert paths_xml.is_file()
         xml_text = paths_xml.read_text(encoding="utf-8")
         assert "external-path" in xml_text
         assert "files-path" in xml_text
+
+    def test_p4a_hook_injects_valid_fileprovider_xml(self):
+        """Assert android/p4a_hook.py injects a valid <provider> into <application>."""
+        import importlib.util
+        import tempfile
+        import xml.etree.ElementTree as ET
+
+        root = Path(__file__).resolve().parents[1]
+        hook_path = root / "android" / "p4a_hook.py"
+        spec = importlib.util.spec_from_file_location("p4a_hook", hook_path)
+        assert spec and spec.loader
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+
+        sample_manifest = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
+            '    <application android:label="IDAT Sync">\n'
+            "    </application>\n"
+            "</manifest>\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "AndroidManifest.xml"
+            manifest.write_text(sample_manifest, encoding="utf-8")
+            with unittest.mock.patch.object(hook, "MANIFEST_PATH", manifest):
+                hook.before_apk_assemble(None)
+                hook.before_apk_assemble(None)  # idempotent
+
+            parsed = ET.fromstring(manifest.read_text(encoding="utf-8"))
+            providers = parsed.findall("./application/provider")
+            assert len(providers) == 1
+            ns = "{http://schemas.android.com/apk/res/android}"
+            assert providers[0].attrib[f"{ns}name"] == "androidx.core.content.FileProvider"
+            assert providers[0].attrib[f"{ns}authorities"] == "${applicationId}.fileprovider"
 
     def test_bundled_html_wires_open_file(self):
         """Assert the compiled SolidJS bundle wires the open_file JS API call."""
