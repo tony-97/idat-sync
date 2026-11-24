@@ -12,7 +12,7 @@ import tempfile
 import threading
 import types
 import unittest
-import xml.etree.ElementTree as ET  # noqa: S405
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
