@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "idat-sync"
-version = "0.0.2"
+version = "1.0.0"
 dependencies = [
     "pywebview >= 5.0",
     "pyobjc-framework-WebKit >= 9.0; sys_platform == 'darwin'",

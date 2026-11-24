@@ -222,6 +222,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -232,6 +235,7 @@ jobs:
       - name: Create Release and Upload Asset
         uses: softprops/action-gh-release@v3
         with:
+          body_path: CHANGELOG.md
           files: |
             dist/idat_sync-*
             dist/*.whl
