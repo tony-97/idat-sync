@@ -159,17 +159,16 @@ jobs:
           python -c "import pathlib, shutil, webview; shutil.copy(pathlib.Path(webview.__file__).parent / 'lib/pywebview-android.jar', 'pywebview-android.jar')"
 
       - name: Build APK with Buildozer
-        id: buildozer
-        uses: ArtemSBulgakov/buildozer-action@v1.2.0
-        with:
-          command: buildozer android debug
-          buildozer_version: stable
+        run: |
+          docker run --rm \
+            -v "${PWD}:/home/user/hostcwd" \
+            ghcr.io/kivy/buildozer:latest android debug
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v7
         with:
           name: build-artifacts-android
-          path: ${{ steps.buildozer.outputs.filename }}
+          path: bin/*.apk
 
   release:
     name: Create GitHub Release
