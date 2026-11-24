@@ -1,11 +1,13 @@
 """Architectural boundary tests verifying layer import rules."""
 
 import ast
+import importlib.metadata
 import json
 import mimetypes
 import os
 import re
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -323,6 +325,38 @@ class TestArchitectureBoundaries(unittest.TestCase):
             if matches_prefix(name, ("pytest",))
         ]
         assert not violations, f"Forbidden pytest imports in tests/: {violations}"
+
+    def test_buildozer_bundles_pyproject_dependencies(self):
+        """Ensure buildozer.spec lists pyproject.toml deps and pywebview's pure deps."""
+        project_root = Path(__file__).resolve().parent.parent
+
+        def _norm(raw: str) -> str:
+            name = re.split(r"[\s\[<>=!~;]", raw.strip(), maxsplit=1)[0]
+            return re.sub(r"[-_.]+", "-", name).lower()
+
+        spec_lines = (project_root / "buildozer.spec").read_text(encoding="utf-8")
+        req_line = next(
+            line
+            for line in spec_lines.splitlines()
+            if line.startswith("requirements =")
+        )
+        bundled = {_norm(item) for item in req_line.split("=", 1)[1].split(",")}
+
+        pyproject = tomllib.loads(
+            (project_root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        required = {
+            _norm(dep)
+            for dep in pyproject["project"]["dependencies"]
+            if "darwin" not in dep
+        }
+        required.update(
+            _norm(dep)
+            for dep in (importlib.metadata.requires("pywebview") or [])
+            if ";" not in dep
+        )
+        missing = sorted(required - bundled)
+        assert not missing, f"Missing from buildozer.spec requirements: {missing}"
 
 
 if __name__ == "__main__":
