@@ -17,7 +17,7 @@ android.add_resources = android/res/xml/file_paths.xml:xml/file_paths.xml
 android.extra_manifest_application_arguments = ./android/fileprovider_manifest.xml
 android.api = 34
 android.minapi = 24
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
 android.accept_sdk_license = True
 
 [buildozer]
