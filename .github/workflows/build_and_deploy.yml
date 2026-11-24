@@ -158,23 +158,24 @@ jobs:
           pip install pywebview
           python -c "import pathlib, shutil, webview; shutil.copy(pathlib.Path(webview.__file__).parent / 'lib/pywebview-android.jar', 'pywebview-android.jar')"
 
+      - name: Install Buildozer and system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev automake ccache
+          pip install buildozer cython
+
       - name: Cache Buildozer
         uses: actions/cache@v4
         with:
           path: |
             .buildozer
-            .buildozer-global
+            ~/.buildozer
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
             buildozer-${{ runner.os }}-
 
       - name: Build APK with Buildozer
-        run: |
-          mkdir -p .buildozer .buildozer-global
-          docker run --rm \
-            -v "${PWD}:/home/user/hostcwd" \
-            -v "${PWD}/.buildozer-global:/home/user/.buildozer" \
-            ghcr.io/kivy/buildozer:latest android debug
+        run: buildozer android debug
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v7
