@@ -10,8 +10,6 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from idat_sync.config import SyncConfig, load_config
 
 
@@ -44,7 +42,7 @@ class TestSyncConfig(unittest.TestCase):
         assert cfg.week_folder_prefix == "Semana"
         assert cfg.timezone == "America/Lima"
 
-        with pytest.raises(FrozenInstanceError):
+        with self.assertRaises(FrozenInstanceError):
             cfg.request_delay = 10.0  # type: ignore[misc]
 
     def test_rejects_malformed_urls(self):
@@ -56,9 +54,9 @@ class TestSyncConfig(unittest.TestCase):
             "https://",
         ]:
             with self.subTest(bad_url=bad_url):
-                with pytest.raises(ValueError, match="valid http/https URL"):
+                with self.assertRaisesRegex(ValueError, "valid http/https URL"):
                     SyncConfig(moodle_base_url=bad_url)
-                with pytest.raises(ValueError, match="valid http/https URL"):
+                with self.assertRaisesRegex(ValueError, "valid http/https URL"):
                     SyncConfig(sharepoint_academic_site_url=bad_url)
 
     def test_rejects_malformed_hosts(self):
@@ -71,20 +69,20 @@ class TestSyncConfig(unittest.TestCase):
             "user@idat.pe",
         ]:
             with self.subTest(bad_host=bad_host):
-                with pytest.raises(ValueError, match="bare hostname"):
+                with self.assertRaisesRegex(ValueError, "bare hostname"):
                     SyncConfig(sharepoint_host=bad_host)
-                with pytest.raises(ValueError, match="bare hostname"):
+                with self.assertRaisesRegex(ValueError, "bare hostname"):
                     SyncConfig(sharepoint_personal_host=bad_host)
-                with pytest.raises(ValueError, match="bare hostname"):
+                with self.assertRaisesRegex(ValueError, "bare hostname"):
                     SyncConfig(email_domain=bad_host)
 
     def test_rejects_invalid_folder_names(self):
         """Reject empty, dot, or multi-segment folder names."""
         for bad_folder in ["", "   ", ".", "..", "a/b", "a\\b", "/abs"]:
             with self.subTest(bad_folder=bad_folder):
-                with pytest.raises(ValueError, match="single-segment folder name"):
+                with self.assertRaisesRegex(ValueError, "single-segment folder name"):
                     SyncConfig(recordings_folder_name=bad_folder)
-                with pytest.raises(ValueError, match="single-segment folder name"):
+                with self.assertRaisesRegex(ValueError, "single-segment folder name"):
                     SyncConfig(week_folder_prefix=bad_folder)
 
     def test_rejects_invalid_request_delay(self):
@@ -92,7 +90,7 @@ class TestSyncConfig(unittest.TestCase):
         for bad_delay in [-1, -0.01, math.nan, math.inf, -math.inf, True, False]:
             with (
                 self.subTest(bad_delay=bad_delay),
-                pytest.raises(ValueError, match="request_delay"),
+                self.assertRaisesRegex(ValueError, "request_delay"),
             ):
                 SyncConfig(request_delay=bad_delay)  # type: ignore[arg-type]
 
@@ -101,7 +99,7 @@ class TestSyncConfig(unittest.TestCase):
         for bad_tz in ["", "   ", "Mars/Olympus", 123]:
             with (
                 self.subTest(bad_tz=bad_tz),
-                pytest.raises(ValueError, match="timezone"),
+                self.assertRaisesRegex(ValueError, "timezone"),
             ):
                 SyncConfig(timezone=bad_tz)  # type: ignore[arg-type]
 
@@ -134,7 +132,7 @@ class TestLoadConfig(unittest.TestCase):
             missing = Path(tmpdir) / "missing.json"
             with (
                 patch.dict(os.environ, {"IDAT_SYNC_CONFIG": str(missing)}, clear=True),
-                pytest.raises(FileNotFoundError),
+                self.assertRaises(FileNotFoundError),
             ):
                 load_config()
 
@@ -211,7 +209,7 @@ class TestLoadConfig(unittest.TestCase):
                 with (
                     self.subTest(payload=payload),
                     patch.dict(os.environ, {}, clear=True),
-                    pytest.raises(ValueError, match=r"."),
+                    self.assertRaisesRegex(ValueError, r"."),
                 ):
                     load_config(sub_dir)
 
@@ -227,7 +225,7 @@ class TestLoadConfig(unittest.TestCase):
                         {"IDAT_SYNC_REQUEST_DELAY": "not_a_float"},
                         clear=True,
                     ),
-                    pytest.raises(ValueError, match="could not convert"),
+                    self.assertRaisesRegex(ValueError, "could not convert"),
                 ):
                     load_config()
                 with (
@@ -236,7 +234,7 @@ class TestLoadConfig(unittest.TestCase):
                         {"IDAT_SYNC_SEMESTER_START": "bad-date"},
                         clear=True,
                     ),
-                    pytest.raises(ValueError, match="YYYY-MM-DD"),
+                    self.assertRaisesRegex(ValueError, "YYYY-MM-DD"),
                 ):
                     load_config()
             finally:
@@ -251,11 +249,11 @@ class TestLoadConfig(unittest.TestCase):
             try:
                 os.chdir(tmpdir)
                 with patch.dict(os.environ, {}, clear=True):
-                    with pytest.raises(ValueError, match="must not be empty"):
+                    with self.assertRaisesRegex(ValueError, "must not be empty"):
                         load_config("")
-                    with pytest.raises(ValueError, match="must not be empty"):
+                    with self.assertRaisesRegex(ValueError, "must not be empty"):
                         load_config("   ")
-                    with pytest.raises(ValueError, match="not a directory"):
+                    with self.assertRaisesRegex(ValueError, "not a directory"):
                         load_config(file_path)
 
                 with patch.dict(os.environ, {"IDAT_SYNC_CONFIG": ""}, clear=True):

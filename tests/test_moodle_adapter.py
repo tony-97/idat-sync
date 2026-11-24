@@ -6,8 +6,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
 from idat_sync.application.ports import (
     AuthenticationError,
     CourseGateway,
@@ -663,7 +661,7 @@ class TestMoodleTokenAdapter(unittest.TestCase):
 
     def test_requires_client_without_base_url(self):
         """Require client argument and omit base_url from constructor."""
-        with pytest.raises(TypeError, match="client"):
+        with self.assertRaisesRegex(TypeError, "client"):
             MoodleTokenAdapter()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
         assert (
             "base_url" not in inspect.signature(MoodleTokenAdapter.__init__).parameters
@@ -701,7 +699,7 @@ class TestMoodleTokenAdapter(unittest.TestCase):
                     self.assertLogs(
                         "idat_sync.infrastructure.moodle_adapter", level="WARNING"
                     ) as cm,
-                    pytest.raises(AuthenticationError),
+                    self.assertRaises(AuthenticationError),
                 ):
                     asyncio.run(adapter.fetch_token("jdoe", "bad"))
 
@@ -715,7 +713,7 @@ class TestMoodleTokenAdapter(unittest.TestCase):
         )
         adapter = MoodleTokenAdapter(mock_client)
 
-        with pytest.raises(RemoteServiceError, match="HTTP 500"):
+        with self.assertRaisesRegex(RemoteServiceError, "HTTP 500"):
             asyncio.run(adapter.fetch_token("jdoe", "pw"))
 
 

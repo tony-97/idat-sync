@@ -661,7 +661,16 @@ class SharepointBrowserAuth:  # pylint: disable=too-few-public-methods
         await _fill(driver, "#i0118", password)
         await _click(driver, "#idSIButton9")
         await _wait_for_url(driver, "https://login.microsoftonline.com/*/login")
-        await _click(driver, '#idDiv_SAOTCS_Proofs > div:nth-child(2) [role="button"]')
+        phone_app_otp = '#idDiv_SAOTCS_Proofs [data-value="PhoneAppOTP"]'
+        one_way_sms = '#idDiv_SAOTCS_Proofs [data-value="OneWaySMS"]'
+        await _wait_for_selector(
+            driver, f"#idTxtBx_SAOTCC_OTC, {phone_app_otp}, {one_way_sms}"
+        )
+        if not await _eval_bool(driver, _js_is_visible("#idTxtBx_SAOTCC_OTC")):
+            if await _eval_bool(driver, _js_is_visible(phone_app_otp)):
+                await _click(driver, phone_app_otp)
+            else:
+                await _click(driver, one_way_sms)
 
         mfa_code = (await get_mfa_code()).strip()
         if not mfa_code:

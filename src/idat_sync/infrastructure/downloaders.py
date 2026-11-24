@@ -8,6 +8,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import urllib.error
@@ -262,17 +263,20 @@ class RecordingDownloader(Downloader[RecordingContent]):
             raise FileSystemError(
                 f"Could not create directory for '{content.path}': {exc}"
             ) from exc
-        output_path_template = (
-            str(os_target)
-            if platform.system() == "Windows"
-            else os.path.abspath(os_target)  # noqa: PTH100
-        )
+        part_dir = os_target.with_name(f"{os_target.name}.part")
+        staged_target = part_dir / os_target.name
         ydl_opts: dict[str, Any] = {
             "cookiefile": io.StringIO(self.cookies),
             "format_sort": ["proto:dash"],
             "postprocessors": [{"key": "FFmpegMetadata"}],
             "format": "bestvideo+bestaudio/bestvideo",
-            "outtmpl": output_path_template,
+            "outtmpl": (
+                str(staged_target)
+                if platform.system() == "Windows"
+                else os.path.abspath(staged_target)  # noqa: PTH100
+            ),
+            "updatetime": False,
+            "overwrites": True,
             "progress_hooks": [
                 self._make_progress_hook(cancel_event, loop, on_progress)
             ],
@@ -281,8 +285,11 @@ class RecordingDownloader(Downloader[RecordingContent]):
         if getattr(sys, "frozen", False) and meipass is not None:
             ydl_opts["ffmpeg_location"] = meipass
         try:
+            shutil.rmtree(part_dir, ignore_errors=True)
+            part_dir.mkdir(parents=True, exist_ok=True)
             with yt_dlp.YoutubeDL(cast("Any", ydl_opts)) as ydl:
                 ydl.download([content.url])
+            staged_target.replace(os_target)
         except DownloadError as exc:
             raise self._translate_download_error(exc) from exc
         except OSError as exc:
@@ -290,6 +297,8 @@ class RecordingDownloader(Downloader[RecordingContent]):
                 f"Failed to write recording '{content.path}': {exc}",
                 operation="write",
             ) from exc
+        finally:
+            shutil.rmtree(part_dir, ignore_errors=True)
 
     async def download(
         self,

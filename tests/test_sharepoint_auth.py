@@ -18,8 +18,6 @@ from http.cookies import SimpleCookie
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from idat_sync.application.ports import AuthenticationError, CookieData
 from idat_sync.bootstrap import create_auth_service
 from idat_sync.config import WEBVIEW_USER_AGENT, SyncConfig
@@ -72,9 +70,17 @@ _PERSONAL_COOKIES: tuple[CookieData, ...] = (
 class FakeWebViewDriver:  # pylint: disable=too-many-instance-attributes
     """In-memory WebViewDriver double simulating Microsoft Entra ID SSO/MFA."""
 
-    def __init__(self, *, skip_visible: bool = False) -> None:
-        """Initialize the fake driver with configurable MFA skip state."""
+    def __init__(
+        self,
+        *,
+        skip_visible: bool = False,
+        mfa_visible: set[str] | None = None,
+    ) -> None:
+        """Initialize the fake driver with configurable MFA skip/proof state."""
         self.skip_visible = skip_visible
+        self.mfa_visible = (
+            {"PhoneAppOTP", "OneWaySMS"} if mfa_visible is None else set(mfa_visible)
+        )
         self.url = ""
         self.visited_urls: list[str] = []
         self.scripts: list[str] = []
@@ -93,13 +99,20 @@ class FakeWebViewDriver:  # pylint: disable=too-many-instance-attributes
         """Return the current simulated URL."""
         return self.url
 
+    def _visibility_result(self, script: str) -> bool | None:
+        if "#skipMfaRegistrationLink" in script and "getBoundingClientRect" in script:
+            return True if "#KmsiCheckboxField" in script else self.skip_visible
+        if ".click()" in script or "HTMLInputElement" in script:
+            return None
+        tokens = ("#idTxtBx_SAOTCC_OTC", "PhoneAppOTP", "OneWaySMS")
+        matched = [t for t in tokens if t in script]
+        return any(t in self.mfa_visible for t in matched) if matched else None
+
     async def evaluate_js(self, script: str) -> Any:
         """Simulate DOM visibility checks, fills, clicks, and URL transitions."""
         self.scripts.append(script)
-        if "#skipMfaRegistrationLink" in script and "getBoundingClientRect" in script:
-            if "#KmsiCheckboxField" in script:
-                return True
-            return self.skip_visible
+        if (visible := self._visibility_result(script)) is not None:
+            return visible
         if "#i0118" in script and "HTMLInputElement" in script:
             self._step = 1
         elif "#idSIButton9" in script and ".click()" in script:
@@ -129,7 +142,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
 
     def test_requires_tenant_hosts_and_omits_login_flow_ended(self) -> None:
         """Require tenant host args and omit login_flow_ended parameter."""
-        with pytest.raises(TypeError, match="sharepoint_host"):
+        with self.assertRaisesRegex(TypeError, "sharepoint_host"):
             SharepointBrowserAuth()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
 
         sig = inspect.signature(SharepointBrowserAuth.fetch_storage_state)
@@ -297,11 +310,55 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             assert "parseFloat(cs.opacity) > 0" in script
             assert "!el.disabled" in script
             assert "getAttribute('aria-disabled') !== 'true'" in script
-        assert any(
-            '#idDiv_SAOTCS_Proofs > div:nth-child(2) [role=\\"button\\"]' in s
-            and ".click()" in s
-            for s in driver.scripts
-        )
+        assert not any("nth-child(2)" in s for s in driver.scripts)
+
+    def test_selects_mfa_proof_dynamically_without_nth_child(self) -> None:
+        """Handle direct OTP input, PhoneAppOTP priority, and OneWaySMS fallback."""
+        cases = [
+            ("direct_otp", {"#idTxtBx_SAOTCC_OTC"}, None),
+            (
+                "prefer_phone_app_otp",
+                {"PhoneAppOTP", "OneWaySMS"},
+                '#idDiv_SAOTCS_Proofs [data-value=\\"PhoneAppOTP\\"]',
+            ),
+            (
+                "fallback_one_way_sms",
+                {"OneWaySMS"},
+                '#idDiv_SAOTCS_Proofs [data-value=\\"OneWaySMS\\"]',
+            ),
+        ]
+        for label, mfa_visible, expected_click in cases:
+            with self.subTest(case=label):
+                driver = FakeWebViewDriver(mfa_visible=mfa_visible)
+                auth = SharepointBrowserAuth(
+                    sharepoint_host="contoso.sharepoint.com",
+                    sharepoint_personal_host="contoso-my.sharepoint.com",
+                    email_domain="example.edu",
+                    driver=driver,
+                )
+                with patch(
+                    "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
+                    new=AsyncMock(),
+                ):
+                    asyncio.run(auth.fetch_storage_state("jdoe", "pw", _mfa_code))
+
+                assert not any("nth-child(2)" in s for s in driver.scripts)
+                assert any(
+                    "#idTxtBx_SAOTCC_OTC" in s
+                    and "PhoneAppOTP" in s
+                    and "OneWaySMS" in s
+                    for s in driver.scripts
+                )
+                proof_clicks = [
+                    s
+                    for s in driver.scripts
+                    if "#idDiv_SAOTCS_Proofs" in s and ".click()" in s
+                ]
+                if expected_click is None:
+                    assert not proof_clicks
+                else:
+                    assert len(proof_clicks) == 1
+                    assert expected_click in proof_clicks[0]
 
     def test_blank_mfa_raises_authentication_error_and_closes_driver(self) -> None:
         """Raise AuthenticationError without filling OTP when MFA code is blank."""
@@ -321,12 +378,15 @@ class TestSharepointBrowserAuth(unittest.TestCase):
                 "idat_sync.infrastructure.sharepoint_auth.asyncio.sleep",
                 new=AsyncMock(),
             ),
-            pytest.raises(AuthenticationError, match="MFA code is required") as ctx,
+            self.assertRaisesRegex(AuthenticationError, "MFA code is required") as ctx,
         ):
             asyncio.run(auth.fetch_storage_state("jdoe", "pw", _blank_mfa))
 
-        assert ctx.value.reason == "mfa"
-        assert not any("#idTxtBx_SAOTCC_OTC" in s for s in driver.scripts)
+        assert ctx.exception.reason == "mfa"
+        assert not any(
+            "#idTxtBx_SAOTCC_OTC" in s and "HTMLInputElement" in s
+            for s in driver.scripts
+        )
         assert driver.closed is True
 
     def test_translates_timeout_and_runtime_errors_and_propagates_cancellation(
@@ -346,13 +406,13 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             self.assertLogs(
                 "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
             ) as log_cm,
-            pytest.raises(
-                AuthenticationError, match=r"SharePoint sign-in timed out\."
+            self.assertRaisesRegex(
+                AuthenticationError, r"SharePoint sign-in timed out\."
             ) as exc_info,
         ):
             asyncio.run(auth_timeout.fetch_storage_state("jdoe", "pw", _mfa_code))
-        assert isinstance(exc_info.value.__cause__, TimeoutError)
-        assert exc_info.value.reason == "timeout"
+        assert isinstance(exc_info.exception.__cause__, TimeoutError)
+        assert exc_info.exception.reason == "timeout"
         assert any(r.exc_info is not None for r in log_cm.records)
         assert timeout_driver.closed is True
 
@@ -369,13 +429,13 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             self.assertLogs(
                 "idat_sync.infrastructure.sharepoint_auth", level="ERROR"
             ) as log_cm,
-            pytest.raises(
-                AuthenticationError, match="SharePoint browser authentication failed"
+            self.assertRaisesRegex(
+                AuthenticationError, "SharePoint browser authentication failed"
             ) as exc_info,
         ):
             asyncio.run(auth_err.fetch_storage_state("jdoe", "pw", _mfa_code))
-        assert isinstance(exc_info.value.__cause__, RuntimeError)
-        assert exc_info.value.reason == "sharepoint"
+        assert isinstance(exc_info.exception.__cause__, RuntimeError)
+        assert exc_info.exception.reason == "sharepoint"
         assert any(r.exc_info is not None for r in log_cm.records)
         assert err_driver.closed is True
 
@@ -389,7 +449,7 @@ class TestSharepointBrowserAuth(unittest.TestCase):
             email_domain="example.edu",
             driver=cancel_driver,
         )
-        with pytest.raises(asyncio.CancelledError):
+        with self.assertRaises(asyncio.CancelledError):
             asyncio.run(auth_cancel.fetch_storage_state("jdoe", "pw", _mfa_code))
         cancel_driver.aclose.assert_awaited_once()
 

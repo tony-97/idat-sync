@@ -5,8 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.ports import (
     CourseGateway,
@@ -180,7 +178,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
             "https://aulavirtual.idat.edu.pe/1/guia.pdf", "guia.pdf", 10
         )
 
-        with pytest.raises(ValueError, match="Unsafe content filepath"):
+        with self.assertRaisesRegex(ValueError, "Unsafe content filepath"):
             await self.repo.list_url_content(
                 ModuleContent(
                     filename="secret.pdf",
@@ -494,11 +492,11 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         self.mock_sp_strategy.list_url_content.side_effect = CredentialsExpiredError(
             "401 expired"
         )
-        with pytest.raises(CredentialsExpiredError):
+        with self.assertRaises(CredentialsExpiredError):
             await self.repo.list_url_content(broken)
 
         self.mock_sp_strategy.list_url_content.side_effect = RuntimeError("bug")
-        with pytest.raises(RuntimeError, match="bug"):
+        with self.assertRaisesRegex(RuntimeError, "bug"):
             await self.repo.list_url_content(broken)
 
     async def test_stream_course_content_overlaps_modules_and_preserves_intra_order(
@@ -660,14 +658,14 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
         consumer = asyncio.create_task(_consume_until_cancelled())
         await other_started.wait()
         consumer.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with self.assertRaises(asyncio.CancelledError):
             await consumer
         assert other_mod_cancelled.is_set()
 
         # CredentialsExpiredError cancels other module tasks and stops ModA
         other_mod_cancelled.clear()
         other_started.clear()
-        with pytest.raises(CredentialsExpiredError):
+        with self.assertRaises(CredentialsExpiredError):
             _ = [
                 item
                 async for item in self.repo.stream_course_content(
@@ -703,7 +701,7 @@ class TestCourseRepository(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
         )
-        with pytest.raises(ValueError, match="Unsafe content path"):
+        with self.assertRaisesRegex(ValueError, "Unsafe content path"):
             _ = [
                 item
                 async for item in self.repo.stream_course_content(

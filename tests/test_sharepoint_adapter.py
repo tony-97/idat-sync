@@ -13,7 +13,6 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
-import pytest
 from office365.runtime.client_request_exception import ClientRequestException
 from office365.runtime.client_runtime_context import ClientRuntimeContext
 from office365.runtime.http.http_method import HttpMethod
@@ -294,7 +293,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         """Ensure SharepointApiAdapter stays decoupled from transport/time."""
-        with pytest.raises(TypeError, match="request_delay"):
+        with self.assertRaisesRegex(TypeError, "request_delay"):
             SharepointApiAdapter(  # pylint: disable=unexpected-keyword-arg
                 client=self.mock_client,
                 semester_start=self.semester_start,
@@ -377,7 +376,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
 
     async def test_requires_timezone_and_converts_aware_timestamps(self):
         """Require timezone and convert aware datetimes before week calculation."""
-        with pytest.raises(TypeError, match="timezone"):
+        with self.assertRaisesRegex(TypeError, "timezone"):
             SharepointApiAdapter(  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
                 client=self.mock_client,
                 semester_start=self.semester_start,
@@ -468,7 +467,7 @@ class TestSharepointAdapter(unittest.IsolatedAsyncioTestCase):
         mock_ctx_cls.return_value = _make_sharepoint_ctx(
             "https://contoso-my.sharepoint.com/personal/user"
         )
-        with pytest.raises(TypeError, match="request_delay"):
+        with self.assertRaisesRegex(TypeError, "request_delay"):
             await SharepointClient.create(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
                 cookies=[],
                 sharepoint_personal_host="contoso-my.sharepoint.com",
@@ -953,14 +952,14 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         """Map empty personal_site.url and HTTP 401/403 to CredentialsExpiredError."""
         mock_ctx_cls.return_value = _make_sharepoint_ctx("")
 
-        with pytest.raises(CredentialsExpiredError) as ctx:
+        with self.assertRaises(CredentialsExpiredError) as ctx:
             await SharepointClient.create(
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
                 academic_site_url="https://idat628.sharepoint.com/sites/Academic",
                 rate_limiter=AsyncRateLimiter(0.0),
             )
-        assert ctx.value.service == "SharePoint"
+        assert ctx.exception.service == "SharePoint"
 
         ctx_ok = _make_sharepoint_ctx("https://idat628-my.sharepoint.com/personal/user")
         mock_ctx_cls.return_value = ctx_ok
@@ -976,9 +975,9 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
                 side_effect=err
             )
-            with pytest.raises(CredentialsExpiredError) as ctx:
+            with self.assertRaises(CredentialsExpiredError) as ctx:
                 await client.search_for_recordings("Algebra")
-            assert ctx.value.service == "SharePoint"
+            assert ctx.exception.service == "SharePoint"
             assert ctx_ok.search.query.return_value.execute_query_async.call_count == 1
 
             req = httpx.Request("GET", "https://idat628.sharepoint.com/_api/search")
@@ -990,14 +989,14 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
                 side_effect=status_err
             )
-            with pytest.raises(CredentialsExpiredError) as ctx:
+            with self.assertRaises(CredentialsExpiredError) as ctx:
                 await client.search_for_recordings("Algebra")
-            assert ctx.value.service == "SharePoint"
+            assert ctx.exception.service == "SharePoint"
 
         client.search_client = None
-        with pytest.raises(CredentialsExpiredError) as ctx:
+        with self.assertRaises(CredentialsExpiredError) as ctx:
             await client.search_for_recordings("Algebra")
-        assert ctx.value.service == "SharePoint"
+        assert ctx.exception.service == "SharePoint"
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -1022,13 +1021,13 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
             side_effect=err_404
         )
-        with pytest.raises(RemoteServiceError) as ctx:
+        with self.assertRaises(RemoteServiceError) as ctx:
             await client.search_for_recordings("Algebra")
-        assert not isinstance(ctx.value, CredentialsExpiredError)
-        assert isinstance(ctx.value.__cause__, ClientRequestException)
-        assert ctx.value.service == "SharePoint"
-        assert ctx.value.status_code == 404
-        assert ctx.value.is_network is False
+        assert not isinstance(ctx.exception, CredentialsExpiredError)
+        assert isinstance(ctx.exception.__cause__, ClientRequestException)
+        assert ctx.exception.service == "SharePoint"
+        assert ctx.exception.status_code == 404
+        assert ctx.exception.is_network is False
 
         req = httpx.Request("GET", "https://idat628.sharepoint.com/_api/search")
         status_err = httpx.HTTPStatusError(
@@ -1037,26 +1036,26 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
             side_effect=status_err
         )
-        with pytest.raises(
-            RemoteServiceError, match="SharePoint request failed"
+        with self.assertRaisesRegex(
+            RemoteServiceError, "SharePoint request failed"
         ) as ctx:
             await client.search_for_recordings("Algebra")
-        assert ctx.value.service == "SharePoint"
-        assert ctx.value.status_code == 502
-        assert ctx.value.is_network is False
+        assert ctx.exception.service == "SharePoint"
+        assert ctx.exception.status_code == 502
+        assert ctx.exception.is_network is False
 
         http_err = httpx.ConnectError("sp timeout", request=MagicMock())
         ctx_ok.search.query.return_value.execute_query_async = AsyncMock(
             side_effect=http_err
         )
-        with pytest.raises(
-            RemoteServiceError, match="SharePoint request failed"
+        with self.assertRaisesRegex(
+            RemoteServiceError, "SharePoint request failed"
         ) as ctx:
             await client.search_for_recordings("Algebra")
-        assert isinstance(ctx.value.__cause__, httpx.HTTPError)
-        assert ctx.value.service == "SharePoint"
-        assert ctx.value.status_code is None
-        assert ctx.value.is_network is True
+        assert isinstance(ctx.exception.__cause__, httpx.HTTPError)
+        assert ctx.exception.service == "SharePoint"
+        assert ctx.exception.status_code is None
+        assert ctx.exception.is_network is True
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -1110,7 +1109,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         ctx_ok.execute_query_with_incremental_retry_async = AsyncMock(
             side_effect=ClientRequestException(response=MagicMock(status_code=401))
         )
-        with pytest.raises(CredentialsExpiredError):
+        with self.assertRaises(CredentialsExpiredError):
             await client.load_entity(MagicMock(), ctx_ok)
         mock_sleep.assert_awaited_once()
 
@@ -1166,7 +1165,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         mock_transport_cls.return_value.aclose = AsyncMock()
         mock_ctx_cls.return_value = _make_sharepoint_ctx("")
 
-        with pytest.raises(CredentialsExpiredError):
+        with self.assertRaises(CredentialsExpiredError):
             await SharepointClient.create(
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
@@ -1192,7 +1191,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
         )
         mock_ctx_cls.return_value = mock_ctx
 
-        with pytest.raises(asyncio.CancelledError):
+        with self.assertRaises(asyncio.CancelledError):
             await SharepointClient.create(
                 cookies=[],
                 sharepoint_personal_host="idat628-my.sharepoint.com",
@@ -1230,7 +1229,7 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
             new_callable=AsyncMock,
             side_effect=asyncio.CancelledError(),
         )
-        with cancel_sleep, pytest.raises(asyncio.CancelledError):
+        with cancel_sleep, self.assertRaises(asyncio.CancelledError):
             await client._await_query(coro)  # noqa: SLF001  # pylint: disable=protected-access
 
         assert coro.cr_frame is None
@@ -1436,13 +1435,13 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
                 rate_limiter=AsyncRateLimiter(0.0),
             ) as client:
                 ctx = client.get_client(site_url)
-                with pytest.raises(RemoteServiceError) as query_ctx:
+                with self.assertRaises(RemoteServiceError) as query_ctx:
                     await client.fetch_folder_files(
                         ctx.web.get_folder_by_id("8b447506-868f-4a0b-8607-c5f4737cad3a")
                     )
-                assert query_ctx.value.service == "SharePoint"
-                assert query_ctx.value.status_code is None
-                assert query_ctx.value.is_network is True
+                assert query_ctx.exception.service == "SharePoint"
+                assert query_ctx.exception.status_code is None
+                assert query_ctx.exception.is_network is True
 
                 file = ctx.web.get_file_by_id(file_uid)
                 file.set_property("UniqueId", file_uid, persist_changes=False)
@@ -1453,14 +1452,14 @@ class TestSharepointClient(unittest.IsolatedAsyncioTestCase):
                 )
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     target = Path(tmp_dir) / "slides.pptx"
-                    with pytest.raises(RemoteServiceError) as dl_ctx:
+                    with self.assertRaises(RemoteServiceError) as dl_ctx:
                         await SharepointDownloader(client).download(
                             SharepointContent(target, 0, file)
                         )
                     assert not target.exists()
-                assert dl_ctx.value.service == "SharePoint"
-                assert dl_ctx.value.status_code is None
-                assert dl_ctx.value.is_network is True
+                assert dl_ctx.exception.service == "SharePoint"
+                assert dl_ctx.exception.status_code is None
+                assert dl_ctx.exception.is_network is True
 
 
 if __name__ == "__main__":

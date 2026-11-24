@@ -25,13 +25,14 @@ from idat_sync.application.events import (
 )
 from idat_sync.application.ports import (
     CredentialsExpiredError,
+    Downloader,
     DownloadTask,
     FileSystemError,
     FileSystemPort,
     IDATSyncError,
     RemoteServiceError,
 )
-from idat_sync.application.task_orchestrator import TaskChannel, TaskOrchestrator
+from idat_sync.application.task_orchestrator import TaskChannel
 from idat_sync.domain.content import Content
 from idat_sync.domain.course import Course
 from idat_sync.domain.path_utils import PathDisambiguator, safe_filename
@@ -72,7 +73,7 @@ class _CourseStreamRun:  # pylint: disable=too-few-public-methods,too-many-insta
         self.recordings_folder = course_path / sync.recordings_folder_name
         self.local_mtimes = local_mtimes
         self.errors = errors
-        self.channel: TaskChannel = sync.task_orchestrator.create_channel()
+        self.channel = TaskChannel(sync.downloader_groups)
         self.event_queue: asyncio.Queue[SyncEvent | None] = asyncio.Queue()
         self._disambiguator = PathDisambiguator()
         self._synced_count = 0
@@ -176,7 +177,7 @@ class IDATSync:
         self,
         course_repository: CourseRepository,
         download_manager: DownloadManager,
-        task_orchestrator: TaskOrchestrator,
+        downloader_groups: Sequence[Sequence[Downloader]],
         file_system: FileSystemPort,
         recordings_folder_name: str,
         *,
@@ -186,7 +187,7 @@ class IDATSync:
         """Initialize the sync service with its repository, managers, and closers."""
         self.course_repository = course_repository
         self.download_manager = download_manager
-        self.task_orchestrator = task_orchestrator
+        self.downloader_groups = downloader_groups
         self.file_system = file_system
         self.recordings_folder_name = recordings_folder_name
         self._closers = list(closers)

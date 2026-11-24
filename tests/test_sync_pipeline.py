@@ -18,12 +18,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
-import pytest
 from yt_dlp.utils import DownloadCancelled, DownloadError
 
-from idat_sync import domain as domain_mod
 from idat_sync.application import events as events_mod
 from idat_sync.application import ports
+from idat_sync.application import task_orchestrator as task_orchestrator_mod
 from idat_sync.application.auth_service import AuthService
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
@@ -51,7 +50,7 @@ from idat_sync.application.ports import (
     UrlContentStrategy,
 )
 from idat_sync.application.sync_service import IDATSync
-from idat_sync.application.task_orchestrator import TaskOrchestrator
+from idat_sync.application.task_orchestrator import TaskChannel
 from idat_sync.bootstrap import (
     configure_logging,
     create_auth_service,
@@ -176,7 +175,6 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         self.downloaders = [d for g in self.groups for d in g]
         self.fs = LocalFileSystemAdapter()
         self.manager = DownloadManager(self.downloaders, file_system=self.fs)
-        self.orchestrator = TaskOrchestrator(self.groups)
 
     def test_create_download_task_maps_contents_without_filesystem_calls(self):  # pylint: disable=too-many-locals
         """Map Contents to DownloadTasks without touching FileSystemPort."""
@@ -220,7 +218,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             task = self.manager.create_download_task(content)
             assert task is not None
-            channel = self.orchestrator.create_channel()
+            channel = TaskChannel(self.groups)
             workers = [
                 asyncio.create_task(coro)
                 for coro in channel.create_workers(lambda t: t.download())
@@ -308,6 +306,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                                 "total_bytes_estimate": None,
                             }
                         )
+                        Path(opts["outtmpl"]).write_bytes(b"video")
 
                 return _FakeYdl()
 
@@ -327,36 +326,113 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         ]
         assert all(tid == main_thread for _, _, tid in ticks)
 
-    async def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(
+    async def test_recording_downloader_uses_exact_target_file_path_even_without_suffix(  # pylint: disable=too-many-locals
         self,
     ):
-        """Pass exact target path to yt-dlp outtmpl even without file extension."""
+        """Stage yt-dlp output in <name>.part/<name> and move atomically."""
         prefix = "\\\\?\\" if platform.system() == "Windows" else ""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
+            captured_opts: list[dict] = []
+            downloaded_urls: list[list[str]] = []
             for rel_path in (
                 Path("Grabaciones/Semana 1/video.mp4"),
                 Path("Grabaciones/Semana 1/recording_no_ext"),
             ):
+                captured_opts.clear()
+                downloaded_urls.clear()
                 target_path = tmp_path / rel_path
                 rec = RecordingContent(
                     target_path,
                     1700000000,
                     "https://idat628-my.sharepoint.com/:v:/r/personal/video.mp4",
                 )
+
+                def _make_ydl(opts, target=target_path):
+                    captured_opts.append(opts)
+
+                    class _StubYdl:
+                        def __enter__(self):
+                            return self
+
+                        def __exit__(self, *_args):
+                            return False
+
+                        def download(self, urls):
+                            """Write staged video and fragment files."""
+                            downloaded_urls.append(urls)
+                            assert not target.exists()
+                            staged = Path(opts["outtmpl"])
+                            staged.write_bytes(b"video-bytes")
+                            (staged.parent / "video.f137.mp4").write_bytes(b"frag")
+
+                    return _StubYdl()
+
                 with patch(
-                    "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
-                ) as mock_ydl:
+                    "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                    side_effect=_make_ydl,
+                ):
                     await self.recording_downloader.download(rec)
 
                 assert target_path.parent.is_dir()
-                assert not target_path.is_dir()
-                ydl_opts = mock_ydl.call_args.args[0]
-                abs_target = await asyncio.to_thread(os.path.abspath, target_path)
-                assert ydl_opts["outtmpl"] == f"{prefix}{abs_target}"
-                mock_ydl.return_value.__enter__.return_value.download.assert_called_once_with(
-                    [rec.url]
+                assert target_path.read_bytes() == b"video-bytes"
+                part_dir = target_path.with_name(f"{target_path.name}.part")
+                assert not part_dir.exists()
+                ydl_opts = captured_opts[0]
+                assert ydl_opts["updatetime"] is False
+                assert ydl_opts["overwrites"] is True
+                abs_staged = await asyncio.to_thread(
+                    os.path.abspath, part_dir / target_path.name
                 )
+                assert ydl_opts["outtmpl"] == f"{prefix}{abs_staged}"
+                assert downloaded_urls == [[rec.url]]
+
+    async def test_recording_downloader_cleans_up_part_dir_on_failure(self):
+        """Remove staged .part directory on error without corrupting target."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target_path = Path(tmpdir) / "Semana 1" / "video.mp4"
+            target_path.parent.mkdir(parents=True)
+            target_path.write_bytes(b"existing-good-video")
+            part_dir = target_path.with_name(f"{target_path.name}.part")
+            rec = RecordingContent(
+                target_path,
+                1700000000,
+                "https://idat628-my.sharepoint.com/:v:/r/personal/video.mp4",
+            )
+
+            for exc_to_raise, expected_exc in (
+                (DownloadError("HTTP Error 500"), RemoteServiceError),
+                (DownloadCancelled("cancelled"), DownloadCancelled),
+                (OSError("disk full"), FileSystemError),
+            ):
+
+                def _failing_ydl(opts, err=exc_to_raise):
+                    class _FailYdl:
+                        def __enter__(self):
+                            return self
+
+                        def __exit__(self, *_args):
+                            return False
+
+                        def download(self, _urls):
+                            """Write partial bytes and raise configured error."""
+                            staged = Path(opts["outtmpl"])
+                            staged.write_bytes(b"corrupt-partial")
+                            raise err
+
+                    return _FailYdl()
+
+                with (
+                    patch(
+                        "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                        side_effect=_failing_ydl,
+                    ),
+                    self.assertRaises(expected_exc),
+                ):
+                    await self.recording_downloader.download(rec)
+
+                assert not part_dir.exists()
+                assert target_path.read_bytes() == b"existing-good-video"
 
     async def test_custom_downloader_extends_without_modifying_base_classes(self):
         """Allow registering a custom Downloader subclass without core changes."""
@@ -379,7 +455,6 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         manager = DownloadManager(
             [self.recording_downloader, yt_downloader], file_system=self.fs
         )
-        orchestrator = TaskOrchestrator([[self.recording_downloader, yt_downloader]])
 
         yt_rec = RecordingContent(
             Path("Grabaciones/Semana 1/yt_video.mp4"),
@@ -390,10 +465,10 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         assert task is not None
         assert task.downloader is yt_downloader
 
-        channel = orchestrator.create_channel()
+        channel = TaskChannel([[self.recording_downloader, yt_downloader]])
         channel.enqueue(task)
         channel.close()
-        await asyncio.gather(*channel.create_workers())
+        await asyncio.gather(*channel.create_workers(lambda t: t.download()))
         assert downloaded == [yt_rec]
         assert hasattr(ports, "ProgressCallback")
 
@@ -448,11 +523,11 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
     def test_content_in_folder_rejects_traversal_and_anchored_paths(self):
         """Reject absolute, anchored, and '..' traversal paths in in_folder."""
         for unsafe_item in (Path("/etc/passwd"), Path("../secret.txt")):
-            with pytest.raises(ValueError, match="Unsafe content path"):
+            with self.assertRaisesRegex(ValueError, "Unsafe content path"):
                 StringContent(unsafe_item, 0, ["x"]).in_folder("Course")
-        with pytest.raises(ValueError, match="Unsafe content path"):
+        with self.assertRaisesRegex(ValueError, "Unsafe content path"):
             StringContent(Path("../secret.txt"), 0, ["x"]).in_folder("")
-        with pytest.raises(ValueError, match="Unsafe folder path"):
+        with self.assertRaisesRegex(ValueError, "Unsafe folder path"):
             StringContent(Path("file.pdf"), 0, ["x"]).in_folder("../outside")
 
         wrapped = StringContent(Path("file.pdf"), 0, ["x"]).in_folder(
@@ -460,7 +535,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         )
         assert wrapped.path == Path("/tmp/Course/file.pdf")  # noqa: S108
 
-    def test_local_filesystem_adapter_and_download_manager_seam(self):  # pylint: disable=too-many-locals
+    def test_local_filesystem_adapter_and_download_manager_seam(self):  # pylint: disable=too-many-locals,too-many-statements
         """Verify LocalFileSystemAdapter and DownloadManager is_pending behavior."""
         fs = LocalFileSystemAdapter()
         assert not hasattr(FileSystemPort, "exists")
@@ -479,10 +554,15 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             os.utime(test_file, (1234567890, 1234567890))
             part_file = test_sub / "test.txt.part"
             part_file.write_text("partial", encoding="utf-8")
+            part_dir = test_sub / "video.mp4.part"
+            part_dir.mkdir()
+            staged_file = part_dir / "video.mp4"
+            staged_file.write_text("staged", encoding="utf-8")
 
             mtimes = fs.scan_mtimes(tmp_path)
             assert mtimes.get(test_file) == 1234567890
             assert part_file not in mtimes
+            assert staged_file not in mtimes
             assert fs.read_bytes(test_file) == b"content"
             assert fs.read_bytes(tmp_path / "missing.txt") is None
 
@@ -526,19 +606,19 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             with (
                 patch.object(Path, "mkdir", side_effect=PermissionError("no perms")),
-                pytest.raises(FileSystemError, match="no perms") as dir_err,
+                self.assertRaisesRegex(FileSystemError, "no perms") as dir_err,
             ):
                 fs.ensure_dir(tmp_path / "blocked")
-            assert isinstance(dir_err.value.__cause__, OSError)
-            assert dir_err.value.operation == "access"
+            assert isinstance(dir_err.exception.__cause__, OSError)
+            assert dir_err.exception.operation == "access"
 
             with (
                 patch.object(Path, "rglob", side_effect=OSError("io failure")),
-                pytest.raises(FileSystemError, match="io failure") as scan_err,
+                self.assertRaisesRegex(FileSystemError, "io failure") as scan_err,
             ):
                 fs.scan_mtimes(tmp_path)
-            assert isinstance(scan_err.value.__cause__, OSError)
-            assert scan_err.value.operation == "access"
+            assert isinstance(scan_err.exception.__cause__, OSError)
+            assert scan_err.exception.operation == "access"
 
             with patch.object(
                 Path, "read_bytes", side_effect=PermissionError("locked")
@@ -557,12 +637,29 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
             download_manager=DownloadManager([], mock_fs),
-            task_orchestrator=TaskOrchestrator([]),
+            downloader_groups=[],
             file_system=mock_fs,
             recordings_folder_name="Grabaciones",
         )
         assert not hasattr(sync, "get_course_remote_tree")
         assert not hasattr(sync, "check_course_sync")
+        with self.assertRaisesRegex(TypeError, "task_orchestrator"):
+            IDATSync(  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
+                course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
+                download_manager=DownloadManager([], mock_fs),
+                task_orchestrator=[],
+                file_system=mock_fs,
+                recordings_folder_name="Grabaciones",
+            )
+        with self.assertRaisesRegex(TypeError, "publish"):
+            IDATSync(  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
+                course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
+                download_manager=DownloadManager([], mock_fs),
+                downloader_groups=[],
+                file_system=mock_fs,
+                recordings_folder_name="Grabaciones",
+                publish=None,
+            )
 
         course = Course(id=1, name="Algorithms")
         events = [event async for event in sync.sync_course(course, Path("target_dir"))]
@@ -652,7 +749,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
     def test_download_manager_requires_filesystem_port(self):
         """Require file_system argument on DownloadManager."""
-        with pytest.raises(TypeError, match="file_system"):
+        with self.assertRaisesRegex(TypeError, "file_system"):
             DownloadManager(self.downloaders)  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
 
     async def test_downloaders_delegate_to_clients_and_use_injected_personal_host(  # pylint: disable=too-many-locals,too-many-statements
@@ -661,12 +758,12 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         """Delegate downloads to injected clients and honor personal host."""
         mock_moodle = MagicMock(spec=MoodleClient)
         moodle_dl = MoodleDownloader(mock_moodle)
-        with pytest.raises(TypeError, match="request_delay"):
+        with self.assertRaisesRegex(TypeError, "request_delay"):
             MoodleDownloader(mock_moodle, request_delay=0.75)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
         mock_sp = MagicMock(spec=SharepointClient)
         sp_dl = SharepointDownloader(mock_sp)
-        with pytest.raises(TypeError, match="request_delay"):
+        with self.assertRaisesRegex(TypeError, "request_delay"):
             SharepointDownloader(mock_sp, request_delay=1.25)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
         rec_dl = RecordingDownloader(
@@ -765,7 +862,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             assert moodle_target.read_bytes() == b"ok"
             assert not moodle_target.with_name("a.pdf.part").exists()
 
-            with pytest.raises(RemoteServiceError):
+            with self.assertRaises(RemoteServiceError):
                 await SharepointDownloader(mock_sp).download(
                     SharepointContent(sp_target, 0, MagicMock())
                 )
@@ -802,7 +899,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             course_repository=CourseRepository(mock_course_gw, mock_rec_gw, []),
             download_manager=DownloadManager([rec_dl], mock_fs),
-            task_orchestrator=TaskOrchestrator([[rec_dl]]),
+            downloader_groups=[[rec_dl]],
             file_system=mock_fs,
             recordings_folder_name="Videos",
         )
@@ -930,7 +1027,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 new_callable=AsyncMock,
                 side_effect=CredentialsExpiredError("expired"),
             ),
-            pytest.raises(CredentialsExpiredError),
+            self.assertRaises(CredentialsExpiredError),
         ):
             await create_sync_service(
                 {"token": "tok123", "sharepoint_storage_state": {"cookies": []}},  # type: ignore[arg-type]
@@ -982,7 +1079,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             f"Found forbidden infrastructure imports in ui/: {ui_violations}"
         )
 
-    async def test_recording_downloader_maps_http_401_403_to_credentials_expired(
+    async def test_recording_downloader_maps_http_401_403_to_credentials_expired(  # pylint: disable=too-many-statements
         self,
     ):
         """Map yt-dlp HTTP 401/403 DownloadErrors to CredentialsExpiredError."""
@@ -994,16 +1091,24 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             dl = RecordingDownloader(
                 [], "idat628-my.sharepoint.com", AsyncRateLimiter(0.0)
             )
-            with pytest.raises(TypeError, match="request_delay"):
+            with self.assertRaisesRegex(TypeError, "request_delay"):
                 RecordingDownloader(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
                     cookies=[],
                     sharepoint_personal_host="idat628-my.sharepoint.com",
                     request_delay=1.0,  # type: ignore[call-arg]
                 )
 
+            def _writing_ydl(opts):
+                ctx = MagicMock()
+                ctx.__enter__.return_value.download.side_effect = lambda _u: Path(
+                    opts["outtmpl"]
+                ).write_bytes(b"ok")
+                return ctx
+
             with patch(
-                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
-            ) as mock_ydl:
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                side_effect=_writing_ydl,
+            ):
                 await dl.download(content)
             assert not dl.rate_limiter._next_allowed  # noqa: SLF001  # pylint: disable=protected-access
 
@@ -1012,8 +1117,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 [], "idat628-my.sharepoint.com", paced_limiter
             )
             with patch(
-                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
-            ) as mock_ydl:
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                side_effect=_writing_ydl,
+            ):
                 await paced_dl.download(content)
             assert paced_limiter._next_allowed > 0.0  # noqa: SLF001  # pylint: disable=protected-access
 
@@ -1023,9 +1129,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 ) as mock_ydl:
                     dl_mock = mock_ydl.return_value.__enter__.return_value
                     dl_mock.download.side_effect = DownloadError(msg)
-                    with pytest.raises(CredentialsExpiredError) as ctx:
+                    with self.assertRaises(CredentialsExpiredError) as ctx:
                         await dl.download(content)
-                    assert ctx.value.service == "SharePoint"
+                    assert ctx.exception.service == "SharePoint"
 
             with patch(
                 "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
@@ -1034,21 +1140,23 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 dl_mock.download.side_effect = DownloadError(
                     "HTTP Error 404: Not Found"
                 )
-                with pytest.raises(RemoteServiceError, match="HTTP Error 404") as ctx:
+                with self.assertRaisesRegex(
+                    RemoteServiceError, "HTTP Error 404"
+                ) as ctx:
                     await dl.download(content)
-                assert not isinstance(ctx.value, CredentialsExpiredError)
-                assert isinstance(ctx.value.__cause__, DownloadError)
-                assert ctx.value.service == "SharePoint"
-                assert ctx.value.status_code is None
-                assert ctx.value.is_network is False
+                assert not isinstance(ctx.exception, CredentialsExpiredError)
+                assert isinstance(ctx.exception.__cause__, DownloadError)
+                assert ctx.exception.service == "SharePoint"
+                assert ctx.exception.status_code is None
+                assert ctx.exception.is_network is False
 
             with (
                 patch.object(Path, "mkdir", side_effect=PermissionError("no mkdir")),
-                pytest.raises(FileSystemError, match="no mkdir") as ctx,
+                self.assertRaisesRegex(FileSystemError, "no mkdir") as ctx,
             ):
                 await dl.download(content)
-            assert isinstance(ctx.value.__cause__, OSError)
-            assert ctx.value.operation == "access"
+            assert isinstance(ctx.exception.__cause__, OSError)
+            assert ctx.exception.operation == "access"
 
     async def test_recording_downloader_sets_structured_error_metadata(self):
         """Populate service, status_code, is_network, and write operation metadata."""
@@ -1071,11 +1179,11 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 dl_mock.download.side_effect = DownloadError(
                     "HTTP Error 502", exc_info=(type(http_cause), http_cause, None)
                 )
-                with pytest.raises(RemoteServiceError) as ctx:
+                with self.assertRaises(RemoteServiceError) as ctx:
                     await dl.download(content)
-                assert ctx.value.service == "SharePoint"
-                assert ctx.value.status_code == 502
-                assert ctx.value.is_network is False
+                assert ctx.exception.service == "SharePoint"
+                assert ctx.exception.status_code == 502
+                assert ctx.exception.is_network is False
 
             url_cause = urllib.error.URLError("offline")
             with patch(
@@ -1085,20 +1193,20 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 dl_mock.download.side_effect = DownloadError(
                     "Unable to download", exc_info=(type(url_cause), url_cause, None)
                 )
-                with pytest.raises(RemoteServiceError) as ctx:
+                with self.assertRaises(RemoteServiceError) as ctx:
                     await dl.download(content)
-                assert ctx.value.service == "SharePoint"
-                assert ctx.value.status_code is None
-                assert ctx.value.is_network is True
+                assert ctx.exception.service == "SharePoint"
+                assert ctx.exception.status_code is None
+                assert ctx.exception.is_network is True
 
             with patch(
                 "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
             ) as mock_ydl:
                 dl_mock = mock_ydl.return_value.__enter__.return_value
                 dl_mock.download.side_effect = OSError("disk full")
-                with pytest.raises(FileSystemError, match="disk full") as fs_ctx:
+                with self.assertRaisesRegex(FileSystemError, "disk full") as fs_ctx:
                     await dl.download(content)
-                assert fs_ctx.value.operation == "write"
+                assert fs_ctx.exception.operation == "write"
 
     async def test_task_orchestrator_channel_fifo_concurrency_errors_and_imports(  # pylint: disable=too-many-locals,too-many-statements
         self,
@@ -1138,16 +1246,21 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         d2 = StubDownloader("g1b")
         d3 = StubDownloader("g2", gate=True)
         unregistered = StubDownloader("unknown")
-        orch = TaskOrchestrator([[d1, d2], [d3]])
-        assert not hasattr(orch, "create_coroutines")
+        assert not hasattr(task_orchestrator_mod, "TaskOrchestrator")
+        assert not hasattr(task_orchestrator_mod, "_default_run_task")
 
-        channel = orch.create_channel()
-        with pytest.raises(ValueError, match="Unregistered downloader"):
+        channel = TaskChannel([[d1, d2], [d3]])
+        with self.assertRaisesRegex(TypeError, "run_task"):
+            channel.create_workers()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
+        with self.assertRaisesRegex(ValueError, "Unregistered downloader"):
             channel.enqueue(
                 DownloadTask(StringContent(Path("x.txt"), 0, ["x"]), unregistered)
             )
 
-        workers = [asyncio.create_task(c) for c in channel.create_workers()]
+        workers = [
+            asyncio.create_task(c)
+            for c in channel.create_workers(lambda t: t.download())
+        ]
         channel.enqueue(DownloadTask(StringContent(Path("a.txt"), 0, ["x"]), d1))
         channel.enqueue(DownloadTask(StringContent(Path("b.txt"), 0, ["x"]), d2))
         channel.enqueue(DownloadTask(StringContent(Path("c.txt"), 0, ["x"]), d3))
@@ -1165,14 +1278,14 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         # Unhandled worker exception stops subsequent tasks in that group
         executed.clear()
-        err_channel = orch.create_channel()
+        err_channel = TaskChannel([[d1, d2], [d3]])
         err_channel.enqueue(DownloadTask(StringContent(Path("fail.txt"), 0, ["x"]), d2))
         err_channel.enqueue(
             DownloadTask(StringContent(Path("after.txt"), 0, ["x"]), d2)
         )
         err_channel.close()
-        with pytest.raises(CredentialsExpiredError):
-            await asyncio.gather(*err_channel.create_workers())
+        with self.assertRaises(CredentialsExpiredError):
+            await asyncio.gather(*err_channel.create_workers(lambda t: t.download()))
         assert "g1b:after.txt" not in executed
 
         orch_file = (
@@ -1255,11 +1368,10 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         str_dl = StubStringDownloader()
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
         dm = DownloadManager([str_dl], StubFileSystem())  # type: ignore[arg-type]
-        orch = TaskOrchestrator([[str_dl]])
         sync = IDATSync(
             repo,
             dm,
-            orch,
+            [[str_dl]],
             StubFileSystem(),  # type: ignore[arg-type]
             "Grabaciones",
         )
@@ -1292,7 +1404,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 [],
             ]
 
-            with pytest.raises(CredentialsExpiredError):
+            with self.assertRaises(CredentialsExpiredError):
                 await _consume_events(sync.sync_courses(tmpdir, [c1, c2]), events)
             assert mock_rec_gw.fetch_recordings.call_count == 1
             aborted_courses = [e for e in events if isinstance(e, CourseSyncCompleted)]
@@ -1335,7 +1447,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             CourseRepository(MagicMock(spec=CourseGateway), mock_rec_gw, []),
             DownloadManager([dl], mock_fs),
-            TaskOrchestrator([[dl]]),
+            [[dl]],
             mock_fs,
             "Grabaciones",
         )
@@ -1378,9 +1490,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 )
             ],
         )
-        with pytest.raises(ExceptionGroup) as eg_ctx:
+        with self.assertRaises(ExceptionGroup) as eg_ctx:
             _ = [e async for e in sync.sync_course(bug_course, Path("out2"))]
-        assert [str(exc) for exc in eg_ctx.value.exceptions] == ["internal bug"]
+        assert [str(exc) for exc in eg_ctx.exception.exceptions] == ["internal bug"]
 
     async def test_idat_sync_cancels_sibling_group_tasks_on_credentials_expired(self):  # pylint: disable=too-many-locals,too-many-statements
         """Cancel sibling groups when a task raises CredentialsExpiredError."""
@@ -1488,12 +1600,11 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [StubMoodleStrategy()])
 
         dm = DownloadManager([failing_dl, sibling_dl], mock_fs)
-        orch = TaskOrchestrator([[failing_dl], [sibling_dl]])
-        sync = IDATSync(repo, dm, orch, mock_fs, "Grabaciones")
+        sync = IDATSync(repo, dm, [[failing_dl], [sibling_dl]], mock_fs, "Grabaciones")
 
         events: list[SyncEvent] = []
 
-        with pytest.raises(CredentialsExpiredError):
+        with self.assertRaises(CredentialsExpiredError):
             await _consume_events(sync.sync_course(c1, Path("out")), events)
 
         assert sibling_dl.cancelled
@@ -1544,7 +1655,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             CourseRepository(mock_course_gw, mock_rec_gw, []),
             DownloadManager([dl], mock_fs),
-            TaskOrchestrator([[dl]]),
+            [[dl]],
             mock_fs,
             "Grabaciones",
         )
@@ -1560,7 +1671,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             ],
         )
         events: list[SyncEvent] = []
-        with pytest.raises(CredentialsExpiredError, match="401 discovery expired"):
+        with self.assertRaisesRegex(CredentialsExpiredError, "401 discovery expired"):
             await _consume_events(sync.sync_course(course, Path("out")), events)
 
         assert worker_cancelled
@@ -1587,7 +1698,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             CourseRepository(mock_course_gw, mock_rec_gw, []),
             DownloadManager([], mock_fs),
-            TaskOrchestrator([]),
+            [],
             mock_fs,
             "Grabaciones",
         )
@@ -1629,8 +1740,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         str_dl = StringDownloader()
         repo = CourseRepository(mock_course_gw, mock_rec_gw, [])
         dm = DownloadManager([str_dl], fs)
-        orch = TaskOrchestrator([[str_dl]])
-        sync = IDATSync(repo, dm, orch, fs, "Grabaciones")
+        sync = IDATSync(repo, dm, [[str_dl]], fs, "Grabaciones")
 
         assert await sync.list_courses() == [c_lazy]
 
@@ -1669,7 +1779,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 )
                 for e in events
             )
-            with pytest.raises(TypeError, match="progress_listener"):
+            with self.assertRaisesRegex(TypeError, "progress_listener"):
                 sync.sync_course(c_lazy, course_dir, progress_listener=None)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
     def test_sync_events_contract_log_sync_event_and_ports_cleanup(self):  # pylint: disable=too-many-locals
@@ -1725,7 +1835,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             c_err,
         ):
             assert dataclasses.is_dataclass(ev)
-            with pytest.raises(dataclasses.FrozenInstanceError):
+            with self.assertRaises(dataclasses.FrozenInstanceError):
                 setattr(ev, "course" if hasattr(ev, "course") else "path", None)
 
         with self.assertLogs("idat_sync", level="DEBUG") as cm:
@@ -1806,7 +1916,8 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             )
 
         assert not hasattr(service, "publish")
-        assert not hasattr(service.task_orchestrator, "publish")
+        assert not hasattr(service, "task_orchestrator")
+        assert len(service.downloader_groups) == 3
 
     async def test_string_downloader_writes_atomically_and_cleans_up_on_error(
         self,
@@ -1835,11 +1946,11 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
             with (
                 patch.object(Path, "replace", side_effect=OSError("disk error")),
-                pytest.raises(FileSystemError, match="disk error") as err_ctx,
+                self.assertRaisesRegex(FileSystemError, "disk error") as err_ctx,
             ):
                 await dl.download(StringContent(target, 0, ["<p>Corrupted</p>"]))
-            assert isinstance(err_ctx.value.__cause__, OSError)
-            assert err_ctx.value.operation == "write"
+            assert isinstance(err_ctx.exception.__cause__, OSError)
+            assert err_ctx.exception.operation == "write"
 
             assert target.read_text(encoding="utf-8") == "<p>Hola</p>"
             assert not part_path.exists()
@@ -1864,7 +1975,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             CourseRepository(mock_course_gw, mock_rec_gw, []),
             DownloadManager([], fs),
-            TaskOrchestrator([]),
+            [],
             fs,
             "Grabaciones",
         )
@@ -1881,15 +1992,14 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         mock_repo = MagicMock(spec=CourseRepository)
         fs = LocalFileSystemAdapter()
         dm = DownloadManager([], fs)
-        orch = TaskOrchestrator([])
 
         closer_a = AsyncMock(side_effect=RuntimeError("closer_a failed"))
         closer_b = AsyncMock()
         sync = IDATSync(
-            mock_repo, dm, orch, fs, "Grabaciones", closers=[closer_a, closer_b]
+            mock_repo, dm, [], fs, "Grabaciones", closers=[closer_a, closer_b]
         )
 
-        with pytest.raises(RuntimeError, match="closer_a failed"):
+        with self.assertRaisesRegex(RuntimeError, "closer_a failed"):
             await sync.aclose()
 
         closer_a.assert_awaited_once_with()
@@ -1900,7 +2010,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
 
         closer_c = AsyncMock()
         async with IDATSync(
-            mock_repo, dm, orch, fs, "Grabaciones", closers=[closer_c]
+            mock_repo, dm, [], fs, "Grabaciones", closers=[closer_c]
         ) as ctx_sync:
             assert isinstance(ctx_sync, IDATSync)
         closer_c.assert_awaited_once_with()
@@ -2016,7 +2126,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             repo,
             DownloadManager([moodle_dl, rec_dl], mock_fs),
-            TaskOrchestrator([[moodle_dl], [rec_dl]]),
+            [[moodle_dl], [rec_dl]],
             mock_fs,
             "Grabaciones",
         )
@@ -2112,7 +2222,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             repo,
             DownloadManager([dl], file_system=mock_fs),
-            TaskOrchestrator([[dl]]),
+            [[dl]],
             mock_fs,
             recordings_folder_name="Grabaciones",
             progress_interval=0.15,
@@ -2190,7 +2300,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         cancel_sync = IDATSync(
             repo,
             DownloadManager([hang_dl], file_system=mock_fs),
-            TaskOrchestrator([[hang_dl]]),
+            [[hang_dl]],
             mock_fs,
             recordings_folder_name="Grabaciones",
             progress_interval=0.0,
@@ -2203,7 +2313,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         cancel_task = asyncio.create_task(consume_cancel())
         await asyncio.wait_for(cancel_started.wait(), timeout=2.0)
         cancel_task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with self.assertRaises(asyncio.CancelledError):
             await cancel_task
         assert len(cancel_cbs) == 1
         cancel_cbs[0](123, 1000)
@@ -2261,9 +2371,20 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
             rec_dl = RecordingDownloader(
                 [], "idat628-my.sharepoint.com", AsyncRateLimiter(0.0)
             )
+            captured_outtmpl: list[str] = []
+
+            def _deep_ydl(opts):
+                captured_outtmpl.append(opts["outtmpl"])
+                ctx = MagicMock()
+                ctx.__enter__.return_value.download.side_effect = lambda _u: Path(
+                    opts["outtmpl"]
+                ).write_bytes(b"rec")
+                return ctx
+
             with patch(
-                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL"
-            ) as mock_ydl:
+                "idat_sync.infrastructure.downloaders.yt_dlp.YoutubeDL",
+                side_effect=_deep_ydl,
+            ):
                 await rec_dl.download(
                     RecordingContent(
                         deep_rec,
@@ -2272,8 +2393,9 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                     )
                 )
             prefix = "\\\\?\\" if platform.system() == "Windows" else ""
-            abs_deep_rec = await asyncio.to_thread(os.path.abspath, deep_rec)
-            assert mock_ydl.call_args.args[0]["outtmpl"] == f"{prefix}{abs_deep_rec}"
+            deep_part = deep_rec.with_name(f"{deep_rec.name}.part") / deep_rec.name
+            abs_deep_part = await asyncio.to_thread(os.path.abspath, deep_part)
+            assert captured_outtmpl == [f"{prefix}{abs_deep_part}"]
         finally:
             shutil.rmtree(windows_long_path(tmpdir), ignore_errors=True)
 
@@ -2323,10 +2445,10 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
                 assert progress_ticks == [(128, None)]
 
                 task.cancel()
-                with pytest.raises(asyncio.CancelledError):
+                with self.assertRaises(asyncio.CancelledError):
                     await task
 
-                with pytest.raises(DownloadCancelled):
+                with self.assertRaises(DownloadCancelled):
                     captured_hooks[0](
                         {"status": "downloading", "downloaded_bytes": 256}
                     )
@@ -2366,7 +2488,7 @@ class TestSyncPipeline(unittest.IsolatedAsyncioTestCase):  # pylint: disable=too
         sync = IDATSync(
             CourseRepository(mock_course_gw, mock_rec_gw, []),
             DownloadManager([], fs),
-            TaskOrchestrator([]),
+            [],
             fs,
             "Grabaciones",
         )
@@ -2479,7 +2601,6 @@ class TestContentPendingClassification(unittest.TestCase):
         assert ContentSyncState.NEW == "New"
         assert ContentSyncState.OUTDATED == "Outdated"
         assert not hasattr(domain_sync, "is_content_pending")
-        assert not hasattr(domain_mod, "is_content_pending")
 
     def test_download_manager_classify_content_delegates_to_filesystem_port(self):
         """Classify Content items including StringContent byte comparison."""

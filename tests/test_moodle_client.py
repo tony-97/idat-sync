@@ -6,7 +6,6 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-import pytest
 
 from idat_sync.application.ports import CredentialsExpiredError, RemoteServiceError
 from idat_sync.infrastructure.moodle_client import (
@@ -78,7 +77,7 @@ class TestAsyncRateLimiter(unittest.IsolatedAsyncioTestCase):
         limiter = AsyncRateLimiter(30.0)
         mock_monotonic.side_effect = [10.0, 11.0, 12.0]
 
-        with pytest.raises(RuntimeError, match="boom"):
+        with self.assertRaisesRegex(RuntimeError, "boom"):
             async with limiter:
                 raise RuntimeError("boom")
 
@@ -100,7 +99,7 @@ class TestAsyncRateLimiter(unittest.IsolatedAsyncioTestCase):
                 new_callable=AsyncMock,
                 side_effect=asyncio.CancelledError(),
             ),
-            pytest.raises(asyncio.CancelledError),
+            self.assertRaises(asyncio.CancelledError),
         ):
             async with limiter:
                 pass
@@ -125,9 +124,9 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
 
     def test_requires_rate_limiter_and_rejects_request_delay(self):
         """Require rate_limiter and reject legacy request_delay kwarg."""
-        with pytest.raises(TypeError, match="rate_limiter"):
+        with self.assertRaisesRegex(TypeError, "rate_limiter"):
             MoodleClient(token=self.token, base_url=self.base_url)  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
-        with pytest.raises(TypeError, match="request_delay"):
+        with self.assertRaisesRegex(TypeError, "request_delay"):
             MoodleClient(  # pylint: disable=unexpected-keyword-arg,no-value-for-parameter
                 token=self.token,
                 base_url=self.base_url,
@@ -182,11 +181,11 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         _mock_async_client(mock_client_cls, post_return=mock_response)
         client = self._make_client()
 
-        with pytest.raises(CredentialsExpiredError, match="invalidtoken") as ctx:
+        with self.assertRaisesRegex(CredentialsExpiredError, "invalidtoken") as ctx:
             await client.call_ws("any_function")
 
-        assert "Invalid token" in str(ctx.value)
-        assert ctx.value.service == "Moodle"
+        assert "Invalid token" in str(ctx.exception)
+        assert ctx.exception.service == "Moodle"
         mock_sleep.assert_not_awaited()
         assert not client.rate_limiter._next_allowed  # noqa: SLF001  # pylint: disable=protected-access
 
@@ -483,11 +482,11 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         client = self._make_client()
 
         dest = io.BytesIO()
-        with pytest.raises(CredentialsExpiredError, match="403 Forbidden") as ctx:
+        with self.assertRaisesRegex(CredentialsExpiredError, "403 Forbidden") as ctx:
             await client.download_file(
                 "https://aulavirtual.idat.edu.pe/secret.pdf", dest
             )
-        assert ctx.value.service == "Moodle"
+        assert ctx.exception.service == "Moodle"
 
         assert dest.getvalue() == b""
         mock_sleep.assert_not_awaited()
@@ -516,14 +515,14 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         stream_cm.__aexit__ = AsyncMock(return_value=None)
         _mock_async_client(mock_client_cls, stream_cm=stream_cm)
 
-        with pytest.raises(RemoteServiceError, match="HTTP 404") as err_ctx:
+        with self.assertRaisesRegex(RemoteServiceError, "HTTP 404") as err_ctx:
             await self._make_client().download_file(raw_url, io.BytesIO())
-        assert err_ctx.value.__cause__ is None
-        assert err_ctx.value.__suppress_context__ is True
-        assert err_ctx.value.service == "Moodle"
-        assert err_ctx.value.status_code == 404
-        assert err_ctx.value.is_network is False
-        assert self.token not in str(err_ctx.value)
+        assert err_ctx.exception.__cause__ is None
+        assert err_ctx.exception.__suppress_context__ is True
+        assert err_ctx.exception.service == "Moodle"
+        assert err_ctx.exception.status_code == 404
+        assert err_ctx.exception.is_network is False
+        assert self.token not in str(err_ctx.exception)
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -542,17 +541,17 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         mock_async_client.stream.side_effect = httpx.ConnectError(
             f"failed for {target_url}", request=httpx.Request("GET", target_url)
         )
-        with pytest.raises(
-            RemoteServiceError, match="Network error downloading"
+        with self.assertRaisesRegex(
+            RemoteServiceError, "Network error downloading"
         ) as net_ctx:
             await self._make_client().download_file(raw_url, io.BytesIO())
-        assert net_ctx.value.__cause__ is None
-        assert net_ctx.value.__suppress_context__ is True
-        assert net_ctx.value.service == "Moodle"
-        assert net_ctx.value.status_code is None
-        assert net_ctx.value.is_network is True
-        assert self.token not in str(net_ctx.value)
-        assert "forcedownload=1" in str(net_ctx.value)
+        assert net_ctx.exception.__cause__ is None
+        assert net_ctx.exception.__suppress_context__ is True
+        assert net_ctx.exception.service == "Moodle"
+        assert net_ctx.exception.status_code is None
+        assert net_ctx.exception.is_network is True
+        assert self.token not in str(net_ctx.exception)
+        assert "forcedownload=1" in str(net_ctx.exception)
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -580,13 +579,13 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         )
 
         dest = io.BytesIO()
-        with pytest.raises(RemoteServiceError, match="HTTP 404") as ctx:
+        with self.assertRaisesRegex(RemoteServiceError, "HTTP 404") as ctx:
             await client.download_file(raw_url, dest)
 
-        assert "secret-tok" not in str(ctx.value)
-        assert "forcedownload=1" in str(ctx.value)
-        assert ctx.value.__cause__ is None
-        assert ctx.value.__suppress_context__ is True
+        assert "secret-tok" not in str(ctx.exception)
+        assert "forcedownload=1" in str(ctx.exception)
+        assert ctx.exception.__cause__ is None
+        assert ctx.exception.__suppress_context__ is True
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -602,9 +601,9 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             mock_resp = MagicMock()
             mock_resp.status_code = status
             _mock_async_client(mock_client_cls, post_return=mock_resp)
-            with pytest.raises(CredentialsExpiredError) as ctx:
+            with self.assertRaises(CredentialsExpiredError) as ctx:
                 await client.call_ws("core_course_get_contents")
-            assert ctx.value.service == "Moodle"
+            assert ctx.exception.service == "Moodle"
 
             mock_dl = MagicMock()
             mock_dl.status_code = status
@@ -612,11 +611,11 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             stream_cm.__aenter__ = AsyncMock(return_value=mock_dl)
             stream_cm.__aexit__ = AsyncMock(return_value=None)
             _mock_async_client(mock_client_cls, stream_cm=stream_cm)
-            with pytest.raises(CredentialsExpiredError) as ctx:
+            with self.assertRaises(CredentialsExpiredError) as ctx:
                 await client.download_file(
                     "https://aulavirtual.idat.edu.pe/f", io.BytesIO()
                 )
-            assert ctx.value.service == "Moodle"
+            assert ctx.exception.service == "Moodle"
 
         token_resp = MagicMock()
         token_resp.status_code = 200
@@ -626,9 +625,9 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             "message": "Invalid token",
         }
         _mock_async_client(mock_client_cls, post_return=token_resp)
-        with pytest.raises(CredentialsExpiredError) as ctx:
+        with self.assertRaises(CredentialsExpiredError) as ctx:
             await client.call_ws("core_course_get_contents")
-        assert ctx.value.service == "Moodle"
+        assert ctx.exception.service == "Moodle"
 
         other_resp = MagicMock()
         other_resp.status_code = 200
@@ -638,12 +637,12 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
             "message": "DB error",
         }
         _mock_async_client(mock_client_cls, post_return=other_resp)
-        with pytest.raises(RemoteServiceError, match="dmlreadexception") as ctx:
+        with self.assertRaisesRegex(RemoteServiceError, "dmlreadexception") as ctx:
             await client.call_ws("core_course_get_contents")
-        assert not isinstance(ctx.value, CredentialsExpiredError)
-        assert ctx.value.service == "Moodle"
-        assert ctx.value.status_code is None
-        assert ctx.value.is_network is False
+        assert not isinstance(ctx.exception, CredentialsExpiredError)
+        assert ctx.exception.service == "Moodle"
+        assert ctx.exception.status_code is None
+        assert ctx.exception.is_network is False
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -661,36 +660,36 @@ class TestMoodleClient(unittest.IsolatedAsyncioTestCase):
         _mock_async_client(
             mock_client_cls, post_return=httpx.Response(500, request=req)
         )
-        with pytest.raises(RemoteServiceError, match="HTTP 500") as http_ctx:
+        with self.assertRaisesRegex(RemoteServiceError, "HTTP 500") as http_ctx:
             await client.call_ws("core_course_get_contents")
-        assert "developer.mozilla.org" not in str(http_ctx.value)
-        assert isinstance(http_ctx.value.__cause__, httpx.HTTPStatusError)
-        assert http_ctx.value.service == "Moodle"
-        assert http_ctx.value.status_code == 500
-        assert http_ctx.value.is_network is False
+        assert "developer.mozilla.org" not in str(http_ctx.exception)
+        assert isinstance(http_ctx.exception.__cause__, httpx.HTTPStatusError)
+        assert http_ctx.exception.service == "Moodle"
+        assert http_ctx.exception.status_code == 500
+        assert http_ctx.exception.is_network is False
 
         mock_post_err = _mock_async_client(mock_client_cls)
         mock_post_err.post = AsyncMock(
             side_effect=httpx.ConnectError("timed out", request=req)
         )
-        with pytest.raises(
-            RemoteServiceError, match="Moodle web service request failed"
+        with self.assertRaisesRegex(
+            RemoteServiceError, "Moodle web service request failed"
         ) as net_ctx:
             await client.call_ws("core_course_get_contents")
-        assert net_ctx.value.service == "Moodle"
-        assert net_ctx.value.status_code is None
-        assert net_ctx.value.is_network is True
+        assert net_ctx.exception.service == "Moodle"
+        assert net_ctx.exception.status_code is None
+        assert net_ctx.exception.is_network is True
 
         bad_json_resp = MagicMock(status_code=200)
         bad_json_resp.json.side_effect = ValueError("bad json")
         _mock_async_client(mock_client_cls, post_return=bad_json_resp)
-        with pytest.raises(
-            RemoteServiceError, match="Invalid JSON response from Moodle web service"
+        with self.assertRaisesRegex(
+            RemoteServiceError, "Invalid JSON response from Moodle web service"
         ) as json_ctx:
             await client.call_ws("core_course_get_contents")
-        assert json_ctx.value.service == "Moodle"
-        assert json_ctx.value.status_code is None
-        assert json_ctx.value.is_network is False
+        assert json_ctx.exception.service == "Moodle"
+        assert json_ctx.exception.status_code is None
+        assert json_ctx.exception.is_network is False
         mock_sleep.assert_not_awaited()
 
     @patch(
@@ -735,9 +734,9 @@ class TestMoodleTokenClient(unittest.TestCase):
 
     def test_requires_base_url_and_rejects_request_delay(self):
         """Require base_url and reject unexpected request_delay kwarg."""
-        with pytest.raises(TypeError, match="base_url"):
+        with self.assertRaisesRegex(TypeError, "base_url"):
             MoodleTokenClient()  # type: ignore[call-arg]  # pylint: disable=no-value-for-parameter
-        with pytest.raises(TypeError, match="request_delay"):
+        with self.assertRaisesRegex(TypeError, "request_delay"):
             MoodleTokenClient("https://lms.example.edu", request_delay=1.0)  # type: ignore[call-arg]  # pylint: disable=unexpected-keyword-arg
 
     @patch("idat_sync.infrastructure.moodle_client.httpx.AsyncClient")
@@ -787,39 +786,39 @@ class TestMoodleTokenClient(unittest.TestCase):
             response=MagicMock(status_code=500),
         )
         mock_async_client.post = AsyncMock(return_value=status_resp)
-        with pytest.raises(
-            RemoteServiceError, match=r"HTTP 500 from Moodle login endpoint\."
+        with self.assertRaisesRegex(
+            RemoteServiceError, r"HTTP 500 from Moodle login endpoint\."
         ) as status_ctx:
             asyncio.run(client.request_token("jdoe", "pw"))
-        assert isinstance(status_ctx.value.__cause__, httpx.HTTPStatusError)
-        assert status_ctx.value.service == "Moodle"
-        assert status_ctx.value.status_code == 500
-        assert status_ctx.value.is_network is False
+        assert isinstance(status_ctx.exception.__cause__, httpx.HTTPStatusError)
+        assert status_ctx.exception.service == "Moodle"
+        assert status_ctx.exception.status_code == 500
+        assert status_ctx.exception.is_network is False
 
         mock_async_client.post = AsyncMock(
             side_effect=httpx.ConnectError("dns failure", request=MagicMock())
         )
-        with pytest.raises(
-            RemoteServiceError, match="Could not connect to Moodle:"
+        with self.assertRaisesRegex(
+            RemoteServiceError, "Could not connect to Moodle:"
         ) as req_ctx:
             asyncio.run(client.request_token("jdoe", "pw"))
-        assert isinstance(req_ctx.value.__cause__, httpx.RequestError)
-        assert req_ctx.value.service == "Moodle"
-        assert req_ctx.value.status_code is None
-        assert req_ctx.value.is_network is True
+        assert isinstance(req_ctx.exception.__cause__, httpx.RequestError)
+        assert req_ctx.exception.service == "Moodle"
+        assert req_ctx.exception.status_code is None
+        assert req_ctx.exception.is_network is True
 
         bad_json_resp = MagicMock()
         bad_json_resp.json.side_effect = ValueError("not json")
         mock_async_client.post = AsyncMock(return_value=bad_json_resp)
-        with pytest.raises(
+        with self.assertRaisesRegex(
             RemoteServiceError,
-            match=r"Invalid JSON response from Moodle login endpoint\.",
+            r"Invalid JSON response from Moodle login endpoint\.",
         ) as json_ctx:
             asyncio.run(client.request_token("jdoe", "pw"))
-        assert isinstance(json_ctx.value.__cause__, ValueError)
-        assert json_ctx.value.service == "Moodle"
-        assert json_ctx.value.status_code is None
-        assert json_ctx.value.is_network is False
+        assert isinstance(json_ctx.exception.__cause__, ValueError)
+        assert json_ctx.exception.service == "Moodle"
+        assert json_ctx.exception.status_code is None
+        assert json_ctx.exception.is_network is False
 
 
 if __name__ == "__main__":

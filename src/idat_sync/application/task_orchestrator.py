@@ -1,13 +1,9 @@
-"""Rate-limit-group task orchestrator and streaming TaskChannel."""
+"""Streaming TaskChannel grouped by upstream rate-limit boundaries."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
 from idat_sync.application.ports import Downloader, DownloadTask
-
-
-async def _default_run_task(task: DownloadTask) -> None:
-    await task.download()
 
 
 def _make_queue_worker(
@@ -51,23 +47,10 @@ class TaskChannel:
 
     def create_workers(
         self,
-        run_task: Callable[[DownloadTask], Awaitable[None]] | None = None,
+        run_task: Callable[[DownloadTask], Awaitable[None]],
     ) -> list[Coroutine[object, object, None]]:
         """Create one sequential FIFO worker coroutine per downloader group."""
-        runner = run_task or _default_run_task
-        return [_make_queue_worker(queue, runner) for queue in self._queues]
+        return [_make_queue_worker(queue, run_task) for queue in self._queues]
 
 
-class TaskOrchestrator:  # pylint: disable=too-few-public-methods
-    """Factory creating per-run TaskChannels grouped by upstream rate limits."""
-
-    def __init__(self, task_group: list[list[Downloader]]) -> None:
-        """Initialize the orchestrator with ordered downloader groups."""
-        self.task_group = task_group
-
-    def create_channel(self) -> TaskChannel:
-        """Create a fresh TaskChannel for a single synchronization run."""
-        return TaskChannel(self.task_group)
-
-
-__all__ = ["TaskChannel", "TaskOrchestrator"]
+__all__ = ["TaskChannel"]

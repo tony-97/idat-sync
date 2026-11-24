@@ -10,8 +10,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import urlparse
 
-import pytest
-
 from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.ports import (
     AuthenticationError,
@@ -282,7 +280,7 @@ class TestDeveloperScriptsAndGitignore(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(module, "JsonCredentialStore", return_value=mock_store),
             patch.object(module, "MoodleClient", return_value=fail_client),
-            pytest.raises(RuntimeError, match="ws boom"),
+            self.assertRaisesRegex(RuntimeError, "ws boom"),
         ):
             await module.main()
         fail_client.__aenter__.assert_awaited_once_with()

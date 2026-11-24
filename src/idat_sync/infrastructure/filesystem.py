@@ -35,10 +35,10 @@ class LocalFileSystemAdapter(FileSystemPort):
         try:
             if os_root.exists():
                 for path in os_root.rglob("*"):
-                    if path.is_file() and not path.name.endswith(".part"):
-                        local_map[caller_root / path.relative_to(os_root)] = int(
-                            path.stat().st_mtime
-                        )
+                    if path.is_file():
+                        rel = path.relative_to(os_root)
+                        if not any(part.endswith(".part") for part in rel.parts):
+                            local_map[caller_root / rel] = int(path.stat().st_mtime)
         except OSError as exc:
             raise FileSystemError(
                 f"Could not scan directory '{root_dir}': {exc}"

@@ -232,9 +232,9 @@ class MainApp:
         if sys.platform == "win32":
             os.startfile(str(path))  # noqa: S606
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(path)])  # noqa: S603, S607
+            subprocess.Popen(["open", str(path)])  # noqa: S603, S607  # pylint: disable=consider-using-with
         else:
-            subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607
+            subprocess.Popen(["xdg-open", str(path)])  # noqa: S603, S607  # pylint: disable=consider-using-with
 
     def switch_to_sync(self) -> None:
         """Switch the active view to SyncFrame when Credentials exist."""

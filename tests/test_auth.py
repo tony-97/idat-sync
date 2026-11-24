@@ -14,8 +14,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 import idat_sync.main as main_module
 import idat_sync.ui as ui_pkg
 import idat_sync.ui.app as app_module
@@ -212,7 +210,7 @@ class TestAuthService(unittest.TestCase):
                     sharepoint_auth=FakeSharepointAuthPort(storage_state=sp_state),
                     credential_store=store,
                 )
-                with pytest.raises(AuthenticationError):
+                with self.assertRaises(AuthenticationError):
                     asyncio.run(service.login("jdoe", "secret", _mfa_code))
                 assert store.stored is None
 
@@ -222,7 +220,7 @@ class TestAuthService(unittest.TestCase):
             sharepoint_auth=FakeSharepointAuthPort(storage_state=state),
             credential_store=failing_store,
         )
-        with pytest.raises(CredentialStoreError):
+        with self.assertRaises(CredentialStoreError):
             asyncio.run(service.login("jdoe", "secret", _mfa_code))
 
     def test_logout_is_authenticated_and_get_credentials_delegate_to_store(self):
@@ -259,17 +257,9 @@ class TestAuthService(unittest.TestCase):
                 "get_mfa_code",
             ]
 
-    def test_authenticate_strips_domain_and_awaits_moodle_port(self):
-        """Strip email domain before delegating authenticate() to MoodleTokenPort."""
-        moodle = FakeMoodleTokenPort(token="tok-auth")  # noqa: S106
-        service = AuthService(
-            moodle_auth=moodle,
-            sharepoint_auth=FakeSharepointAuthPort(),
-            credential_store=InMemoryCredentialStore(),
-        )
-        token = asyncio.run(service.authenticate("jdoe@custom.edu", "secret"))
-        assert token == "tok-auth"  # noqa: S105
-        assert moodle.calls == [("jdoe", "secret")]
+    def test_auth_service_omits_authenticate_wrapper(self):
+        """Ensure AuthService does not expose the removed authenticate() wrapper."""
+        assert not hasattr(AuthService, "authenticate")
 
     def test_login_cancels_sharepoint_task_on_moodle_error(self):
         """Cancel sibling SharePoint task and unwrap IDATSyncError on error."""
@@ -313,7 +303,7 @@ class TestAuthService(unittest.TestCase):
                 credential_store=store,
             )
 
-            with pytest.raises(RemoteServiceError, match="moodle HTTP 500"):
+            with self.assertRaisesRegex(RemoteServiceError, "moodle HTTP 500"):
                 await service.login("jdoe", "secret", _mfa_code)
             assert sp_cancelled == [True]
             assert sp_cleaned_up == [True]
@@ -358,7 +348,7 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=SlowSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
-            with pytest.raises(AuthenticationError, match="invalid moodle creds"):
+            with self.assertRaisesRegex(AuthenticationError, "invalid moodle creds"):
                 await service.login("jdoe", "bad", _mfa_code)
             assert sp_cancelled == [True]
             assert store.stored is None
@@ -401,7 +391,7 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=RejectedSharepointPort(),  # type: ignore[arg-type]
                 credential_store=store,
             )
-            with pytest.raises(AuthenticationError, match="blank MFA"):
+            with self.assertRaisesRegex(AuthenticationError, "blank MFA"):
                 await service.login("jdoe", "bad", _mfa_code)
             assert moodle_cancelled == [True]
             assert store.stored is None
@@ -428,9 +418,9 @@ class TestAuthService(unittest.TestCase):
                 sharepoint_auth=CrashingSharepointPort(),  # type: ignore[arg-type]
                 credential_store=InMemoryCredentialStore(),
             )
-            with pytest.raises(ExceptionGroup) as ctx:
+            with self.assertRaises(ExceptionGroup) as ctx:
                 await service.login("jdoe", "bad", _mfa_code)
-            assert [str(e) for e in ctx.value.exceptions] == ["sp crash"]
+            assert [str(e) for e in ctx.exception.exceptions] == ["sp crash"]
 
         asyncio.run(exercise_sharepoint_rejected())
         asyncio.run(exercise_mixed_error())
@@ -513,12 +503,12 @@ class TestJsonCredentialStore(unittest.TestCase):
                 self.assertLogs(
                     "idat_sync.infrastructure.credential_store", level="ERROR"
                 ) as cm,
-                pytest.raises(
-                    CredentialStoreError, match="credentials file"
+                self.assertRaisesRegex(
+                    CredentialStoreError, "credentials file"
                 ) as save_ctx,
             ):
                 store.save(creds)
-            assert isinstance(save_ctx.value.__cause__, OSError)
+            assert isinstance(save_ctx.exception.__cause__, OSError)
             assert "credentials file" in " ".join(cm.output)
 
             clear_target = Path(tmpdir) / "locked.json"
@@ -529,12 +519,12 @@ class TestJsonCredentialStore(unittest.TestCase):
                 self.assertLogs(
                     "idat_sync.infrastructure.credential_store", level="ERROR"
                 ) as clear_cm,
-                pytest.raises(
-                    CredentialStoreError, match="credentials file"
+                self.assertRaisesRegex(
+                    CredentialStoreError, "credentials file"
                 ) as clear_ctx,
             ):
                 clear_store.clear()
-            assert isinstance(clear_ctx.value.__cause__, OSError)
+            assert isinstance(clear_ctx.exception.__cause__, OSError)
             assert "credentials file" in " ".join(clear_cm.output)
 
     def test_save_restricts_credentials_file_permissions_to_owner(self):
@@ -572,7 +562,7 @@ class TestJsonCredentialStore(unittest.TestCase):
                 self.assertLogs(
                     "idat_sync.infrastructure.credential_store", level="ERROR"
                 ),
-                pytest.raises(CredentialStoreError),
+                self.assertRaises(CredentialStoreError),
             ):
                 store.save(updated)
 
@@ -777,7 +767,7 @@ class TestLoginFrame(unittest.TestCase):
         assert auth_default.reason == "credentials"
         auth_mfa = AuthenticationError("mfa", reason="mfa")
         assert auth_mfa.reason == "mfa"
-        with pytest.raises(TypeError):
+        with self.assertRaises(TypeError):
             _ = AuthenticationError("msg", "mfa")  # type: ignore[misc]  # pylint: disable=too-many-function-args
 
         exp_default = CredentialsExpiredError("expired")
@@ -845,7 +835,7 @@ class TestLoginFrame(unittest.TestCase):
             await asyncio.sleep(0)
             assert frame.mfa_open is True
             task3.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            with self.assertRaises(asyncio.CancelledError):
                 await task3
             assert frame.mfa_open is False
 
@@ -889,7 +879,7 @@ class _SyncStubMaster:
 class TestSyncFrame(unittest.TestCase):
     """Tests for pure-Python SyncFrame selection, sync progress, and cancellation."""
 
-    def test_sync_frame_open_file_handles_ready_non_ready_missing_and_os_error(self):
+    def test_sync_frame_open_file_handles_ready_non_ready_missing_and_os_error(self):  # pylint: disable=too-many-locals,too-many-statements
         """Open existing ready files even mid-sync, ignore non-ready, surface errors."""
         with tempfile.TemporaryDirectory() as tmpdir:
             course_dir = Path(tmpdir) / "Course One"
@@ -929,14 +919,14 @@ class TestSyncFrame(unittest.TestCase):
                 synced_file.resolve(),
                 completed_file.resolve(),
             ]
-            assert frame.error == ""
+            assert not frame.error
             assert frame.status == "Downloading other.pdf..."
 
             # Non-ready row is silently ignored
             pushes_before = master.push_count
             frame.open_file("file:1:S1/new.pdf")
             assert len(master.opened_paths) == 2
-            assert frame.error == ""
+            assert not frame.error
             assert master.push_count == pushes_before
 
             # Missing file logs error, sets frame.error, preserves status & row states
@@ -1254,7 +1244,7 @@ class TestSyncFrame(unittest.TestCase):
                 failing_sync = MagicMock(spec=IDATSync)
                 failing_sync.aclose = AsyncMock(side_effect=RuntimeError("close boom"))
                 frame.idat_sync = failing_sync
-                with pytest.raises(RuntimeError, match="close boom"):
+                with self.assertRaisesRegex(RuntimeError, "close boom"):
                     await frame.do_logout()
                 assert frame.idat_sync is None
                 assert master.switched_to_login == 1
@@ -1304,7 +1294,7 @@ class TestSyncFrame(unittest.TestCase):
                     )
                     app._frame = active_frame  # noqa: SLF001  # type: ignore[attr-defined]  # pylint: disable=protected-access
 
-                    with pytest.raises(RuntimeError, match="close error"):
+                    with self.assertRaisesRegex(RuntimeError, "close error"):
                         await app.on_close()
                     await app.on_close()
 
@@ -1422,7 +1412,7 @@ class TestSyncFrame(unittest.TestCase):
                     await app.on_close()
                     assert not frame.mfa_open
                     mock_window.destroy.assert_called_once_with()
-                    with pytest.raises(asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
                         await login_task
                 finally:
                     app.loop.close()
@@ -1591,7 +1581,7 @@ class TestSyncFrame(unittest.TestCase):
                     await asyncio.wait_for(load_started.wait(), timeout=2.0)
                     await frame.aclose()
                     assert load_cancelled.is_set()
-                    with pytest.raises(asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
                         await load_task
 
         async def exercise_sync_cancel() -> None:
@@ -1626,7 +1616,7 @@ class TestSyncFrame(unittest.TestCase):
                 await frame.aclose()
                 assert sync_cancelled.is_set()
                 mock_service.aclose.assert_awaited_once_with()
-                with pytest.raises(asyncio.CancelledError):
+                with self.assertRaises(asyncio.CancelledError):
                     await sync_task
 
         asyncio.run(exercise_load_cancel())
@@ -1915,7 +1905,7 @@ class TestSyncFrame(unittest.TestCase):
 
         asyncio.run(exercise())
 
-    def test_sync_frame_resets_activity_and_status_when_syncing_new_course(self):
+    def test_sync_frame_resets_activity_and_status_when_syncing_new_course(self):  # pylint: disable=too-many-statements
         """Reset activity and status immediately when syncing a new course."""
         creds: Credentials = {
             "token": "tok",
@@ -1926,7 +1916,7 @@ class TestSyncFrame(unittest.TestCase):
             Course(id=2, name="Course Two", category="IV.01.2026-III"),
         )
 
-        async def exercise() -> None:
+        async def exercise() -> None:  # pylint: disable=too-many-statements
             with tempfile.TemporaryDirectory() as tmpdir:
                 cfg = SyncConfig(session_file=Path(tmpdir) / "session.json")
                 snapshots: list[dict[str, object]] = []
@@ -2029,7 +2019,7 @@ class TestAppFrameBusy(unittest.TestCase):
                 async with frame._busy(flags.append):  # noqa: SLF001  # pylint: disable=protected-access
                     raise RuntimeError("boom")
 
-            with pytest.raises(RuntimeError, match="boom"):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
                 await fail_while_busy()
 
             assert flags == [True, False, True, False]
@@ -2052,7 +2042,7 @@ class TestAppFrameBusy(unittest.TestCase):
             await frame.aclose()
             assert cancelled.is_set()
             assert frame._active_task is None  # noqa: SLF001  # pylint: disable=protected-access
-            with pytest.raises(asyncio.CancelledError):
+            with self.assertRaises(asyncio.CancelledError):
                 await task
 
         asyncio.run(exercise())
@@ -2356,7 +2346,7 @@ class TestCourseTree(unittest.TestCase):
         assert act2["total_pending"] == 1
         assert [item["course_id"] for item in act2["queued"]] == [2]
         assert act2["finished"] == []
-        assert act2["skipped"] == 0
+        assert not act2["skipped"]
         c1_row = next(r for r in ct.to_dict() if r["id"] == 1)
         assert len(c1_row["children"]) == 1
 
@@ -2565,7 +2555,7 @@ class TestMainAppOpenPath(unittest.TestCase):
         """Forward _JsApi.open_file(file_id) to SyncFrame.open_file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             app = self._make_app(tmpdir)
-            api = app_module._JsApi(app)  # noqa: SLF001
+            api = app_module._JsApi(app)  # noqa: SLF001  # pylint: disable=protected-access
             assert isinstance(app.active_frame, SyncFrame)
             with patch.object(app.active_frame, "open_file") as mock_open:
                 api.open_file("file:1:S1/a.pdf")

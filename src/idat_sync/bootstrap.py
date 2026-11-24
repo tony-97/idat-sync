@@ -8,7 +8,6 @@ from idat_sync.application.course_repository import CourseRepository
 from idat_sync.application.download_manager import DownloadManager
 from idat_sync.application.ports import Credentials, Downloader
 from idat_sync.application.sync_service import IDATSync
-from idat_sync.application.task_orchestrator import TaskOrchestrator
 from idat_sync.config import SyncConfig, is_android
 from idat_sync.infrastructure.credential_store import JsonCredentialStore
 from idat_sync.infrastructure.downloaders import (
@@ -115,7 +114,7 @@ async def create_sync_service(
             [d for group in download_tasks_group for d in group],
             file_system=file_system,
         ),
-        task_orchestrator=TaskOrchestrator(download_tasks_group),
+        downloader_groups=download_tasks_group,
         file_system=file_system,
         recordings_folder_name=config.recordings_folder_name,
         closers=[moodle_client.aclose, sharepoint_raw_client.aclose],

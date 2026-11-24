@@ -35,11 +35,6 @@ class AuthService:
         self.sharepoint_auth = sharepoint_auth
         self.credential_store = credential_store
 
-    async def authenticate(self, username: str, password: str) -> str:
-        """Authenticate against Moodle and return a web service token."""
-        moodle_username = username.split("@", 1)[0]
-        return await self.moodle_auth.fetch_token(moodle_username, password)
-
     async def login(
         self,
         username: str,
@@ -47,11 +42,12 @@ class AuthService:
         get_mfa_code: Callable[[], Awaitable[str]],
     ) -> None:
         """Log in to Moodle and SharePoint concurrently and persist Credentials."""
+        moodle_username = username.split("@", 1)[0]
         idat_error_group: ExceptionGroup[IDATSyncError] | None = None
         try:
             async with asyncio.TaskGroup() as tg:
                 moodle_task = tg.create_task(
-                    self.authenticate(username, password),
+                    self.moodle_auth.fetch_token(moodle_username, password),
                     name="moodle_auth",
                 )
                 sharepoint_task = tg.create_task(
@@ -71,12 +67,14 @@ class AuthService:
                 "Authentication failed: empty token or SharePoint storage state."
             )
 
-        credentials = Credentials(
-            sharepoint_storage_state=sharepoint_storage_state,
-            token=token,
+        await asyncio.to_thread(
+            self.credential_store.save,
+            Credentials(
+                sharepoint_storage_state=sharepoint_storage_state,
+                token=token,
+            ),
         )
-        await asyncio.to_thread(self.credential_store.save, credentials)
-        _logger.info("User '%s' is now logged in.", username.split("@", 1)[0])
+        _logger.info("User '%s' is now logged in.", moodle_username)
 
     def logout(self) -> None:
         """Clear persisted Credentials."""

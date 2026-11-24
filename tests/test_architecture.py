@@ -1,6 +1,11 @@
 """Architectural boundary tests verifying layer import rules."""
 
 import ast
+import json
+import mimetypes
+import os
+import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -80,7 +85,7 @@ class TestArchitectureBoundaries(unittest.TestCase):
         assert violations == [], f"Forbidden httpx imports: {violations}"
 
     def test_task_orchestrator_has_no_events_or_threading_imports(self):
-        """Ensure TaskOrchestrator stays decoupled from events and threading."""
+        """Ensure task_orchestrator.py stays decoupled from events and threading."""
         src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
         orchestrator_path = src_root / "application" / "task_orchestrator.py"
         violations = [
@@ -171,6 +176,153 @@ class TestArchitectureBoundaries(unittest.TestCase):
             if matches_prefix(name, ("webview",))
         ]
         assert not violations, f"webview imported outside allowed modules: {violations}"
+
+    def test_layer_init_files_have_zero_imports(self):
+        """Ensure layer __init__.py files contain only module docstrings, no imports."""
+        src_root = Path(__file__).resolve().parent.parent / "src" / "idat_sync"
+        violations: list[str] = []
+        for layer in ("application", "domain", "infrastructure"):
+            init_file = src_root / layer / "__init__.py"
+            tree = ast.parse(
+                init_file.read_text(encoding="utf-8"), filename=str(init_file)
+            )
+            is_docstring_only = (
+                len(tree.body) == 1
+                and isinstance(tree.body[0], ast.Expr)
+                and isinstance(tree.body[0].value, ast.Constant)
+                and isinstance(tree.body[0].value.value, str)
+            )
+            if not is_docstring_only:
+                violations.append(f"{layer}/__init__.py")
+        assert not violations, (
+            f"Layer __init__.py files must contain only a docstring: {violations}"
+        )
+
+    def test_colab_notebook_setup_cell_commands(self):
+        """Verify colab.ipynb cell 1 installs weasyprint via pip and apt uses -y."""
+        project_root = Path(__file__).resolve().parent.parent
+        notebook = json.loads(
+            (project_root / "colab.ipynb").read_text(encoding="utf-8")
+        )
+        code_cells = [c for c in notebook["cells"] if c.get("cell_type") == "code"]
+        cell1_lines = [line.strip() for line in code_cells[0]["source"]]
+        pip_lines = [line for line in cell1_lines if line.startswith("%pip install")]
+        assert pip_lines
+        assert "weasyprint" in pip_lines[0]
+        assert not any("apt" in line and "weasyprint" in line for line in cell1_lines)
+        apt_install_lines = [
+            line
+            for line in cell1_lines
+            if re.search(r"\bapt(?:-get)?\s+install\b", line)
+        ]
+        assert apt_install_lines
+        for line in apt_install_lines:
+            assert " -y " in line or line.endswith(" -y"), f"Missing -y: {line}"
+
+    def test_colab_notebook_two_pass_postprocessing(self):  # pylint: disable=too-many-locals
+        """Verify colab.ipynb cell 3 updates stale outputs and deduplicates links."""
+        project_root = Path(__file__).resolve().parent.parent
+        notebook = json.loads(
+            (project_root / "colab.ipynb").read_text(encoding="utf-8")
+        )
+        code_cells = [c for c in notebook["cells"] if c.get("cell_type") == "code"]
+        cell3_source = "".join(code_cells[2]["source"])
+        tree = ast.parse(cell3_source, filename="colab.ipynb:cell3")
+        fn_node = next(
+            (
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "postprocess_course_folder"
+            ),
+            None,
+        )
+        assert fn_node is not None, (
+            "colab.ipynb cell 3 must define postprocess_course_folder"
+        )
+        converted_html: list[str] = []
+        converted_video: list[str] = []
+
+        def _fake_html_to_pdf(path: str) -> str:
+            converted_html.append(Path(path).name)
+            out = Path(path).with_suffix(".pdf")
+            out.write_bytes(b"new-pdf")
+            return str(out)
+
+        def _fake_video_to_mp3(path: str) -> str:
+            converted_video.append(Path(path).name)
+            out = Path(path).with_suffix(".mp3")
+            out.write_bytes(b"new-mp3")
+            return str(out)
+
+        namespace: dict[str, object] = {
+            "os": os,
+            "mimetypes": mimetypes,
+            "html_to_pdf": _fake_html_to_pdf,
+            "video_to_mp3": _fake_video_to_mp3,
+            "get_share_link": lambda p: f"link:{Path(p).name}",
+        }
+        exec(  # noqa: S102  # pylint: disable=exec-used
+            compile(ast.Module(body=[fn_node], type_ignores=[]), "colab", "exec"),
+            namespace,
+        )
+        postprocess = namespace["postprocess_course_folder"]
+        assert callable(postprocess)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            mtimes = {
+                "stale.pdf": 100,
+                "stale.html": 200,
+                "fresh.html": 100,
+                "fresh.pdf": 200,
+                "stale.mp3": 100,
+                "stale.mp4": 200,
+                "fresh.mp4": 100,
+                "fresh.mp3": 200,
+                "notes.txt": 100,
+            }
+            for name, ts in mtimes.items():
+                p = root / name
+                p.write_bytes(b"x")
+                os.utime(p, (ts, ts))
+
+            recordings, links = postprocess(str(root))
+
+        assert converted_html == ["stale.html"]
+        assert converted_video == ["stale.mp4"]
+        assert sorted(recordings) == ["link:fresh.mp3", "link:stale.mp3"]
+        assert sorted(links) == ["link:fresh.pdf", "link:notes.txt", "link:stale.pdf"]
+
+    def test_ci_workflow_gates_builds_behind_check_job(self):
+        """Verify build_and_deploy.yml triggers, check job, and build gating."""
+        project_root = Path(__file__).resolve().parent.parent
+        workflow = (
+            project_root / ".github" / "workflows" / "build_and_deploy.yml"
+        ).read_text(encoding="utf-8")
+        assert "pull_request:" in workflow
+        assert "branches: [main]" in workflow or "- main" in workflow
+        assert "workflow_dispatch:" in workflow
+        assert re.search(r"(?m)^  check:\s*$", workflow)
+        assert "python -m unittest" in workflow
+        assert "ruff check ." in workflow
+        assert "pylint src tests" in workflow
+        expected_if = (
+            "if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'"
+        )
+        assert workflow.count("needs: check") >= 2
+        assert workflow.count(expected_if) >= 2
+
+    def test_tests_have_zero_pytest_imports(self):
+        """Ensure all tests/*.py use stdlib unittest without importing pytest."""
+        tests_root = Path(__file__).resolve().parent
+        violations = [
+            f"{py_file.name}:{lineno} imports {name}"
+            for py_file in sorted(tests_root.glob("*.py"))
+            for lineno, name in iter_module_imports(py_file)
+            if matches_prefix(name, ("pytest",))
+        ]
+        assert not violations, f"Forbidden pytest imports in tests/: {violations}"
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ async def create_sync_service(credentials: Credentials, config: SyncConfig) -> I
     return IDATSync(
         course_repository,
         download_manager,
-        task_orchestrator,
+        downloader_groups,
         file_system,
         recordings_folder_name=config.recordings_folder_name,
     )
@@ -32,7 +32,7 @@ repo = CourseRepository(
 ```
 
 - **Single composition root**: Only `create_sync_service(credentials: Credentials, config: SyncConfig) -> IDATSync` and `create_auth_service(config: SyncConfig) -> AuthService` in `bootstrap.py` instantiate concrete clients, adapters, credential stores, filesystem adapters, and downloader groups from `Credentials` and `SyncConfig`.
-- **Pure constructors**: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync`, and `*Adapter` classes must only store injected dependencies in `__init__` — never instantiate clients from raw tokens/cookies or perform network/disk I/O in `__init__`.
+- **Pure constructors**: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskChannel`, `IDATSync`, and `*Adapter` classes must only store injected dependencies in `__init__` — never instantiate clients from raw tokens/cookies or perform network/disk I/O in `__init__`.
 - **Confirmed test seams**:
   - `idat_sync.config` (`SyncConfig`, `load_config`, `is_android`, `WEBVIEW_USER_AGENT`): unit-tested directly against normalization, validation, and precedence rules.
   - `bootstrap.create_sync_service`: tested by calling the real factory with `SyncConfig` while patching only external HTTP/SDK transport (`ClientContext`).
@@ -43,5 +43,5 @@ repo = CourseRepository(
   - `JsonCredentialStore` tests: tested against real temporary files (`tempfile.TemporaryDirectory()` and unreadable-file `PermissionError`).
   - `*Adapter` tests (`MoodleAdapter`, `MoodleTokenAdapter`, `SharepointApiAdapter`): inject `MagicMock(spec=*Client)` and assert outputs are `domain/` dataclasses (`Course`, `CourseSection`, `CourseModule`, `RecordingContent`) or port return values, never raw dicts or SDK objects.
   - Domain seam: `ContentSyncState`, `classify_content`, `get_course_term`, `get_in_progress_course_ids`, `PathDisambiguator`, `safe_filename`, `Content.in_folder` tested purely in memory without disk I/O.
-  - Application orchestration seam: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskOrchestrator`, `IDATSync` tested with fake ports and stubs.
+  - Application orchestration seam: `AuthService`, `CourseRepository`, `DownloadManager`, `TaskChannel`, `IDATSync` tested with fake ports and stubs.
   - Architecture boundary seam: AST inspection verifying zero forbidden imports in `domain/` and `application/`, zero `idat_sync.infrastructure` imports in `ui/`, zero `idat_sync.utils` and `idat_sync.infrastructure.auth` imports (`src/idat_sync/utils.py` and `src/idat_sync/infrastructure/auth.py` removed), zero `playwright` and `tkinter` imports across `src/idat_sync/`, and `webview` isolated to `ui/app.py` and `infrastructure/sharepoint_auth.py`.
