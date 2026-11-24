@@ -194,7 +194,7 @@ jobs:
       - name: Install Buildozer and system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev automake ccache
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool libltdl-dev pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev automake ccache
           pip install buildozer cython
 
       - name: Cache Buildozer
